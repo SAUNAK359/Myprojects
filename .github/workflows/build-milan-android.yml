@@ -1,30 +1,14 @@
-name: Build Milan Android
+name: Milan Runner Probe
 on:
   push:
     branches: [milan-android-build]
-  workflow_dispatch:
 jobs:
-  apk:
-    runs-on: ubuntu-latest
+  probe:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-      - uses: android-actions/setup-android@v3
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.11.1'
-      - name: Build APK
-        working-directory: milan-android
-        run: gradle --no-daemon :app:assembleDebug
-      - name: Package APK
+      - name: Probe runner
         run: |
-          mkdir -p out
-          cp milan-android/app/build/outputs/apk/debug/app-debug.apk out/Milan-Android-8.0.0.apk
-          sha256sum out/Milan-Android-8.0.0.apk > out/SHA256.txt
-      - uses: actions/upload-artifact@v4
-        with:
-          name: Milan-Android-8.0.0
-          path: out/
+          echo RUNNER_OK
+          uname -a
+          java -version || true
