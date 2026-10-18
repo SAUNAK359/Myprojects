@@ -366,7 +366,7 @@ class MainActivity : AppCompatActivity() {
             panel.addView(label("Manual ISO/shutter is not exposed by this camera HAL. Auto/EV/focus/zoom remain available."))
         }
 
-        MaterialAlertDialogBuilder(this, R.style.ThemeOverlay_MaterialComponents_MaterialAlertDialog)
+        MaterialAlertDialogBuilder(this)
             .setTitle("PRO SENSOR CONTROL")
             .setView(panel)
             .setPositiveButton("DONE", null)
