@@ -149,20 +149,36 @@ workflows:
           set -euo pipefail
           APK="$CM_BUILD_DIR/director-mode-android/app/build/outputs/apk/debug/app-debug.apk"
           OUT="$CM_BUILD_DIR/director-mode-android/DirectorMode-v1-offline-debug.apk"
+          APK_LIST="$CM_BUILD_DIR/director-mode-android/apk-contents.txt"
+
           test -s "$APK"
-          unzip -l "$APK" | grep -q 'assets/pose_landmarker_lite.task'
-          unzip -l "$APK" | grep -q 'assets/face_landmarker.task'
-          unzip -l "$APK" | grep -q 'assets/efficientdet_lite0.tflite'
-          unzip -l "$APK" | grep -q 'assets/shot_templates.json'
-          unzip -l "$APK" | grep -q 'assets/director_config.json'
+          unzip -Z1 "$APK" > "$APK_LIST"
+
+          for required in \
+            'assets/pose_landmarker_lite.task' \
+            'assets/face_landmarker.task' \
+            'assets/efficientdet_lite0.tflite' \
+            'assets/shot_templates.json' \
+            'assets/director_config.json'; do
+            if ! grep -Fxq "$required" "$APK_LIST"; then
+              echo "ERROR: Required APK entry missing: $required" >&2
+              echo 'Matching APK entries:' >&2
+              grep -F "$(basename "$required")" "$APK_LIST" >&2 || true
+              exit 1
+            fi
+          done
+
           cp "$APK" "$OUT"
+          test -s "$OUT"
           shasum -a 256 "$OUT" | tee "$CM_BUILD_DIR/director-mode-android/APK_SHA256.txt"
+          echo "Verified APK size: $(stat -f%z "$OUT") bytes"
           echo 'APK package verification passed.'
 
     artifacts:
       - director-mode-android/DirectorMode-v1-offline-debug.apk
       - director-mode-android/APK_SHA256.txt
       - director-mode-android/MODEL_SHA256.txt
+      - director-mode-android/apk-contents.txt
       - director-mode-android/compile.log
       - director-mode-android/lint.log
       - director-mode-android/app/build/reports/**
