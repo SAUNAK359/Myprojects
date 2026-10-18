@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        AGP 9 uses non-transitive R classes, so dependency-owned Material styles are
+        not generated into this app's R class. Keep an app-owned alias for the
+        dialog overlay referenced by MainActivity while inheriting the actual
+        Material Components implementation.
+    -->
+    <style
+        name="ThemeOverlay_MaterialComponents_MaterialAlertDialog"
+        parent="ThemeOverlay.MaterialComponents.MaterialAlertDialog" />
+</resources>
