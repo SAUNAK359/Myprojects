@@ -8,22 +8,49 @@ workflows:
       java: 17
 
     scripts:
-      - name: Reconstruct Android project
+      - name: Verify committed Android source
         script: |
           set -euo pipefail
-          cat director-build/chunk-00.b64 director-build/chunk-01.b64 director-build/chunk-02.b64 director-build/chunk-03.b64 > /tmp/director-source.b64
-          python3 - <<'PY'
-          import base64
-          from pathlib import Path
-          src = Path('/tmp/director-source.b64').read_bytes()
-          Path('/tmp/director-source.zip').write_bytes(base64.b64decode(src))
-          PY
-          rm -rf director-mode-android
-          unzip -q /tmp/director-source.zip -d .
+          cd "$CM_BUILD_DIR"
           test -f director-mode-android/settings.gradle.kts
+          test -f director-mode-android/build.gradle.kts
+          test -f director-mode-android/app/build.gradle.kts
           test -f director-mode-android/app/src/main/AndroidManifest.xml
+          test -f director-mode-android/app/src/main/java/ai/auraforge/director/MainActivity.kt
+          test -f director-mode-android/app/src/main/java/ai/auraforge/director/ml/VisionPipeline.kt
+          test -f director-mode-android/app/src/main/assets/shot_templates.json
+          test -f director-mode-android/app/src/main/assets/director_config.json
+          if grep -R --line-number 'org.jetbrains.kotlin.android\|kotlinOptions' director-mode-android/*.gradle.kts director-mode-android/app/*.gradle.kts; then
+            echo 'ERROR: legacy Kotlin Gradle configuration detected; AGP 9.4 uses built-in Kotlin.' >&2
+            exit 1
+          fi
+          grep -q 'com.android.application.*9.4.0' director-mode-android/build.gradle.kts
+          grep -q 'compileSdk = 37' director-mode-android/app/build.gradle.kts
+          grep -q 'minSdk = 24' director-mode-android/app/build.gradle.kts
+          echo 'Committed Android project passed source preflight.'
 
-      - name: Bundle offline MediaPipe models
+      - name: Pin Android SDK and Gradle toolchain
+        script: |
+          set -euo pipefail
+          java -version
+          command -v sdkmanager
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager 'platform-tools' 'platforms;android-37' 'build-tools;37.0.0'
+
+          GRADLE_VERSION='9.6.1'
+          GRADLE_ZIP="$CM_BUILD_DIR/.ci-gradle-${GRADLE_VERSION}.zip"
+          GRADLE_HOME="$CM_BUILD_DIR/.ci-gradle/gradle-${GRADLE_VERSION}"
+          curl --fail --location --retry 4 --retry-delay 2 \
+            "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" \
+            -o "$GRADLE_ZIP"
+          rm -rf "$CM_BUILD_DIR/.ci-gradle"
+          mkdir -p "$CM_BUILD_DIR/.ci-gradle"
+          unzip -q "$GRADLE_ZIP" -d "$CM_BUILD_DIR/.ci-gradle"
+          test -x "$GRADLE_HOME/bin/gradle"
+          "$GRADLE_HOME/bin/gradle" --version
+          echo "GRADLE_BIN=$GRADLE_HOME/bin/gradle" >> "$CM_ENV"
+
+      - name: Bundle official offline vision models
         script: |
           set -euo pipefail
           ASSETS="$CM_BUILD_DIR/director-mode-android/app/src/main/assets"
@@ -40,39 +67,53 @@ workflows:
           test -s "$ASSETS/pose_landmarker_lite.task"
           test -s "$ASSETS/face_landmarker.task"
           test -s "$ASSETS/efficientdet_lite0.tflite"
+          shasum -a 256 "$ASSETS/pose_landmarker_lite.task" "$ASSETS/face_landmarker.task" "$ASSETS/efficientdet_lite0.tflite" \
+            | tee "$CM_BUILD_DIR/director-mode-android/MODEL_SHA256.txt"
 
       - name: Verify fully offline runtime contract
         script: |
           set -euo pipefail
           MANIFEST="$CM_BUILD_DIR/director-mode-android/app/src/main/AndroidManifest.xml"
           if grep -q 'android.permission.INTERNET' "$MANIFEST"; then
-            echo 'ERROR: INTERNET permission is forbidden for Director Mode runtime.' >&2
+            echo 'ERROR: Director Mode runtime must not request INTERNET permission.' >&2
             exit 1
           fi
           grep -q 'android.permission.CAMERA' "$MANIFEST"
+          if grep -R --line-number -E 'https?://|Firebase|Retrofit|OkHttp' "$CM_BUILD_DIR/director-mode-android/app/src/main/java"; then
+            echo 'ERROR: network-dependent runtime code was detected.' >&2
+            exit 1
+          fi
+          echo 'Offline runtime contract passed.'
 
-      - name: Run unit tests
+      - name: Resolve dependencies and run unit tests
         script: |
+          set -euo pipefail
           cd "$CM_BUILD_DIR/director-mode-android"
-          gradle --no-daemon :app:testDebugUnitTest
+          "$GRADLE_BIN" --no-daemon --stacktrace :app:testDebugUnitTest
 
-      - name: Build offline APK
+      - name: Build installable offline APK
         script: |
+          set -euo pipefail
           cd "$CM_BUILD_DIR/director-mode-android"
-          gradle --no-daemon --stacktrace :app:assembleDebug
+          "$GRADLE_BIN" --no-daemon --stacktrace :app:assembleDebug
 
       - name: Verify packaged APK
         script: |
           set -euo pipefail
           APK="$CM_BUILD_DIR/director-mode-android/app/build/outputs/apk/debug/app-debug.apk"
+          OUT="$CM_BUILD_DIR/director-mode-android/DirectorMode-v1-offline-debug.apk"
           test -s "$APK"
           unzip -l "$APK" | grep -q 'assets/pose_landmarker_lite.task'
           unzip -l "$APK" | grep -q 'assets/face_landmarker.task'
           unzip -l "$APK" | grep -q 'assets/efficientdet_lite0.tflite'
-          cp "$APK" "$CM_BUILD_DIR/director-mode-android/DirectorMode-v1-offline-debug.apk"
-          shasum -a 256 "$CM_BUILD_DIR/director-mode-android/DirectorMode-v1-offline-debug.apk" > "$CM_BUILD_DIR/director-mode-android/APK_SHA256.txt"
+          unzip -l "$APK" | grep -q 'assets/shot_templates.json'
+          unzip -l "$APK" | grep -q 'assets/director_config.json'
+          cp "$APK" "$OUT"
+          shasum -a 256 "$OUT" | tee "$CM_BUILD_DIR/director-mode-android/APK_SHA256.txt"
+          echo 'APK package verification passed.'
 
     artifacts:
       - director-mode-android/DirectorMode-v1-offline-debug.apk
       - director-mode-android/APK_SHA256.txt
+      - director-mode-android/MODEL_SHA256.txt
       - director-mode-android/app/build/reports/**
