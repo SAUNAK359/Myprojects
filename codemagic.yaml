@@ -2,7 +2,7 @@ workflows:
   director-mode-android:
     name: Director Mode Offline Android APK
     max_build_duration: 60
-    instance_type: linux
+    instance_type: mac_mini_m2
 
     environment:
       java: 17
@@ -65,7 +65,7 @@ workflows:
           unzip -l "$APK" | grep -q 'assets/face_landmarker.task'
           unzip -l "$APK" | grep -q 'assets/efficientdet_lite0.tflite'
           cp "$APK" "$CM_BUILD_DIR/director-mode-android/DirectorMode-v1-offline-debug.apk"
-          sha256sum "$CM_BUILD_DIR/director-mode-android/DirectorMode-v1-offline-debug.apk" > "$CM_BUILD_DIR/director-mode-android/APK_SHA256.txt"
+          shasum -a 256 "$CM_BUILD_DIR/director-mode-android/DirectorMode-v1-offline-debug.apk" > "$CM_BUILD_DIR/director-mode-android/APK_SHA256.txt"
 
     artifacts:
       - director-mode-android/DirectorMode-v1-offline-debug.apk
