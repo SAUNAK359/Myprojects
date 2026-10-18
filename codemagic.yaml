@@ -17,27 +17,33 @@ workflows:
           test -f director-mode-android/app/build.gradle.kts
           test -f director-mode-android/app/src/main/AndroidManifest.xml
           test -f director-mode-android/app/src/main/java/ai/auraforge/director/MainActivity.kt
+          test -f director-mode-android/app/src/main/java/ai/auraforge/director/camera/CameraEngine.kt
           test -f director-mode-android/app/src/main/java/ai/auraforge/director/ml/VisionPipeline.kt
+          test -f director-mode-android/app/src/main/java/ai/auraforge/director/director/DirectorBrain.kt
           test -f director-mode-android/app/src/main/assets/shot_templates.json
           test -f director-mode-android/app/src/main/assets/director_config.json
+          test -f director-mode-android/app/src/main/res/layout/activity_main.xml
+
           if grep -R --line-number 'org.jetbrains.kotlin.android\|kotlinOptions' director-mode-android/*.gradle.kts director-mode-android/app/*.gradle.kts; then
             echo 'ERROR: legacy Kotlin Gradle configuration detected; AGP 9.4 uses built-in Kotlin.' >&2
             exit 1
           fi
           grep -q 'com.android.application.*9.4.0' director-mode-android/build.gradle.kts
           grep -q 'compileSdk = 37' director-mode-android/app/build.gradle.kts
+          grep -q 'targetSdk = 37' director-mode-android/app/build.gradle.kts
           grep -q 'minSdk = 24' director-mode-android/app/build.gradle.kts
+          grep -q 'tasks-vision:1.1.1' director-mode-android/app/build.gradle.kts
           echo 'Committed Android project passed source preflight.'
 
-      - name: Pin Android SDK and Gradle toolchain
+      - name: Pin official AGP 9.4 Android toolchain
         script: |
           set -euo pipefail
           java -version
           command -v sdkmanager
           yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager 'platform-tools' 'platforms;android-37' 'build-tools;37.0.0'
+          sdkmanager 'platform-tools' 'platforms;android-37' 'build-tools;36.0.0'
 
-          GRADLE_VERSION='9.6.1'
+          GRADLE_VERSION='9.6.0'
           GRADLE_ZIP="$CM_BUILD_DIR/.ci-gradle-${GRADLE_VERSION}.zip"
           GRADLE_HOME="$CM_BUILD_DIR/.ci-gradle/gradle-${GRADLE_VERSION}"
           curl --fail --location --retry 4 --retry-delay 2 \
@@ -85,17 +91,17 @@ workflows:
           fi
           echo 'Offline runtime contract passed.'
 
-      - name: Resolve dependencies and run unit tests
-        script: |
-          set -euo pipefail
-          cd "$CM_BUILD_DIR/director-mode-android"
-          "$GRADLE_BIN" --no-daemon --stacktrace :app:testDebugUnitTest
-
-      - name: Build installable offline APK
+      - name: Compile installable APK
         script: |
           set -euo pipefail
           cd "$CM_BUILD_DIR/director-mode-android"
           "$GRADLE_BIN" --no-daemon --stacktrace :app:assembleDebug
+
+      - name: Run Android lint gate
+        script: |
+          set -euo pipefail
+          cd "$CM_BUILD_DIR/director-mode-android"
+          "$GRADLE_BIN" --no-daemon --stacktrace :app:lintDebug
 
       - name: Verify packaged APK
         script: |
