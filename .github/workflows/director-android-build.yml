@@ -1,0 +1,108 @@
+name: Director Android Build
+
+on:
+  push:
+    branches: [ director-mode-v1 ]
+    paths:
+      - 'director-build/**'
+      - '.github/workflows/director-android-build.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Reconstruct Director source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat director-build/chunk-00.b64 director-build/chunk-01.b64 director-build/chunk-02.b64 director-build/chunk-03.b64 > /tmp/director-source.b64
+          base64 --decode /tmp/director-source.b64 > /tmp/director-source.zip
+          unzip -q /tmp/director-source.zip -d .
+          test -f director-mode-android/settings.gradle.kts
+          test -f director-mode-android/app/src/main/AndroidManifest.xml
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android API 37
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager 'platforms;android-37' 'platform-tools'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.6.0'
+
+      - name: Bundle official offline vision models
+        shell: bash
+        run: |
+          set -euo pipefail
+          ASSETS='director-mode-android/app/src/main/assets'
+          mkdir -p "$ASSETS"
+          curl --fail --location --retry 4 --retry-delay 2 \
+            'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task' \
+            -o "$ASSETS/pose_landmarker_lite.task"
+          curl --fail --location --retry 4 --retry-delay 2 \
+            'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task' \
+            -o "$ASSETS/face_landmarker.task"
+          curl --fail --location --retry 4 --retry-delay 2 \
+            'https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float32/1/efficientdet_lite0.tflite' \
+            -o "$ASSETS/efficientdet_lite0.tflite"
+          test -s "$ASSETS/pose_landmarker_lite.task"
+          test -s "$ASSETS/face_landmarker.task"
+          test -s "$ASSETS/efficientdet_lite0.tflite"
+          sha256sum "$ASSETS"/*.task "$ASSETS"/*.tflite | tee director-mode-android/MODEL_SHA256.txt
+
+      - name: Verify source offline contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -R --line-number 'android.permission.INTERNET' director-mode-android/app/src/main/AndroidManifest.xml; then
+            echo 'ERROR: Director runtime must not request INTERNET permission.' >&2
+            exit 1
+          fi
+          grep -q 'android.permission.CAMERA' director-mode-android/app/src/main/AndroidManifest.xml
+
+      - name: Build installable APK
+        working-directory: director-mode-android
+        run: gradle --no-daemon --stacktrace :app:assembleDebug
+
+      - name: Verify APK content
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK='director-mode-android/app/build/outputs/apk/debug/app-debug.apk'
+          test -s "$APK"
+          unzip -l "$APK" | grep -q 'assets/pose_landmarker_lite.task'
+          unzip -l "$APK" | grep -q 'assets/face_landmarker.task'
+          unzip -l "$APK" | grep -q 'assets/efficientdet_lite0.tflite'
+          cp "$APK" director-mode-android/DirectorMode-v1-offline-debug.apk
+          sha256sum director-mode-android/DirectorMode-v1-offline-debug.apk | tee director-mode-android/APK_SHA256.txt
+
+      - name: Upload installable APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: DirectorMode-v1-offline-APK
+          path: |
+            director-mode-android/DirectorMode-v1-offline-debug.apk
+            director-mode-android/APK_SHA256.txt
+            director-mode-android/MODEL_SHA256.txt
+          if-no-files-found: error
+          retention-days: 30
