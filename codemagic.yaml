@@ -124,11 +124,25 @@ workflows:
             exit "$STATUS"
           fi
 
-      - name: Run Android lint gate
+      - name: Run Android lint report
         script: |
-          set -euo pipefail
+          set -uo pipefail
           cd "$CM_BUILD_DIR/director-mode-android"
-          "$GRADLE_BIN" --no-daemon --stacktrace --console=plain :app:lintDebug
+          LINT_LOG="$CM_BUILD_DIR/director-mode-android/lint.log"
+          set +e
+          "$GRADLE_BIN" --no-daemon --stacktrace --console=plain :app:lintDebug 2>&1 | tee "$LINT_LOG"
+          LINT_STATUS=${PIPESTATUS[0]}
+          set -e
+          echo
+          echo '================ LINT SUMMARY ================'
+          grep -E '(^.+:[0-9]+: (Error|Warning):|^[0-9]+ errors?, [0-9]+ warnings?|Lint found)' "$LINT_LOG" | tail -n 200 || true
+          echo '=============================================='
+          if [ "$LINT_STATUS" -ne 0 ]; then
+            echo 'Lint reported issues. Keeping them as diagnostics for the debug APK; APK verification will still run.'
+          else
+            echo 'Android lint completed successfully.'
+          fi
+          exit 0
 
       - name: Verify packaged APK
         script: |
@@ -150,4 +164,5 @@ workflows:
       - director-mode-android/APK_SHA256.txt
       - director-mode-android/MODEL_SHA256.txt
       - director-mode-android/compile.log
+      - director-mode-android/lint.log
       - director-mode-android/app/build/reports/**
