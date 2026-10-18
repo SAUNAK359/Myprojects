@@ -60,69 +60,78 @@ class VisionPipeline(
     fun analyze(bitmap: Bitmap, timestampMs: Long): Snapshot {
         if (!ready) return Snapshot(emptyList(), lastObjects, lastFace)
         val mpImage = BitmapImageBuilder(bitmap).build()
-
-        val poseStates = try {
-            pose?.detect(mpImage)?.landmarks()?.mapIndexed { index, landmarks ->
-                val points = landmarks.map { lm ->
-                    Point2(
-                        x = lm.x(),
-                        y = lm.y(),
-                        confidence = max(lm.visibility().orElse(0.75f), lm.presence().orElse(0.75f))
-                    )
-                }
-                PoseState(index, points, Geometry.bbox(points), points.map { it.confidence }.average().toFloat())
-            } ?: emptyList()
-        } catch (t: Throwable) {
-            Log.w(TAG, "Pose inference failed", t)
-            emptyList()
-        }
-
-        if (timestampMs - lastObjectAt >= OBJECT_PERIOD_MS) {
-            lastObjectAt = timestampMs
-            lastObjects = try {
-                detector?.detect(mpImage)?.detections()?.mapIndexedNotNull { index, d ->
-                    val c = d.categories().maxByOrNull { it.score() } ?: return@mapIndexedNotNull null
-                    val b = d.boundingBox()
-                    EntityState(
-                        id = stableObjectId(c.categoryName(), b.centerX(), b.centerY(), index),
-                        label = c.categoryName().lowercase(),
-                        score = c.score(),
-                        bbox = RectF(
-                            (b.left / bitmap.width).coerceIn(0f, 1f),
-                            (b.top / bitmap.height).coerceIn(0f, 1f),
-                            (b.right / bitmap.width).coerceIn(0f, 1f),
-                            (b.bottom / bitmap.height).coerceIn(0f, 1f)
+        try {
+            val poseStates = try {
+                pose?.detect(mpImage)?.landmarks()?.mapIndexed { index, landmarks ->
+                    val points = landmarks.map { lm ->
+                        Point2(
+                            x = lm.x(),
+                            y = lm.y(),
+                            confidence = max(lm.visibility().orElse(0.75f), lm.presence().orElse(0.75f))
                         )
-                    )
+                    }
+                    PoseState(index, points, Geometry.bbox(points), points.map { it.confidence }.average().toFloat())
                 } ?: emptyList()
             } catch (t: Throwable) {
-                Log.w(TAG, "Object inference failed", t)
-                lastObjects
+                Log.w(TAG, "Pose inference failed", t)
+                emptyList()
             }
-        }
 
-        if (timestampMs - lastFaceAt >= FACE_PERIOD_MS) {
-            lastFaceAt = timestampMs
-            lastFace = try {
-                val result = face?.detect(mpImage)
-                val shapes = result?.faceBlendshapes()?.orElse(null)?.firstOrNull()
-                if (shapes != null) {
-                    fun score(name: String): Float = shapes.firstOrNull { it.categoryName() == name }?.score() ?: 0f
-                    FaceState(
-                        blinkLeft = score("eyeBlinkLeft"),
-                        blinkRight = score("eyeBlinkRight"),
-                        smile = max(score("mouthSmileLeft"), score("mouthSmileRight")),
-                        confidence = 1f
-                    )
-                } else null
-            } catch (t: Throwable) {
-                Log.w(TAG, "Face inference failed", t)
-                lastFace
+            if (timestampMs - lastObjectAt >= OBJECT_PERIOD_MS) {
+                lastObjectAt = timestampMs
+                lastObjects = try {
+                    detector?.detect(mpImage)?.detections()?.mapIndexedNotNull { index, d ->
+                        val c = d.categories().maxByOrNull { it.score() } ?: return@mapIndexedNotNull null
+                        val b = d.boundingBox()
+                        EntityState(
+                            id = stableObjectId(c.categoryName(), b.centerX(), b.centerY(), index),
+                            label = c.categoryName().lowercase(),
+                            score = c.score(),
+                            bbox = RectF(
+                                (b.left / bitmap.width).coerceIn(0f, 1f),
+                                (b.top / bitmap.height).coerceIn(0f, 1f),
+                                (b.right / bitmap.width).coerceIn(0f, 1f),
+                                (b.bottom / bitmap.height).coerceIn(0f, 1f)
+                            )
+                        )
+                    } ?: emptyList()
+                } catch (t: Throwable) {
+                    Log.w(TAG, "Object inference failed", t)
+                    lastObjects
+                }
             }
-        }
 
-        mpImage.close()
-        return Snapshot(poseStates, lastObjects, lastFace)
+            if (timestampMs - lastFaceAt >= FACE_PERIOD_MS) {
+                lastFaceAt = timestampMs
+                lastFace = try {
+                    val result = face?.detect(mpImage)
+                    val blendshapeOptional = result?.faceBlendshapes()
+                    val shapes = if (blendshapeOptional != null && blendshapeOptional.isPresent) {
+                        blendshapeOptional.get().firstOrNull()
+                    } else {
+                        null
+                    }
+                    if (shapes != null) {
+                        fun score(name: String): Float = shapes.firstOrNull { it.categoryName() == name }?.score() ?: 0f
+                        FaceState(
+                            blinkLeft = score("eyeBlinkLeft"),
+                            blinkRight = score("eyeBlinkRight"),
+                            smile = max(score("mouthSmileLeft"), score("mouthSmileRight")),
+                            confidence = 1f
+                        )
+                    } else {
+                        null
+                    }
+                } catch (t: Throwable) {
+                    Log.w(TAG, "Face inference failed", t)
+                    lastFace
+                }
+            }
+
+            return Snapshot(poseStates, lastObjects, lastFace)
+        } finally {
+            mpImage.close()
+        }
     }
 
     private fun createPose(gpu: Boolean): PoseLandmarker? = runCatching {
@@ -162,9 +171,9 @@ class VisionPipeline(
     }.onFailure { Log.w(TAG, "Face ${if (gpu) "GPU" else "CPU"} init failed", it) }.getOrNull()
 
     private fun baseOptions(asset: String, gpu: Boolean): BaseOptions {
-        val b = BaseOptions.builder().setModelAssetPath(asset)
-        if (gpu) b.setDelegate(Delegate.GPU) else b.setDelegate(Delegate.CPU)
-        return b.build()
+        val builder = BaseOptions.builder().setModelAssetPath(asset)
+        builder.setDelegate(if (gpu) Delegate.GPU else Delegate.CPU)
+        return builder.build()
     }
 
     private fun stableObjectId(label: String, x: Float, y: Float, ordinal: Int): Long {
