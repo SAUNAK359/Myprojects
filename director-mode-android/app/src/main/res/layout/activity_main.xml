@@ -1,0 +1,285 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.constraintlayout.widget.ConstraintLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/director_black">
+
+    <androidx.camera.view.PreviewView
+        android:id="@+id/previewView"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:background="@color/director_black"
+        app:implementationMode="performance"
+        app:scaleType="fillCenter"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <ai.auraforge.director.ui.DirectorOverlayView
+        android:id="@+id/directorOverlay"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <LinearLayout
+        android:id="@+id/topBar"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="12dp"
+        android:layout_marginTop="22dp"
+        android:layout_marginEnd="12dp"
+        android:paddingStart="14dp"
+        android:paddingEnd="10dp"
+        android:paddingTop="10dp"
+        android:paddingBottom="10dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:background="@drawable/bg_panel"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent">
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:orientation="vertical">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="DIRECTOR"
+                android:textColor="@color/director_white"
+                android:textStyle="bold"
+                android:letterSpacing="0.18"
+                android:textSize="16sp" />
+
+            <TextView
+                android:id="@+id/subtitle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="2dp"
+                android:text="OFFLINE PHOTOGRAPHY ENGINE"
+                android:textColor="@color/director_muted"
+                android:letterSpacing="0.08"
+                android:textSize="9sp" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/resolutionBadge"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:background="@drawable/bg_chip"
+            android:text="CHECKING"
+            android:textColor="@color/director_cyan"
+            android:textStyle="bold"
+            android:textSize="10sp" />
+
+        <TextView
+            android:id="@+id/thermalBadge"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:background="@drawable/bg_chip"
+            android:text="● COOL"
+            android:textColor="@color/director_green"
+            android:textStyle="bold"
+            android:textSize="10sp" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/quickControls"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:layout_marginEnd="12dp"
+        android:background="@drawable/bg_panel"
+        android:orientation="vertical"
+        android:padding="6dp"
+        app:layout_constraintTop_toBottomOf="@id/topBar"
+        app:layout_constraintEnd_toEndOf="parent">
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/torchButton"
+            style="@style/Widget.MaterialComponents.Button.TextButton"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:minWidth="0dp"
+            android:minHeight="0dp"
+            android:padding="0dp"
+            android:text="⚡"
+            android:textColor="@color/director_white"
+            android:textSize="18sp"
+            app:cornerRadius="20dp" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/gridButton"
+            style="@style/Widget.MaterialComponents.Button.TextButton"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:minWidth="0dp"
+            android:minHeight="0dp"
+            android:padding="0dp"
+            android:text="▦"
+            android:textColor="@color/director_white"
+            android:textSize="19sp"
+            app:cornerRadius="20dp" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/proButton"
+            style="@style/Widget.MaterialComponents.Button.TextButton"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:minWidth="0dp"
+            android:minHeight="0dp"
+            android:padding="0dp"
+            android:text="PRO"
+            android:textColor="@color/director_cyan"
+            android:textSize="10sp"
+            android:textStyle="bold"
+            app:cornerRadius="20dp" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/directorStatusPanel"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="18dp"
+        android:gravity="center"
+        android:orientation="vertical"
+        android:paddingStart="18dp"
+        android:paddingEnd="18dp"
+        android:paddingTop="10dp"
+        android:paddingBottom="10dp"
+        android:background="@drawable/bg_panel"
+        app:layout_constraintBottom_toTopOf="@id/bottomPanel"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent">
+
+        <TextView
+            android:id="@+id/directorState"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="SCANNING SCENE"
+            android:textColor="@color/director_white"
+            android:textStyle="bold"
+            android:letterSpacing="0.08"
+            android:textSize="12sp" />
+
+        <TextView
+            android:id="@+id/directorHint"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="3dp"
+            android:text="Move naturally — the shot will adapt"
+            android:textColor="@color/director_muted"
+            android:textSize="11sp" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/bottomPanel"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="12dp"
+        android:layout_marginEnd="12dp"
+        android:layout_marginBottom="16dp"
+        android:orientation="vertical"
+        android:padding="12dp"
+        android:background="@drawable/bg_panel"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent">
+
+        <LinearLayout
+            android:id="@+id/lensRow"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:orientation="horizontal">
+
+            <TextView
+                android:id="@+id/lensWide"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginHorizontal="4dp"
+                android:background="@drawable/bg_chip"
+                android:text="0.5×"
+                android:textColor="@color/director_muted"
+                android:textStyle="bold"
+                android:textSize="11sp" />
+
+            <TextView
+                android:id="@+id/lensOne"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginHorizontal="4dp"
+                android:background="@drawable/bg_chip_active"
+                android:text="1×"
+                android:textColor="@color/director_white"
+                android:textStyle="bold"
+                android:textSize="11sp" />
+
+            <TextView
+                android:id="@+id/lensTele"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginHorizontal="4dp"
+                android:background="@drawable/bg_chip"
+                android:text="2×"
+                android:textColor="@color/director_muted"
+                android:textStyle="bold"
+                android:textSize="11sp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/directorToggle"
+                style="@style/Widget.MaterialComponents.Button.TextButton"
+                android:layout_width="0dp"
+                android:layout_height="52dp"
+                android:layout_weight="1"
+                android:text="DIRECTOR ON"
+                android:textColor="@color/director_cyan"
+                android:textStyle="bold"
+                android:letterSpacing="0.08"
+                app:cornerRadius="22dp"
+                app:strokeColor="@color/director_cyan"
+                app:strokeWidth="1dp" />
+
+            <ImageButton
+                android:id="@+id/shutterButton"
+                android:layout_width="76dp"
+                android:layout_height="76dp"
+                android:layout_marginHorizontal="16dp"
+                android:background="@drawable/bg_shutter"
+                android:contentDescription="Capture"
+                android:padding="0dp"
+                android:src="@android:color/transparent" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/flipButton"
+                style="@style/Widget.MaterialComponents.Button.TextButton"
+                android:layout_width="0dp"
+                android:layout_height="52dp"
+                android:layout_weight="1"
+                android:text="FLIP"
+                android:textColor="@color/director_white"
+                android:textStyle="bold"
+                app:cornerRadius="22dp" />
+        </LinearLayout>
+    </LinearLayout>
+
+</androidx.constraintlayout.widget.ConstraintLayout>

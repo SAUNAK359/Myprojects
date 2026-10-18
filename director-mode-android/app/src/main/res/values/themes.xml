@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <style name="Theme.Director" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowBackground">@color/director_black</item>
+        <item name="android:navigationBarColor">@color/director_black</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowActionModeOverlay">true</item>
+        <item name="colorPrimary">@color/director_cyan</item>
+        <item name="colorOnPrimary">@color/director_black</item>
+        <item name="colorSurface">@color/director_panel</item>
+        <item name="colorOnSurface">@color/director_white</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowLayoutInDisplayCutoutMode" tools:targetApi="p">shortEdges</item>
+    </style>
+</resources>

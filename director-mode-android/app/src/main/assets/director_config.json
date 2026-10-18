@@ -1,0 +1,29 @@
+{
+  "lock": {
+    "aligning": 0.54,
+    "nearLock": 0.76,
+    "candidate": 0.88,
+    "unlock": 0.79,
+    "technicalMin": 0.62,
+    "candidateHoldMs": 280,
+    "captureCooldownMs": 2200
+  },
+  "weights": {
+    "pose": 0.43,
+    "framing": 0.20,
+    "relation": 0.17,
+    "head": 0.08,
+    "composition": 0.12
+  },
+  "capture": {
+    "sharpnessMin": 0.48,
+    "eyesOpenMin": 0.55,
+    "motionMax": 0.52,
+    "exposureMin": 0.42
+  },
+  "director": {
+    "minimumExpectedGain": 0.08,
+    "planCommitScore": 0.58,
+    "replanIntervalMs": 700
+  }
+}

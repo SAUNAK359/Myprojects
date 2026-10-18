@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="director_black">#050607</color>
+    <color name="director_panel">#CC0A0D10</color>
+    <color name="director_cyan">#71F7FF</color>
+    <color name="director_green">#91FFB2</color>
+    <color name="director_amber">#FFD27A</color>
+    <color name="director_white">#F5F7F8</color>
+    <color name="director_muted">#A5AFB6</color>
+    <color name="director_danger">#FF6B6B</color>
+</resources>
