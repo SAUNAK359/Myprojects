@@ -97,7 +97,6 @@ class CameraEngine(
 
         val captureBuilder = ImageCapture.Builder()
             .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
-            .setOutputFormat(ImageCapture.OUTPUT_FORMAT_JPEG)
 
         if (preferHighResolution) {
             val highResolutionSelector = ResolutionSelector.Builder()
