@@ -1,0 +1,73 @@
+workflows:
+  director-mode-android:
+    name: Director Mode Offline Android APK
+    max_build_duration: 60
+    instance_type: linux_x2
+
+    environment:
+      java: 17
+
+    scripts:
+      - name: Reconstruct Android project
+        script: |
+          set -euo pipefail
+          cat director-build/chunk-00.b64 director-build/chunk-01.b64 director-build/chunk-02.b64 director-build/chunk-03.b64 > /tmp/director-source.b64
+          base64 --decode /tmp/director-source.b64 > /tmp/director-source.zip
+          rm -rf director-mode-android
+          unzip -q /tmp/director-source.zip -d .
+          test -f director-mode-android/settings.gradle.kts
+          test -f director-mode-android/app/src/main/AndroidManifest.xml
+
+      - name: Bundle offline MediaPipe models
+        script: |
+          set -euo pipefail
+          ASSETS="$CM_BUILD_DIR/director-mode-android/app/src/main/assets"
+          mkdir -p "$ASSETS"
+          curl --fail --location --retry 4 --retry-delay 2 \
+            'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task' \
+            -o "$ASSETS/pose_landmarker_lite.task"
+          curl --fail --location --retry 4 --retry-delay 2 \
+            'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task' \
+            -o "$ASSETS/face_landmarker.task"
+          curl --fail --location --retry 4 --retry-delay 2 \
+            'https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float32/1/efficientdet_lite0.tflite' \
+            -o "$ASSETS/efficientdet_lite0.tflite"
+          test -s "$ASSETS/pose_landmarker_lite.task"
+          test -s "$ASSETS/face_landmarker.task"
+          test -s "$ASSETS/efficientdet_lite0.tflite"
+
+      - name: Verify fully offline runtime contract
+        script: |
+          set -euo pipefail
+          MANIFEST="$CM_BUILD_DIR/director-mode-android/app/src/main/AndroidManifest.xml"
+          if grep -q 'android.permission.INTERNET' "$MANIFEST"; then
+            echo 'ERROR: INTERNET permission is forbidden for Director Mode runtime.' >&2
+            exit 1
+          fi
+          grep -q 'android.permission.CAMERA' "$MANIFEST"
+
+      - name: Run unit tests
+        script: |
+          cd "$CM_BUILD_DIR/director-mode-android"
+          gradle --no-daemon :app:testDebugUnitTest
+
+      - name: Build offline APK
+        script: |
+          cd "$CM_BUILD_DIR/director-mode-android"
+          gradle --no-daemon --stacktrace :app:assembleDebug
+
+      - name: Verify packaged APK
+        script: |
+          set -euo pipefail
+          APK="$CM_BUILD_DIR/director-mode-android/app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$APK"
+          unzip -l "$APK" | grep -q 'assets/pose_landmarker_lite.task'
+          unzip -l "$APK" | grep -q 'assets/face_landmarker.task'
+          unzip -l "$APK" | grep -q 'assets/efficientdet_lite0.tflite'
+          cp "$APK" "$CM_BUILD_DIR/director-mode-android/DirectorMode-v1-offline-debug.apk"
+          sha256sum "$CM_BUILD_DIR/director-mode-android/DirectorMode-v1-offline-debug.apk" > "$CM_BUILD_DIR/director-mode-android/APK_SHA256.txt"
+
+    artifacts:
+      - director-mode-android/DirectorMode-v1-offline-debug.apk
+      - director-mode-android/APK_SHA256.txt
+      - director-mode-android/app/build/reports/**
