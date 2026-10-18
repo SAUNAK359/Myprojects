@@ -109,15 +109,26 @@ workflows:
 
       - name: Compile installable APK
         script: |
-          set -euo pipefail
+          set -uo pipefail
           cd "$CM_BUILD_DIR/director-mode-android"
-          "$GRADLE_BIN" --no-daemon --stacktrace :app:assembleDebug
+          LOG="$CM_BUILD_DIR/director-mode-android/compile.log"
+          set +e
+          "$GRADLE_BIN" --no-daemon --stacktrace --console=plain :app:assembleDebug 2>&1 | tee "$LOG"
+          STATUS=${PIPESTATUS[0]}
+          set -e
+          if [ "$STATUS" -ne 0 ]; then
+            echo
+            echo '========== KOTLIN/ANDROID COMPILER ERRORS =========='
+            grep -E '(^e: |^w: |error: |Unresolved reference|Type mismatch|Cannot infer|Opt-in requirement|This API is experimental|Overload resolution ambiguity|No value passed for parameter|Too many arguments|Expecting |is not abstract and does not implement|overrides nothing)' "$LOG" | tail -n 250 || true
+            echo '===================================================='
+            exit "$STATUS"
+          fi
 
       - name: Run Android lint gate
         script: |
           set -euo pipefail
           cd "$CM_BUILD_DIR/director-mode-android"
-          "$GRADLE_BIN" --no-daemon --stacktrace :app:lintDebug
+          "$GRADLE_BIN" --no-daemon --stacktrace --console=plain :app:lintDebug
 
       - name: Verify packaged APK
         script: |
@@ -138,4 +149,5 @@ workflows:
       - director-mode-android/DirectorMode-v1-offline-debug.apk
       - director-mode-android/APK_SHA256.txt
       - director-mode-android/MODEL_SHA256.txt
+      - director-mode-android/compile.log
       - director-mode-android/app/build/reports/**
