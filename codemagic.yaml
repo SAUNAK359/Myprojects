@@ -12,40 +12,67 @@ workflows:
         script: |
           set -euo pipefail
           cd "$CM_BUILD_DIR"
-          test -f director-mode-android/settings.gradle.kts
-          test -f director-mode-android/build.gradle.kts
-          test -f director-mode-android/app/build.gradle.kts
-          test -f director-mode-android/app/src/main/AndroidManifest.xml
-          test -f director-mode-android/app/src/main/java/ai/auraforge/director/MainActivity.kt
-          test -f director-mode-android/app/src/main/java/ai/auraforge/director/camera/CameraEngine.kt
-          test -f director-mode-android/app/src/main/java/ai/auraforge/director/camera/CameraCapabilities.kt
-          test -f director-mode-android/app/src/main/java/ai/auraforge/director/core/PhotoPlan.kt
-          test -f director-mode-android/app/src/main/java/ai/auraforge/director/director/AutonomousPhotoDirector.kt
-          test -f director-mode-android/app/src/main/java/ai/auraforge/director/director/StrictPhotoPlanValidator.kt
-          test -f director-mode-android/app/src/main/java/ai/auraforge/director/director/BoundedPhotoReadinessEvaluator.kt
-          test -f director-mode-android/app/src/main/java/ai/auraforge/director/director/FallbackPhotoPlanner.kt
-          test -f director-mode-android/app/src/main/java/ai/auraforge/director/ml/VisionPipeline.kt
-          test -f director-mode-android/app/src/main/java/ai/auraforge/director/ml/FrameAnalyzer.kt
-          test -f director-mode-android/app/src/main/java/ai/auraforge/director/ui/DirectorOverlayView.kt
-          test -f director-mode-android/app/src/main/res/drawable/bg_shutter_ready.xml
-          test -f director-mode-android/DIRECTOR_V3_ARCHITECTURE.md
-          test -f director-mode-android/app/src/main/assets/shot_templates.json
-          test -f director-mode-android/app/src/main/assets/director_config.json
-          test -f director-mode-android/app/src/main/res/layout/activity_main.xml
+
+          require_file() {
+            local path="$1"
+            if [ ! -f "$path" ]; then
+              echo "ERROR: required committed file is missing: $path" >&2
+              exit 1
+            fi
+            echo "OK file: $path"
+          }
+
+          require_grep() {
+            local pattern="$1"
+            local path="$2"
+            local label="$3"
+            if ! grep -Eq "$pattern" "$path"; then
+              echo "ERROR: source contract failed: $label" >&2
+              echo "File: $path" >&2
+              echo "Expected pattern: $pattern" >&2
+              exit 1
+            fi
+            echo "OK contract: $label"
+          }
+
+          require_file director-mode-android/settings.gradle.kts
+          require_file director-mode-android/build.gradle.kts
+          require_file director-mode-android/app/build.gradle.kts
+          require_file director-mode-android/app/src/main/AndroidManifest.xml
+          require_file director-mode-android/app/src/main/java/ai/auraforge/director/MainActivity.kt
+          require_file director-mode-android/app/src/main/java/ai/auraforge/director/camera/CameraEngine.kt
+          require_file director-mode-android/app/src/main/java/ai/auraforge/director/camera/CameraCapabilities.kt
+          require_file director-mode-android/app/src/main/java/ai/auraforge/director/core/PhotoPlan.kt
+          require_file director-mode-android/app/src/main/java/ai/auraforge/director/director/AutonomousPhotoDirector.kt
+          require_file director-mode-android/app/src/main/java/ai/auraforge/director/director/StrictPhotoPlanValidator.kt
+          require_file director-mode-android/app/src/main/java/ai/auraforge/director/director/BoundedPhotoReadinessEvaluator.kt
+          require_file director-mode-android/app/src/main/java/ai/auraforge/director/director/FallbackPhotoPlanner.kt
+          require_file director-mode-android/app/src/main/java/ai/auraforge/director/ml/VisionPipeline.kt
+          require_file director-mode-android/app/src/main/java/ai/auraforge/director/ml/FrameAnalyzer.kt
+          require_file director-mode-android/app/src/main/java/ai/auraforge/director/ui/DirectorOverlayView.kt
+          require_file director-mode-android/app/src/main/res/drawable/bg_shutter_ready.xml
+          require_file director-mode-android/DIRECTOR_V3_ARCHITECTURE.md
+          require_file director-mode-android/app/src/main/assets/shot_templates.json
+          require_file director-mode-android/app/src/main/assets/director_config.json
+          require_file director-mode-android/app/src/main/res/layout/activity_main.xml
 
           if grep -R --line-number 'id("org.jetbrains.kotlin.android")\|kotlinOptions' director-mode-android/*.gradle.kts director-mode-android/app/*.gradle.kts; then
             echo 'ERROR: legacy Kotlin Android plugin/DSL detected; AGP 9.x uses built-in Kotlin.' >&2
             exit 1
           fi
-          grep -q 'com.android.application.*9.4.1' director-mode-android/build.gradle.kts
-          grep -q 'kotlin-gradle-plugin:2.4.10' director-mode-android/build.gradle.kts
-          grep -q 'compileSdk = 36' director-mode-android/app/build.gradle.kts
-          grep -q 'targetSdk = 36' director-mode-android/app/build.gradle.kts
-          grep -q 'minSdk = 24' director-mode-android/app/build.gradle.kts
-          grep -q 'camera-extensions' director-mode-android/app/build.gradle.kts
-          grep -q 'tasks-vision:1.1.1' director-mode-android/app/build.gradle.kts
-          grep -q 'litertlm-android:0.18.0' director-mode-android/app/build.gradle.kts
-          grep -q 'INITIAL_PLAN_DEADLINE_MS = 5_000L' director-mode-android/app/src/main/java/ai/auraforge/director/MainActivity.kt
+
+          require_grep 'com\.android\.application.*9\.4\.1' director-mode-android/build.gradle.kts 'AGP 9.4.1'
+          require_grep 'kotlin-gradle-plugin:2\.4\.10' director-mode-android/build.gradle.kts 'KGP 2.4.10'
+          require_grep 'compileSdk = 36' director-mode-android/app/build.gradle.kts 'compileSdk 36'
+          require_grep 'targetSdk = 36' director-mode-android/app/build.gradle.kts 'targetSdk 36'
+          require_grep 'minSdk = 24' director-mode-android/app/build.gradle.kts 'minSdk 24'
+          require_grep 'camera-extensions' director-mode-android/app/build.gradle.kts 'CameraX Extensions dependency'
+          require_grep 'tasks-vision:1\.1\.1' director-mode-android/app/build.gradle.kts 'MediaPipe Tasks Vision 1.1.1'
+          require_grep 'litertlm-android:0\.18\.0' director-mode-android/app/build.gradle.kts 'LiteRT-LM 0.18.0'
+          require_grep 'INITIAL_PLAN_DEADLINE_MS = 5_000L' director-mode-android/app/src/main/java/ai/auraforge/director/MainActivity.kt '5 second Director fallback deadline'
+          require_grep 'BoundedPhotoReadinessEvaluator' director-mode-android/app/src/main/java/ai/auraforge/director/MainActivity.kt 'bounded READY evaluator wired into MainActivity'
+          require_grep 'FallbackPhotoPlanner' director-mode-android/app/src/main/java/ai/auraforge/director/MainActivity.kt 'fallback planner wired into MainActivity'
+
           echo 'Committed Director V3 Android project passed source preflight.'
 
       - name: Pin and verify Android/Kotlin toolchain
