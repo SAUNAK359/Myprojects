@@ -4,19 +4,14 @@ import ai.auraforge.director.camera.CameraCapabilities
 import ai.auraforge.director.camera.CameraEngine
 import ai.auraforge.director.capture.BurstCaptureController
 import ai.auraforge.director.core.DirectorFrameState
-import ai.auraforge.director.core.DirectorLockState
-import ai.auraforge.director.core.DirectorPlan
+import ai.auraforge.director.core.PhotoPlan
+import ai.auraforge.director.core.PlanReadiness
 import ai.auraforge.director.core.SceneState
 import ai.auraforge.director.core.ThermalGovernor
 import ai.auraforge.director.databinding.ActivityMainBinding
-import ai.auraforge.director.director.AlignmentEngine
-import ai.auraforge.director.director.BlueprintValidator
-import ai.auraforge.director.director.CreativeBlueprint
-import ai.auraforge.director.director.DirectorBrain
-import ai.auraforge.director.director.DirectorConfig
-import ai.auraforge.director.director.OfflineVlmDirector
-import ai.auraforge.director.director.ShotTemplate
-import ai.auraforge.director.director.ShotTemplateRepository
+import ai.auraforge.director.director.AutonomousPhotoDirector
+import ai.auraforge.director.director.PhotoPlanValidator
+import ai.auraforge.director.director.PhotoReadinessEvaluator
 import ai.auraforge.director.ml.FrameAnalyzer
 import ai.auraforge.director.ml.VisionPipeline
 import ai.auraforge.director.quality.ImageQualityAnalyzer
@@ -53,7 +48,6 @@ import kotlin.math.ln
 import kotlin.math.max
 
 class MainActivity : AppCompatActivity() {
-
     private lateinit var binding: ActivityMainBinding
     private lateinit var analysisExecutor: ExecutorService
     private lateinit var captureExecutor: ExecutorService
@@ -65,31 +59,28 @@ class MainActivity : AppCompatActivity() {
     private lateinit var frameAnalyzer: FrameAnalyzer
     private lateinit var cameraEngine: CameraEngine
     private lateinit var captureController: BurstCaptureController
-
-    private lateinit var directorConfig: DirectorConfig
-    private lateinit var directorBrain: DirectorBrain
-    private lateinit var alignmentEngine: AlignmentEngine
     private lateinit var thermalGovernor: ThermalGovernor
-    private lateinit var vlmDirector: OfflineVlmDirector
-    private val blueprintValidator = BlueprintValidator()
+    private lateinit var photoDirector: AutonomousPhotoDirector
+
+    private val planValidator = PhotoPlanValidator()
+    private val readinessEvaluator = PhotoReadinessEvaluator()
 
     private var directorEnabled = true
     private var gridEnabled = false
     private var cameraReady = false
     private var native4KAvailable = false
-    private var lastState = DirectorFrameState()
     private var lastSceneSignature = ""
     private var lastVlmSignature = ""
     private var lastVlmRequestAt = 0L
-    private var lastAppliedBlueprintStamp = 0L
+    private var lastAppliedPlanFingerprint = ""
+    private var latestReadiness = PlanReadiness(false, 0f, "AI starting")
     private var externalOutputUri: Uri? = null
+    private var extensionNames: Set<String> = emptySet()
 
-    @Volatile private var activeBlueprint: CreativeBlueprint? = null
+    @Volatile private var activePlan: PhotoPlan? = null
     private val vlmInFlight = AtomicBoolean(false)
 
-    private val permissionLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestMultiplePermissions()
-    ) { result ->
+    private val permissionLauncher = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
         if (result[Manifest.permission.CAMERA] == true) startSystem()
         else Toast.makeText(this, "Camera permission is required.", Toast.LENGTH_LONG).show()
     }
@@ -109,46 +100,30 @@ class MainActivity : AppCompatActivity() {
             intent.getParcelableExtra(MediaStore.EXTRA_OUTPUT) as? Uri
         } else null
 
-        directorConfig = DirectorConfig.load(this)
-        val templates = ShotTemplateRepository.load(this)
-        directorBrain = DirectorBrain(templates, directorConfig)
-        alignmentEngine = AlignmentEngine(directorConfig)
         sensorFusion = SensorFusion(this)
         imageQuality = ImageQualityAnalyzer()
-
         analysisExecutor = Executors.newSingleThreadExecutor { r -> Thread(r, "Director-Analysis").apply { priority = Thread.NORM_PRIORITY + 1 } }
         captureExecutor = Executors.newSingleThreadExecutor { r -> Thread(r, "Director-Capture") }
         vlmExecutor = Executors.newSingleThreadExecutor { r -> Thread(r, "Director-VLM").apply { priority = Thread.NORM_PRIORITY - 1 } }
 
         vision = VisionPipeline(this, preferGpu = true)
-        vlmDirector = OfflineVlmDirector(this)
+        photoDirector = AutonomousPhotoDirector(this)
         frameAnalyzer = FrameAnalyzer(vision, imageQuality, sensorFusion, ::onScene)
-
-        cameraEngine = CameraEngine(
-            context = this,
-            lifecycleOwner = this,
-            previewView = binding.previewView,
-            analyzer = frameAnalyzer,
-            analysisExecutor = analysisExecutor
-        )
-
-        captureController = BurstCaptureController(
-            context = this,
-            imageCaptureProvider = { cameraEngine.imageCapture },
-            executor = captureExecutor,
-            qualityAnalyzer = imageQuality
-        )
+        cameraEngine = CameraEngine(this, this, binding.previewView, frameAnalyzer, analysisExecutor)
+        captureController = BurstCaptureController(this, { cameraEngine.imageCapture }, captureExecutor, imageQuality)
 
         thermalGovernor = ThermalGovernor(this) { level, label, interval ->
             frameAnalyzer.targetIntervalMs = interval
             runOnUiThread {
                 binding.thermalBadge.text = "● $label"
                 binding.thermalBadge.setTextColor(
-                    when {
-                        level >= 3 -> getColorCompat(R.color.director_danger)
-                        level >= 1 -> getColorCompat(R.color.director_amber)
-                        else -> getColorCompat(R.color.director_green)
-                    }
+                    getColorCompat(
+                        when {
+                            level >= 3 -> R.color.director_danger
+                            level >= 1 -> R.color.director_amber
+                            else -> R.color.director_green
+                        }
+                    )
                 )
             }
         }
@@ -162,7 +137,6 @@ class MainActivity : AppCompatActivity() {
             add(Manifest.permission.CAMERA)
             if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P) add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
         }.filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
-
         if (requested.isEmpty()) startSystem() else permissionLauncher.launch(requested.toTypedArray())
     }
 
@@ -170,7 +144,7 @@ class MainActivity : AppCompatActivity() {
         sensorFusion.start()
         thermalGovernor.start()
         analysisExecutor.execute { vision.initialize() }
-        vlmExecutor.execute { vlmDirector.initialize() }
+        vlmExecutor.execute { photoDirector.initialize() }
         cameraEngine.start(
             onReady = ::onCameraReady,
             onError = { t -> runOnUiThread { Toast.makeText(this, "Camera failed: ${t.message}", Toast.LENGTH_LONG).show() } }
@@ -180,12 +154,14 @@ class MainActivity : AppCompatActivity() {
     private fun onCameraReady(caps: CameraCapabilities) {
         cameraReady = true
         native4KAvailable = caps.native4K
+        activePlan = null
+        lastAppliedPlanFingerprint = ""
         val size = caps.maxJpegSize
         runOnUiThread {
             binding.resolutionBadge.text = if (caps.native4K) "NATIVE 4K+" else size?.let { "MAX ${it.width}×${it.height}" } ?: "MAX SENSOR"
             binding.resolutionBadge.setTextColor(getColorCompat(if (caps.native4K) R.color.director_cyan else R.color.director_amber))
             configureLensButtons()
-            if (!caps.native4K) binding.directorHint.text = "Maximum real native resolution enabled — no fake upscaling"
+            setShutterReady(false)
         }
     }
 
@@ -195,33 +171,38 @@ class MainActivity : AppCompatActivity() {
         binding.gridButton.setOnClickListener {
             gridEnabled = !gridEnabled
             binding.gridButton.alpha = if (gridEnabled) 1f else 0.55f
-            binding.directorOverlay.setState(lastState.copy(gridEnabled = gridEnabled), cameraEngine.isFrontCamera)
         }
         binding.proButton.setOnClickListener { showProControls() }
         binding.flipButton.setOnClickListener {
-            clearCreativePlan(resetBody = true)
+            resetDirectorState(resetBody = true)
             cameraEngine.flip(::onCameraReady)
         }
         binding.directorToggle.setOnClickListener {
             directorEnabled = !directorEnabled
-            if (!directorEnabled) clearCreativePlan(resetBody = false)
-            binding.directorToggle.text = if (directorEnabled) "DIRECTOR ON" else "DIRECTOR OFF"
+            if (!directorEnabled) {
+                activePlan = null
+                cameraEngine.restoreAuto()
+                latestReadiness = PlanReadiness(false, 0f, "Manual camera")
+                setShutterReady(false)
+            }
+            binding.directorToggle.text = if (directorEnabled) "AI AUTO" else "MANUAL"
             binding.directorToggle.setTextColor(getColorCompat(if (directorEnabled) R.color.director_cyan else R.color.director_muted))
         }
         binding.shutterButton.setOnClickListener { capture(manual = true) }
-
         binding.lensWide.setOnClickListener { cameraEngine.setZoom(0.5f) }
         binding.lensOne.setOnClickListener { cameraEngine.setZoom(1f) }
         binding.lensTele.setOnClickListener { cameraEngine.setZoom(2f) }
     }
 
-    private fun clearCreativePlan(resetBody: Boolean) {
-        activeBlueprint = null
-        lastAppliedBlueprintStamp = 0L
+    private fun resetDirectorState(resetBody: Boolean) {
+        activePlan = null
+        lastSceneSignature = ""
         lastVlmSignature = ""
-        directorBrain.releasePlan()
-        alignmentEngine.reset()
+        lastAppliedPlanFingerprint = ""
+        latestReadiness = PlanReadiness(false, 0f, "Re-analyzing")
+        cameraEngine.restoreAuto()
         if (resetBody) frameAnalyzer.resetSubjectCalibration()
+        runOnUiThread { setShutterReady(false) }
     }
 
     private fun configureLensButtons() {
@@ -232,89 +213,98 @@ class MainActivity : AppCompatActivity() {
 
     private fun onScene(scene: SceneState) {
         val signature = sceneSignature(scene)
-        if (signature != lastSceneSignature) {
-            lastSceneSignature = signature
-            activeBlueprint = null
-            lastAppliedBlueprintStamp = 0L
-            directorBrain.releasePlan()
-            alignmentEngine.reset()
-        }
+        if (signature != lastSceneSignature) lastSceneSignature = signature
 
-        val candidates = if (directorEnabled) directorBrain.candidateTemplates(scene) else emptyList()
-        maybeRequestVlm(scene, candidates, signature)
+        if (directorEnabled) maybeRequestPhotoPlan(scene, signature)
+        val plan = activePlan
+        latestReadiness = if (directorEnabled) readinessEvaluator.evaluate(scene, plan) else PlanReadiness(false, 0f, "Manual camera")
 
-        val validatedBlueprint = activeBlueprint?.let { bp ->
-            blueprintValidator.validate(bp, scene, candidates).blueprint
-        }
-        if (validatedBlueprint != null && validatedBlueprint.createdAtMs != lastAppliedBlueprintStamp) {
-            lastAppliedBlueprintStamp = validatedBlueprint.createdAtMs
-            directorBrain.releasePlan()
-            alignmentEngine.reset()
-        }
-
-        val plan = if (directorEnabled) directorBrain.plan(scene, blueprint = validatedBlueprint) else null
-        val alignment = alignmentEngine.evaluate(scene, plan)
-        val (message, hint) = statusText(scene, plan, alignment.state)
-        val frameState = DirectorFrameState(scene, plan, alignment, gridEnabled, message, hint)
-        lastState = frameState
+        val frameState = DirectorFrameState(
+            scene = scene,
+            gridEnabled = gridEnabled,
+            message = if (plan == null) "READING SCENE" else plan.theme.uppercase(),
+            hint = latestReadiness.reason
+        )
 
         runOnUiThread {
+            if (directorEnabled && plan != null) applyPlanIfChanged(plan)
             binding.directorOverlay.setState(frameState, cameraEngine.isFrontCamera)
-            binding.directorState.text = message
-            binding.directorHint.text = hint
-            if (alignment.state == DirectorLockState.LOCKED && alignmentEngine.canCaptureAgain(scene.timestampMs)) capture(manual = false)
+            binding.directorOverlay.setPhotoPlan(if (directorEnabled) plan else null, latestReadiness)
+            renderStatus(plan, latestReadiness)
+            setShutterReady(directorEnabled && latestReadiness.ready)
         }
     }
 
-    private fun sceneSignature(scene: SceneState): String = buildString {
-        append(scene.personCount)
-        append('|')
-        append(scene.primaryBodyProfile()?.crop?.name ?: "NONE")
-        append('|')
-        scene.entities.filter { it.score >= 0.42f }.map { it.label }.distinct().sorted().take(8).forEach { append(it).append(',') }
-        append('|')
-        append((scene.quality.meanLuma * 10).toInt())
-    }
-
-    private fun maybeRequestVlm(scene: SceneState, candidates: List<ShotTemplate>, signature: String) {
-        if (!directorEnabled || !vlmDirector.ready || scene.analysisFrameJpeg == null || candidates.isEmpty()) return
+    private fun maybeRequestPhotoPlan(scene: SceneState, signature: String) {
+        val caps = cameraEngine.capabilities ?: return
+        if (!photoDirector.ready || scene.analysisFrameJpeg == null) return
         val now = scene.timestampMs
-        val sceneChanged = signature != lastVlmSignature
-        if (!sceneChanged && now - lastVlmRequestAt < VLM_REFRESH_MS) return
+        val changed = signature != lastVlmSignature
+        if (!changed && now - lastVlmRequestAt < VLM_REFRESH_MS) return
         if (!vlmInFlight.compareAndSet(false, true)) return
 
         lastVlmRequestAt = now
         lastVlmSignature = signature
         vlmExecutor.execute {
             try {
-                val proposed = vlmDirector.propose(scene, candidates)
-                val validated = blueprintValidator.validate(proposed, scene, candidates)
-                if (validated.accepted) activeBlueprint = validated.blueprint
+                val proposed = photoDirector.propose(scene, caps, extensionNames)
+                val validated = planValidator.validate(proposed, scene, caps, extensionNames)
+                if (validated != null) {
+                    val previous = activePlan
+                    activePlan = if (previous == null || changed) validated else previous.blendedWith(validated, PLAN_SMOOTHING)
+                }
             } finally {
                 vlmInFlight.set(false)
             }
         }
     }
 
-    private fun statusText(scene: SceneState, plan: DirectorPlan?, state: DirectorLockState): Pair<String, String> {
-        if (!vision.ready) return "INITIALIZING LOCAL AI" to (vision.error ?: "Models stay entirely on device")
-        if (scene.poses.isEmpty()) return "FINDING SUBJECT" to "Frame a person to start Director Mode"
-        if (!directorEnabled) return "MANUAL CAMERA" to "Director staging is paused"
-        if (plan == null) return "AUTO COMPOSITION" to if (vlmDirector.ready) "Designing a feasible shot from this scene" else "Adaptive local Director is active"
+    private fun applyPlanIfChanged(plan: PhotoPlan) {
+        val fp = plan.fingerprint()
+        if (fp == lastAppliedPlanFingerprint) return
+        cameraEngine.applyPhotoPlan(plan)
+        lastAppliedPlanFingerprint = fp
+    }
 
-        val creativeHint = plan.subjectGuidance
-            ?: plan.cameraGuidance
-            ?: plan.lightingGuidance
-            ?: plan.backgroundGuidance
-
-        return when (state) {
-            DirectorLockState.SEARCHING, DirectorLockState.SHOT_SELECTED -> "DESIGNING SHOT" to (creativeHint ?: plan.displayName)
-            DirectorLockState.ALIGNING -> plan.displayName.uppercase() to (creativeHint ?: "Match the adaptive guide — it is fitted to your current crop")
-            DirectorLockState.NEAR_LOCK -> "ALMOST LOCKED" to (creativeHint ?: "Small adjustment — keep the pose natural")
-            DirectorLockState.LOCK_CANDIDATE -> "HOLD" to "Pose matched — waiting for a stable expression and frame"
-            DirectorLockState.LOCKED -> "LOCKED" to "Capturing the strongest frame"
-            DirectorLockState.CAPTURING -> "CAPTURING" to "Selecting the strongest native frame locally"
+    private fun renderStatus(plan: PhotoPlan?, readiness: PlanReadiness) {
+        if (!vision.ready) {
+            binding.directorState.text = "INITIALIZING LOCAL AI"
+            binding.directorHint.text = vision.error ?: "Camera remains available"
+            return
         }
+        if (!directorEnabled) {
+            binding.directorState.text = "MANUAL CAMERA"
+            binding.directorHint.text = "Tap anywhere to focus"
+            return
+        }
+        if (plan == null) {
+            binding.directorState.text = if (photoDirector.ready) "READING SCENE" else "AI FALLBACK"
+            binding.directorHint.text = photoDirector.error ?: "Analyzing light, subject, background and camera"
+            return
+        }
+
+        binding.directorState.text = if (readiness.ready) "READY · ${plan.theme.uppercase()}" else plan.theme.uppercase()
+        val treatment = buildList {
+            add(plan.program.name)
+            if (plan.extensionPreference.name != "NONE") add(plan.extensionPreference.name)
+            add("${"%.1f".format(plan.zoomRatio)}×")
+            if (plan.colorStyle.name != "NATURAL") add(plan.colorStyle.name.replace('_', ' '))
+        }.joinToString(" · ")
+        binding.directorHint.text = if (readiness.ready) treatment else (plan.cameraGuidance ?: plan.subjectGuidance ?: readiness.reason)
+    }
+
+    private fun setShutterReady(ready: Boolean) {
+        binding.shutterButton.setBackgroundResource(if (ready) R.drawable.bg_shutter_ready else R.drawable.bg_shutter)
+        binding.shutterButton.contentDescription = if (ready) "AI shot ready" else "Capture"
+    }
+
+    private fun sceneSignature(scene: SceneState): String = buildString {
+        append(scene.personCount).append('|')
+        append(scene.primaryBodyProfile()?.crop?.name ?: "NONE").append('|')
+        scene.entities.filter { it.score >= 0.42f }.map { it.label }.distinct().sorted().take(10).forEach { append(it).append(',') }
+        append('|').append((scene.quality.meanLuma * 12).toInt())
+        append('|').append((scene.quality.contrast * 8).toInt())
+        append('|').append((scene.quality.highlightClipping * 10).toInt())
     }
 
     private fun capture(manual: Boolean) {
@@ -322,15 +312,13 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "Camera is still initializing.", Toast.LENGTH_SHORT).show()
             return
         }
-
-        // Manual shutter is an invariant: Director/VLM/4K/pose confidence may never block it.
-        val now = System.nanoTime() / 1_000_000L
-        alignmentEngine.markCaptured(now)
+        val plan = activePlan
         binding.directorState.text = "CAPTURING"
-        binding.directorHint.text = if (manual) "Maximum real native-resolution capture" else "Director lock — ranking a local micro-burst"
+        binding.directorHint.text = if (directorEnabled && plan != null) "${plan.theme} · native camera pipeline" else "Maximum real native-resolution capture"
+        setShutterReady(false)
 
         captureController.capture(
-            count = if (manual) 1 else 3,
+            count = if (directorEnabled && plan != null) plan.burstCount else 1,
             externalOutput = externalOutputUri
         ) { result ->
             runOnUiThread {
@@ -355,7 +343,6 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(20), dp(8), dp(20), dp(10))
         }
-
         fun label(text: String): TextView = TextView(this).apply {
             this.text = text
             setTextColor(getColorCompat(R.color.director_white))
@@ -363,6 +350,7 @@ class MainActivity : AppCompatActivity() {
             setPadding(0, dp(12), 0, dp(4))
         }
 
+        panel.addView(label("AI AUTO normally controls these values. Manual changes temporarily override the active treatment."))
         val exposureRange = cameraEngine.exposureRange()
         panel.addView(label("Exposure compensation  ${exposureRange.first} … ${exposureRange.last}"))
         panel.addView(SeekBar(this).apply {
@@ -371,48 +359,41 @@ class MainActivity : AppCompatActivity() {
             setOnSeekBarChangeListener(simpleSeek { p -> cameraEngine.setExposureCompensation(exposureRange.first + p) })
         })
 
-        val awb = Switch(this).apply {
+        panel.addView(Switch(this).apply {
             text = "Lock white balance"
             setTextColor(getColorCompat(R.color.director_white))
             setOnCheckedChangeListener { _, checked -> cameraEngine.setAwbLock(checked) }
-        }
-        panel.addView(awb)
+        })
 
         if (caps.supportsManualSensor && caps.sensitivityRange != null && caps.exposureTimeRange != null) {
             var currentIso = geometricInt(caps.sensitivityRange.lower, caps.sensitivityRange.upper, 0.45f)
             var currentExposure = geometricLong(caps.exposureTimeRange.lower, caps.exposureTimeRange.upper, 0.42f)
             var currentFocus: Float? = null
-
             val isoLabel = label("ISO  $currentIso")
             panel.addView(isoLabel)
             panel.addView(SeekBar(this).apply {
-                max = 1000
-                progress = 450
+                max = 1000; progress = 450
                 setOnSeekBarChangeListener(simpleSeek { p ->
                     currentIso = geometricInt(caps.sensitivityRange.lower, caps.sensitivityRange.upper, p / 1000f)
                     isoLabel.text = "ISO  $currentIso"
                     cameraEngine.applyManualSensor(currentIso, currentExposure, currentFocus)
                 })
             })
-
             val shutterLabel = label("Shutter  ${formatExposure(currentExposure)}")
             panel.addView(shutterLabel)
             panel.addView(SeekBar(this).apply {
-                max = 1000
-                progress = 420
+                max = 1000; progress = 420
                 setOnSeekBarChangeListener(simpleSeek { p ->
                     currentExposure = geometricLong(caps.exposureTimeRange.lower, caps.exposureTimeRange.upper, p / 1000f)
                     shutterLabel.text = "Shutter  ${formatExposure(currentExposure)}"
                     cameraEngine.applyManualSensor(currentIso, currentExposure, currentFocus)
                 })
             })
-
             (caps.minFocusDistance ?: 0f).takeIf { it > 0f }?.let { maxFocus ->
                 val focusLabel = label("Manual focus  AUTO")
                 panel.addView(focusLabel)
                 panel.addView(SeekBar(this).apply {
                     max = 1000
-                    progress = 0
                     setOnSeekBarChangeListener(simpleSeek { p ->
                         currentFocus = if (p == 0) null else maxFocus * p / 1000f
                         focusLabel.text = if (p == 0) "Manual focus  AUTO" else "Manual focus  ${"%.2f".format(currentFocus)} D"
@@ -420,8 +401,6 @@ class MainActivity : AppCompatActivity() {
                     })
                 })
             }
-        } else {
-            panel.addView(label("Manual ISO/shutter is not exposed by this camera HAL. Auto/EV/focus/zoom remain available."))
         }
 
         MaterialAlertDialogBuilder(this)
@@ -440,7 +419,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun geometricInt(low: Int, high: Int, t: Float): Int = exp(ln(low.toDouble()) + (ln(high.toDouble()) - ln(low.toDouble())) * t).toInt()
     private fun geometricLong(low: Long, high: Long, t: Float): Long = exp(ln(low.toDouble()) + (ln(high.toDouble()) - ln(low.toDouble())) * t).toLong()
-
     private fun formatExposure(ns: Long): String {
         val seconds = ns / 1_000_000_000.0
         return if (seconds >= 1.0) "${"%.2f".format(seconds)}s" else "1/${max(1, (1.0 / seconds).toInt())}s"
@@ -459,7 +437,6 @@ class MainActivity : AppCompatActivity() {
                 return true
             }
         })
-
         override fun onTouch(v: View?, event: MotionEvent): Boolean {
             scale.onTouchEvent(event)
             gesture.onTouchEvent(event)
@@ -475,7 +452,7 @@ class MainActivity : AppCompatActivity() {
         sensorFusion.stop()
         cameraEngine.close()
         vision.close()
-        vlmDirector.close()
+        photoDirector.close()
         analysisExecutor.shutdownNow()
         captureExecutor.shutdownNow()
         vlmExecutor.shutdownNow()
@@ -483,6 +460,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     companion object {
-        private const val VLM_REFRESH_MS = 5_000L
+        private const val VLM_REFRESH_MS = 1_200L
+        private const val PLAN_SMOOTHING = 0.34f
     }
 }
