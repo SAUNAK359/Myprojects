@@ -1,52 +1,57 @@
 package ai.auraforge.director.ui
 
+import ai.auraforge.director.core.CompositionGuide
 import ai.auraforge.director.core.DirectorFrameState
-import ai.auraforge.director.core.DirectorLockState
-import ai.auraforge.director.core.Point2
+import ai.auraforge.director.core.PhotoPlan
+import ai.auraforge.director.core.PlanReadiness
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.DashPathEffect
 import android.graphics.Paint
 import android.graphics.RectF
 import android.util.AttributeSet
 import android.view.View
-import kotlin.math.max
+import kotlin.math.abs
+import kotlin.math.cos
+import kotlin.math.sin
 
+/**
+ * Director's live photographer HUD. Pose skeletons are intentionally not rendered. Human landmarks
+ * remain private execution evidence for focus/framing/moment decisions, while the user sees only
+ * useful photographic composition and readiness information.
+ */
 class DirectorOverlayView @JvmOverloads constructor(
     context: Context,
     attrs: AttributeSet? = null
 ) : View(context, attrs) {
 
     private var state = DirectorFrameState()
+    private var plan: PhotoPlan? = null
+    private var readiness = PlanReadiness(false, 0f, "Analyzing")
     private var mirrorX = false
 
-    private val ghostPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.rgb(113, 247, 255)
-        strokeWidth = dp(2.2f)
-        style = Paint.Style.STROKE
-        strokeCap = Paint.Cap.ROUND
-        pathEffect = DashPathEffect(floatArrayOf(dp(9f), dp(7f)), 0f)
-    }
-    private val jointPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.rgb(145, 255, 178)
-        style = Paint.Style.FILL
-    }
-    private val livePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(110, 255, 255, 255)
-        strokeWidth = dp(1.1f)
-        style = Paint.Style.STROKE
-    }
-    private val gridPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(85, 255, 255, 255)
+    private val guidePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.argb(105, 255, 255, 255)
         strokeWidth = dp(0.8f)
+        style = Paint.Style.STROKE
     }
-    private val anchorPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(175, 113, 247, 255)
+    private val horizonPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         strokeWidth = dp(1.5f)
         style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.ROUND
     }
-    private val lockPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    private val focusPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.argb(200, 255, 214, 92)
+        strokeWidth = dp(1.4f)
+        style = Paint.Style.STROKE
+    }
+    private val readyPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeWidth = dp(3f)
+        strokeCap = Paint.Cap.ROUND
+    }
+    private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
         textAlign = Paint.Align.CENTER
         typeface = android.graphics.Typeface.DEFAULT_BOLD
     }
@@ -57,126 +62,104 @@ class DirectorOverlayView @JvmOverloads constructor(
         invalidate()
     }
 
+    fun setPhotoPlan(newPlan: PhotoPlan?, newReadiness: PlanReadiness) {
+        plan = newPlan
+        readiness = newReadiness
+        invalidate()
+    }
+
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         val scene = state.scene ?: return
-        if (state.gridEnabled) drawGrid(canvas)
+        val activePlan = plan
 
-        val locked = state.alignment.state == DirectorLockState.LOCKED
-        ghostPaint.color = if (locked) Color.rgb(145, 255, 178) else Color.rgb(113, 247, 255)
-        jointPaint.color = ghostPaint.color
-
-        state.plan?.targetPoses?.forEach { target ->
-            drawSkeleton(canvas, target.joints, ghostPaint, jointPaint)
+        if (state.gridEnabled || activePlan != null) {
+            drawCompositionGuide(canvas, activePlan?.compositionGuide ?: CompositionGuide.THIRDS)
         }
-
-        scene.poses.forEach { pose ->
-            drawSkeleton(canvas, pose.landmarks.mapIndexed { idx, p -> idx to p }.toMap(), livePaint, null)
-        }
-
-        state.plan?.relation?.let { rel ->
-            scene.primary(rel.objectLabel)?.let { drawEntityAnchor(canvas, it.bbox, rel.objectLabel.uppercase()) }
-        }
-
-        drawLockMeter(canvas)
+        drawHorizon(canvas, scene.quality.deviceRollDeg)
+        drawFocusTarget(canvas)
+        drawReadiness(canvas)
     }
 
-    private fun drawGrid(canvas: Canvas) {
-        val x1 = width / 3f
-        val x2 = width * 2f / 3f
-        val y1 = height / 3f
-        val y2 = height * 2f / 3f
-        canvas.drawLine(x1, 0f, x1, height.toFloat(), gridPaint)
-        canvas.drawLine(x2, 0f, x2, height.toFloat(), gridPaint)
-        canvas.drawLine(0f, y1, width.toFloat(), y1, gridPaint)
-        canvas.drawLine(0f, y2, width.toFloat(), y2, gridPaint)
-    }
-
-    private fun drawSkeleton(
-        canvas: Canvas,
-        joints: Map<Int, Point2>,
-        linePaint: Paint,
-        pointPaint: Paint?
-    ) {
-        CONNECTIONS.forEach { (a, b) ->
-            val pa = joints[a] ?: return@forEach
-            val pb = joints[b] ?: return@forEach
-            if (pa.confidence < 0.28f || pb.confidence < 0.28f) return@forEach
-            val va = map(pa)
-            val vb = map(pb)
-            canvas.drawLine(va.first, va.second, vb.first, vb.second, linePaint)
-        }
-        pointPaint?.let { paint ->
-            IMPORTANT_JOINTS.forEach { idx ->
-                val p = joints[idx] ?: return@forEach
-                val v = map(p)
-                canvas.drawCircle(v.first, v.second, dp(if (idx == 0) 4.8f else 3.4f), paint)
+    private fun drawCompositionGuide(canvas: Canvas, guide: CompositionGuide) {
+        when (guide) {
+            CompositionGuide.NONE -> Unit
+            CompositionGuide.THIRDS -> {
+                val x1 = width / 3f
+                val x2 = width * 2f / 3f
+                val y1 = height / 3f
+                val y2 = height * 2f / 3f
+                canvas.drawLine(x1, 0f, x1, height.toFloat(), guidePaint)
+                canvas.drawLine(x2, 0f, x2, height.toFloat(), guidePaint)
+                canvas.drawLine(0f, y1, width.toFloat(), y1, guidePaint)
+                canvas.drawLine(0f, y2, width.toFloat(), y2, guidePaint)
+            }
+            CompositionGuide.GOLDEN -> {
+                val a = 0.382f
+                val b = 0.618f
+                canvas.drawLine(width * a, 0f, width * a, height.toFloat(), guidePaint)
+                canvas.drawLine(width * b, 0f, width * b, height.toFloat(), guidePaint)
+                canvas.drawLine(0f, height * a, width.toFloat(), height * a, guidePaint)
+                canvas.drawLine(0f, height * b, width.toFloat(), height * b, guidePaint)
+            }
+            CompositionGuide.CENTER -> {
+                val cx = width / 2f
+                val cy = height / 2f
+                canvas.drawLine(cx, height * 0.16f, cx, height * 0.84f, guidePaint)
+                canvas.drawLine(width * 0.16f, cy, width * 0.84f, cy, guidePaint)
+            }
+            CompositionGuide.SYMMETRY -> {
+                val cx = width / 2f
+                canvas.drawLine(cx, 0f, cx, height.toFloat(), guidePaint)
+            }
+            CompositionGuide.DIAGONAL -> {
+                canvas.drawLine(0f, height.toFloat(), width.toFloat(), 0f, guidePaint)
+                canvas.drawLine(0f, 0f, width.toFloat(), height.toFloat(), guidePaint)
             }
         }
     }
 
-    private fun drawEntityAnchor(canvas: Canvas, normalized: RectF, label: String) {
-        val p1 = map(Point2(normalized.left, normalized.top))
-        val p2 = map(Point2(normalized.right, normalized.bottom))
-        val rect = RectF(minOf(p1.first, p2.first), minOf(p1.second, p2.second), maxOf(p1.first, p2.first), maxOf(p1.second, p2.second))
-        anchorPaint.pathEffect = DashPathEffect(floatArrayOf(dp(6f), dp(6f)), 0f)
-        canvas.drawRoundRect(rect, dp(14f), dp(14f), anchorPaint)
-        lockPaint.color = Color.argb(210, 113, 247, 255)
-        lockPaint.textSize = dp(9f)
-        canvas.drawText(label, rect.left + rect.width() / 2f, rect.top - dp(7f), lockPaint)
+    private fun drawHorizon(canvas: Canvas, rollDeg: Float) {
+        if (abs(rollDeg) < 0.35f) return
+        val cx = width / 2f
+        val cy = height * 0.76f
+        val half = dp(42f)
+        val angle = Math.toRadians((-rollDeg).toDouble())
+        val dx = (cos(angle) * half).toFloat()
+        val dy = (sin(angle) * half).toFloat()
+        horizonPaint.color = if (abs(rollDeg) <= 1.2f) Color.rgb(145, 255, 178) else Color.rgb(255, 210, 122)
+        canvas.drawLine(cx - dx, cy - dy, cx + dx, cy + dy, horizonPaint)
+        canvas.drawCircle(cx, cy, dp(2.6f), horizonPaint)
     }
 
-    private fun drawLockMeter(canvas: Canvas) {
-        val a = state.alignment
-        if (state.plan == null) return
+    private fun drawFocusTarget(canvas: Canvas) {
+        val p = plan ?: return
+        val scene = state.scene ?: return
+        if (!p.facePriority && p.focusIntent.name != "FACE" && p.focusIntent.name != "SUBJECT") return
+        val pose = scene.poses.firstOrNull() ?: return
+        val box = pose.bbox
+        val left = if (mirrorX) 1f - box.right else box.left
+        val right = if (mirrorX) 1f - box.left else box.right
+        val rect = RectF(left * width, box.top * height, right * width, box.bottom * height)
+        val insetX = rect.width() * 0.08f
+        val insetY = rect.height() * 0.08f
+        rect.inset(insetX, insetY)
+        canvas.drawRoundRect(rect, dp(14f), dp(14f), focusPaint)
+    }
+
+    private fun drawReadiness(canvas: Canvas) {
+        if (plan == null) return
         val x = width / 2f
-        val y = height * 0.18f
-        val r = dp(29f)
-        val ring = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
-            strokeWidth = dp(3f)
-            strokeCap = Paint.Cap.ROUND
-            color = Color.argb(90, 255, 255, 255)
-        }
-        canvas.drawCircle(x, y, r, ring)
-        ring.color = when (a.state) {
-            DirectorLockState.LOCKED -> Color.rgb(145, 255, 178)
-            DirectorLockState.NEAR_LOCK, DirectorLockState.LOCK_CANDIDATE -> Color.rgb(255, 210, 122)
-            else -> Color.rgb(113, 247, 255)
-        }
-        val sweep = 360f * a.totalScore.coerceIn(0f, 1f)
-        canvas.drawArc(RectF(x - r, y - r, x + r, y + r), -90f, sweep, false, ring)
-        lockPaint.color = Color.WHITE
-        lockPaint.textSize = dp(9f)
-        canvas.drawText(if (a.state == DirectorLockState.LOCKED) "LOCKED" else "${(a.totalScore * 100).toInt()}%", x, y + dp(3f), lockPaint)
-    }
-
-    private fun map(p: Point2): Pair<Float, Float> {
-        val scene = state.scene ?: return 0f to 0f
-        val iw = scene.imageWidth.toFloat().coerceAtLeast(1f)
-        val ih = scene.imageHeight.toFloat().coerceAtLeast(1f)
-        val scale = max(width / iw, height / ih)
-        val scaledW = iw * scale
-        val scaledH = ih * scale
-        val ox = (width - scaledW) / 2f
-        val oy = (height - scaledH) / 2f
-        val nx = if (mirrorX) 1f - p.x else p.x
-        return ox + nx * iw * scale to oy + p.y * ih * scale
+        val y = height * 0.17f
+        val r = dp(25f)
+        readyPaint.color = Color.argb(90, 255, 255, 255)
+        canvas.drawCircle(x, y, r, readyPaint)
+        readyPaint.color = if (readiness.ready) Color.rgb(255, 210, 72) else Color.rgb(113, 247, 255)
+        val sweep = 360f * readiness.score.coerceIn(0f, 1f)
+        canvas.drawArc(RectF(x - r, y - r, x + r, y + r), -90f, sweep, false, readyPaint)
+        textPaint.textSize = dp(8f)
+        canvas.drawText(if (readiness.ready) "READY" else "AI", x, y + dp(3f), textPaint)
     }
 
     private fun dp(value: Float): Float = value * resources.displayMetrics.density
-
-    companion object {
-        private val IMPORTANT_JOINTS = listOf(0, 11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28)
-        private val CONNECTIONS = listOf(
-            11 to 12,
-            11 to 13, 13 to 15,
-            12 to 14, 14 to 16,
-            11 to 23, 12 to 24,
-            23 to 24,
-            23 to 25, 25 to 27,
-            24 to 26, 26 to 28,
-            0 to 11, 0 to 12
-        )
-    }
 }
