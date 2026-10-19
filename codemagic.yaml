@@ -21,6 +21,9 @@ workflows:
           test -f director-mode-android/app/src/main/java/ai/auraforge/director/camera/CameraCapabilities.kt
           test -f director-mode-android/app/src/main/java/ai/auraforge/director/core/PhotoPlan.kt
           test -f director-mode-android/app/src/main/java/ai/auraforge/director/director/AutonomousPhotoDirector.kt
+          test -f director-mode-android/app/src/main/java/ai/auraforge/director/director/StrictPhotoPlanValidator.kt
+          test -f director-mode-android/app/src/main/java/ai/auraforge/director/director/BoundedPhotoReadinessEvaluator.kt
+          test -f director-mode-android/app/src/main/java/ai/auraforge/director/director/FallbackPhotoPlanner.kt
           test -f director-mode-android/app/src/main/java/ai/auraforge/director/ml/VisionPipeline.kt
           test -f director-mode-android/app/src/main/java/ai/auraforge/director/ml/FrameAnalyzer.kt
           test -f director-mode-android/app/src/main/java/ai/auraforge/director/ui/DirectorOverlayView.kt
@@ -42,6 +45,7 @@ workflows:
           grep -q 'camera-extensions' director-mode-android/app/build.gradle.kts
           grep -q 'tasks-vision:1.1.1' director-mode-android/app/build.gradle.kts
           grep -q 'litertlm-android:0.18.0' director-mode-android/app/build.gradle.kts
+          grep -q 'INITIAL_PLAN_DEADLINE_MS = 5_000L' director-mode-android/app/src/main/java/ai/auraforge/director/MainActivity.kt
           echo 'Committed Director V3 Android project passed source preflight.'
 
       - name: Pin and verify Android/Kotlin toolchain
@@ -85,7 +89,7 @@ workflows:
           TOOLCHAIN_LOG="$CM_BUILD_DIR/director-mode-android/toolchain.log"
           "$GRADLE_HOME/bin/gradle" --no-daemon --console=plain buildEnvironment 2>&1 | tee "$TOOLCHAIN_LOG"
           if ! grep -q 'org.jetbrains.kotlin:kotlin-gradle-plugin:2.4.10' "$TOOLCHAIN_LOG"; then
-            echo 'ERROR: Kotlin Gradle Plugin 2.4.10 was not resolved. Refusing to compile against LiteRT-LM Kotlin 2.4 metadata.' >&2
+            echo 'ERROR: Kotlin Gradle Plugin 2.4.10 was not resolved.' >&2
             exit 1
           fi
 
@@ -135,7 +139,7 @@ workflows:
           EXPECTED_VLM_SHA='0dfb6fb881eb16e5ef2b2be04de5476caf939b7d9ae601fdee308bbc5462fd55'
           ACTUAL_VLM_SHA=$(shasum -a 256 "$VLM" | awk '{print $1}')
           if [ "$ACTUAL_VLM_SHA" != "$EXPECTED_VLM_SHA" ]; then
-            echo "ERROR: pinned SmolVLM2 model SHA mismatch." >&2
+            echo "ERROR: SmolVLM2 model SHA mismatch." >&2
             echo "Expected: $EXPECTED_VLM_SHA" >&2
             echo "Actual:   $ACTUAL_VLM_SHA" >&2
             exit 1
@@ -175,12 +179,12 @@ workflows:
           if [ "$STATUS" -ne 0 ]; then
             echo
             echo '========== KOTLIN/ANDROID COMPILER ERRORS =========='
-            grep -E '(^e: |^w: |error: |Unresolved reference|Type mismatch|Cannot infer|Opt-in requirement|This API is experimental|Overload resolution ambiguity|No value passed for parameter|Too many arguments|Expecting |is not abstract and does not implement|overrides nothing|incompatible version of Kotlin|metadata version)' "$LOG" | tail -n 400 || true
+            grep -E '(^e: |^w: |error: |Unresolved reference|Type mismatch|Cannot infer|Opt-in requirement|This API is experimental|Overload resolution ambiguity|No value passed for parameter|Too many arguments|Expecting |is not abstract and does not implement|overrides nothing|incompatible version of Kotlin|metadata version)' "$LOG" | tail -n 350 || true
             echo '===================================================='
             exit "$STATUS"
           fi
           test -s "$CM_BUILD_DIR/director-mode-android/app/build/outputs/apk/debug/app-debug.apk"
-          echo 'Director V3 debug APK compilation passed.'
+          echo 'Debug APK compilation passed.'
 
       - name: Run Android lint report
         script: |
@@ -196,7 +200,7 @@ workflows:
           grep -E '(^.+:[0-9]+: (Error|Warning):|^[0-9]+ errors?, [0-9]+ warnings?|Lint found)' "$LINT_LOG" | tail -n 250 || true
           echo '=============================================='
           if [ "$LINT_STATUS" -ne 0 ]; then
-            echo 'Lint reported issues. Keeping them as diagnostics for the debug APK; APK verification will still run.'
+            echo 'Lint reported issues. Keeping them as diagnostics for the debug APK.'
           else
             echo 'Android lint completed successfully.'
           fi
@@ -230,7 +234,7 @@ workflows:
           test -s "$OUT"
           shasum -a 256 "$OUT" | tee "$CM_BUILD_DIR/director-mode-android/APK_SHA256.txt"
           echo "Verified APK size: $(stat -f%z "$OUT") bytes"
-          echo 'Director V3 autonomous APK package verification passed.'
+          echo 'Director V3 APK package verification passed.'
 
     artifacts:
       - director-mode-android/Director-V3-autonomous-offline-debug.apk
