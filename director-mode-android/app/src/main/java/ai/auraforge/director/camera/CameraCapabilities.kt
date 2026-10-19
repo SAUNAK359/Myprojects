@@ -9,11 +9,14 @@ import android.util.Size
 import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.CameraInfo
+import androidx.camera.core.ImageCapture
 
 data class CameraCapabilities(
     val hardwareLevel: Int?,
     val supportsManualSensor: Boolean,
     val supportsRaw: Boolean,
+    val supportsRawJpeg: Boolean,
+    val supportsUltraHdr: Boolean,
     val supportsLogicalMultiCamera: Boolean,
     val flashAvailable: Boolean,
     val sensitivityRange: Range<Int>?,
@@ -41,10 +44,9 @@ object CameraCapabilityInspector {
     fun inspect(cameraInfo: CameraInfo): CameraCapabilities {
         val info = Camera2CameraInfo.from(cameraInfo)
         val level = info.getCameraCharacteristic(CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL)
-        val caps = info.getCameraCharacteristic(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)
-            ?.toSet()
-            .orEmpty()
+        val caps = info.getCameraCharacteristic(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)?.toSet().orEmpty()
         val map = info.getCameraCharacteristic(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+        val outputFormats = runCatching { ImageCapture.getImageCaptureCapabilities(cameraInfo).supportedOutputFormats.toSet() }.getOrDefault(emptySet())
 
         val ordinary = map?.getOutputSizes(ImageFormat.JPEG)?.toList().orEmpty()
         val highResolution = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -61,6 +63,8 @@ object CameraCapabilityInspector {
             hardwareLevel = level,
             supportsManualSensor = CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR in caps,
             supportsRaw = CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_RAW in caps,
+            supportsRawJpeg = ImageCapture.OUTPUT_FORMAT_RAW_JPEG in outputFormats,
+            supportsUltraHdr = ImageCapture.OUTPUT_FORMAT_JPEG_ULTRA_HDR in outputFormats,
             supportsLogicalMultiCamera = CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA in caps,
             flashAvailable = info.getCameraCharacteristic(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true,
             sensitivityRange = info.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE),
