@@ -1,6 +1,6 @@
 workflows:
   director-mode-android:
-    name: Director Mode Offline Android APK
+    name: Director Mode 2 Offline Android APK
     max_build_duration: 60
     instance_type: mac_mini_m2
 
@@ -19,6 +19,7 @@ workflows:
           test -f director-mode-android/app/src/main/java/ai/auraforge/director/MainActivity.kt
           test -f director-mode-android/app/src/main/java/ai/auraforge/director/camera/CameraEngine.kt
           test -f director-mode-android/app/src/main/java/ai/auraforge/director/ml/VisionPipeline.kt
+          test -f director-mode-android/app/src/main/java/ai/auraforge/director/body/BodyModel.kt
           test -f director-mode-android/app/src/main/java/ai/auraforge/director/director/DirectorBrain.kt
           test -f director-mode-android/app/src/main/assets/shot_templates.json
           test -f director-mode-android/app/src/main/assets/director_config.json
@@ -33,7 +34,8 @@ workflows:
           grep -q 'targetSdk = 36' director-mode-android/app/build.gradle.kts
           grep -q 'minSdk = 24' director-mode-android/app/build.gradle.kts
           grep -q 'tasks-vision:1.1.1' director-mode-android/app/build.gradle.kts
-          echo 'Committed Android project passed source preflight.'
+          grep -q 'litertlm-android:0.18.0' director-mode-android/app/build.gradle.kts
+          echo 'Committed Director 2 Android project passed source preflight.'
 
       - name: Pin stable Android toolchain
         script: |
@@ -72,11 +74,12 @@ workflows:
           echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$CM_ENV"
           echo "ANDROID_HOME=$SDK_ROOT" >> "$CM_ENV"
 
-      - name: Bundle official offline vision models
+      - name: Bundle offline AI models
         script: |
           set -euo pipefail
           ASSETS="$CM_BUILD_DIR/director-mode-android/app/src/main/assets"
           mkdir -p "$ASSETS"
+
           curl --fail --location --retry 4 --retry-delay 2 \
             'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task' \
             -o "$ASSETS/pose_landmarker_lite.task"
@@ -86,10 +89,37 @@ workflows:
           curl --fail --location --retry 4 --retry-delay 2 \
             'https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float32/1/efficientdet_lite0.tflite' \
             -o "$ASSETS/efficientdet_lite0.tflite"
+
+          VLM="$ASSETS/SmolVLM2-500M.litertlm"
+          curl --fail --location --retry 5 --retry-delay 3 \
+            'https://huggingface.co/litert-community/SmolVLM2-500M/resolve/main/SmolVLM2-500M.litertlm?download=true' \
+            -o "$VLM"
+
           test -s "$ASSETS/pose_landmarker_lite.task"
           test -s "$ASSETS/face_landmarker.task"
           test -s "$ASSETS/efficientdet_lite0.tflite"
-          shasum -a 256 "$ASSETS/pose_landmarker_lite.task" "$ASSETS/face_landmarker.task" "$ASSETS/efficientdet_lite0.tflite" \
+          test -s "$VLM"
+
+          VLM_BYTES=$(stat -f%z "$VLM")
+          if [ "$VLM_BYTES" -lt 300000000 ]; then
+            echo "ERROR: bundled VLM is unexpectedly small ($VLM_BYTES bytes)." >&2
+            exit 1
+          fi
+
+          EXPECTED_VLM_SHA='b808b328d845a600a33c5295f93d9217487317bd334dbc91b2a8d50e26e60ad0'
+          ACTUAL_VLM_SHA=$(shasum -a 256 "$VLM" | awk '{print $1}')
+          if [ "$ACTUAL_VLM_SHA" != "$EXPECTED_VLM_SHA" ]; then
+            echo "ERROR: SmolVLM2 model SHA mismatch." >&2
+            echo "Expected: $EXPECTED_VLM_SHA" >&2
+            echo "Actual:   $ACTUAL_VLM_SHA" >&2
+            exit 1
+          fi
+
+          shasum -a 256 \
+            "$ASSETS/pose_landmarker_lite.task" \
+            "$ASSETS/face_landmarker.task" \
+            "$ASSETS/efficientdet_lite0.tflite" \
+            "$VLM" \
             | tee "$CM_BUILD_DIR/director-mode-android/MODEL_SHA256.txt"
 
       - name: Verify fully offline runtime contract
@@ -119,7 +149,7 @@ workflows:
           if [ "$STATUS" -ne 0 ]; then
             echo
             echo '========== KOTLIN/ANDROID COMPILER ERRORS =========='
-            grep -E '(^e: |^w: |error: |Unresolved reference|Type mismatch|Cannot infer|Opt-in requirement|This API is experimental|Overload resolution ambiguity|No value passed for parameter|Too many arguments|Expecting |is not abstract and does not implement|overrides nothing)' "$LOG" | tail -n 250 || true
+            grep -E '(^e: |^w: |error: |Unresolved reference|Type mismatch|Cannot infer|Opt-in requirement|This API is experimental|Overload resolution ambiguity|No value passed for parameter|Too many arguments|Expecting |is not abstract and does not implement|overrides nothing)' "$LOG" | tail -n 300 || true
             echo '===================================================='
             exit "$STATUS"
           fi
@@ -135,7 +165,7 @@ workflows:
           set -e
           echo
           echo '================ LINT SUMMARY ================'
-          grep -E '(^.+:[0-9]+: (Error|Warning):|^[0-9]+ errors?, [0-9]+ warnings?|Lint found)' "$LINT_LOG" | tail -n 200 || true
+          grep -E '(^.+:[0-9]+: (Error|Warning):|^[0-9]+ errors?, [0-9]+ warnings?|Lint found)' "$LINT_LOG" | tail -n 250 || true
           echo '=============================================='
           if [ "$LINT_STATUS" -ne 0 ]; then
             echo 'Lint reported issues. Keeping them as diagnostics for the debug APK; APK verification will still run.'
@@ -148,7 +178,7 @@ workflows:
         script: |
           set -euo pipefail
           APK="$CM_BUILD_DIR/director-mode-android/app/build/outputs/apk/debug/app-debug.apk"
-          OUT="$CM_BUILD_DIR/director-mode-android/DirectorMode-v1-offline-debug.apk"
+          OUT="$CM_BUILD_DIR/director-mode-android/DirectorMode-v2-offline-debug.apk"
           APK_LIST="$CM_BUILD_DIR/director-mode-android/apk-contents.txt"
 
           test -s "$APK"
@@ -158,6 +188,7 @@ workflows:
             'assets/pose_landmarker_lite.task' \
             'assets/face_landmarker.task' \
             'assets/efficientdet_lite0.tflite' \
+            'assets/SmolVLM2-500M.litertlm' \
             'assets/shot_templates.json' \
             'assets/director_config.json'; do
             if ! grep -Fxq "$required" "$APK_LIST"; then
@@ -172,10 +203,10 @@ workflows:
           test -s "$OUT"
           shasum -a 256 "$OUT" | tee "$CM_BUILD_DIR/director-mode-android/APK_SHA256.txt"
           echo "Verified APK size: $(stat -f%z "$OUT") bytes"
-          echo 'APK package verification passed.'
+          echo 'Director 2 APK package verification passed.'
 
     artifacts:
-      - director-mode-android/DirectorMode-v1-offline-debug.apk
+      - director-mode-android/DirectorMode-v2-offline-debug.apk
       - director-mode-android/APK_SHA256.txt
       - director-mode-android/MODEL_SHA256.txt
       - director-mode-android/apk-contents.txt
