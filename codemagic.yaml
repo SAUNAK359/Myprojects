@@ -1,6 +1,6 @@
 workflows:
   director-mode-android:
-    name: Director Mode 2 Offline Android APK
+    name: Director V3 Autonomous Offline Camera APK
     max_build_duration: 60
     instance_type: mac_mini_m2
 
@@ -8,7 +8,7 @@ workflows:
       java: 17
 
     scripts:
-      - name: Verify committed Android source
+      - name: Verify committed Director V3 source
         script: |
           set -euo pipefail
           cd "$CM_BUILD_DIR"
@@ -18,10 +18,14 @@ workflows:
           test -f director-mode-android/app/src/main/AndroidManifest.xml
           test -f director-mode-android/app/src/main/java/ai/auraforge/director/MainActivity.kt
           test -f director-mode-android/app/src/main/java/ai/auraforge/director/camera/CameraEngine.kt
+          test -f director-mode-android/app/src/main/java/ai/auraforge/director/camera/CameraCapabilities.kt
+          test -f director-mode-android/app/src/main/java/ai/auraforge/director/core/PhotoPlan.kt
+          test -f director-mode-android/app/src/main/java/ai/auraforge/director/director/AutonomousPhotoDirector.kt
           test -f director-mode-android/app/src/main/java/ai/auraforge/director/ml/VisionPipeline.kt
-          test -f director-mode-android/app/src/main/java/ai/auraforge/director/body/BodyModel.kt
-          test -f director-mode-android/app/src/main/java/ai/auraforge/director/director/DirectorBrain.kt
-          test -f director-mode-android/app/src/main/java/ai/auraforge/director/director/CreativeDirector.kt
+          test -f director-mode-android/app/src/main/java/ai/auraforge/director/ml/FrameAnalyzer.kt
+          test -f director-mode-android/app/src/main/java/ai/auraforge/director/ui/DirectorOverlayView.kt
+          test -f director-mode-android/app/src/main/res/drawable/bg_shutter_ready.xml
+          test -f director-mode-android/DIRECTOR_V3_ARCHITECTURE.md
           test -f director-mode-android/app/src/main/assets/shot_templates.json
           test -f director-mode-android/app/src/main/assets/director_config.json
           test -f director-mode-android/app/src/main/res/layout/activity_main.xml
@@ -35,9 +39,10 @@ workflows:
           grep -q 'compileSdk = 36' director-mode-android/app/build.gradle.kts
           grep -q 'targetSdk = 36' director-mode-android/app/build.gradle.kts
           grep -q 'minSdk = 24' director-mode-android/app/build.gradle.kts
+          grep -q 'camera-extensions' director-mode-android/app/build.gradle.kts
           grep -q 'tasks-vision:1.1.1' director-mode-android/app/build.gradle.kts
           grep -q 'litertlm-android:0.18.0' director-mode-android/app/build.gradle.kts
-          echo 'Committed Director 2 Android project passed source preflight.'
+          echo 'Committed Director V3 Android project passed source preflight.'
 
       - name: Pin and verify Android/Kotlin toolchain
         script: |
@@ -130,7 +135,7 @@ workflows:
           EXPECTED_VLM_SHA='0dfb6fb881eb16e5ef2b2be04de5476caf939b7d9ae601fdee308bbc5462fd55'
           ACTUAL_VLM_SHA=$(shasum -a 256 "$VLM" | awk '{print $1}')
           if [ "$ACTUAL_VLM_SHA" != "$EXPECTED_VLM_SHA" ]; then
-            echo "ERROR: SmolVLM2 model SHA mismatch." >&2
+            echo "ERROR: pinned SmolVLM2 model SHA mismatch." >&2
             echo "Expected: $EXPECTED_VLM_SHA" >&2
             echo "Actual:   $ACTUAL_VLM_SHA" >&2
             exit 1
@@ -148,7 +153,7 @@ workflows:
           set -euo pipefail
           MANIFEST="$CM_BUILD_DIR/director-mode-android/app/src/main/AndroidManifest.xml"
           if grep -q 'android.permission.INTERNET' "$MANIFEST"; then
-            echo 'ERROR: Director Mode runtime must not request INTERNET permission.' >&2
+            echo 'ERROR: Director runtime must not request INTERNET permission.' >&2
             exit 1
           fi
           grep -q 'android.permission.CAMERA' "$MANIFEST"
@@ -170,12 +175,12 @@ workflows:
           if [ "$STATUS" -ne 0 ]; then
             echo
             echo '========== KOTLIN/ANDROID COMPILER ERRORS =========='
-            grep -E '(^e: |^w: |error: |Unresolved reference|Type mismatch|Cannot infer|Opt-in requirement|This API is experimental|Overload resolution ambiguity|No value passed for parameter|Too many arguments|Expecting |is not abstract and does not implement|overrides nothing|incompatible version of Kotlin|metadata version)' "$LOG" | tail -n 350 || true
+            grep -E '(^e: |^w: |error: |Unresolved reference|Type mismatch|Cannot infer|Opt-in requirement|This API is experimental|Overload resolution ambiguity|No value passed for parameter|Too many arguments|Expecting |is not abstract and does not implement|overrides nothing|incompatible version of Kotlin|metadata version)' "$LOG" | tail -n 400 || true
             echo '===================================================='
             exit "$STATUS"
           fi
           test -s "$CM_BUILD_DIR/director-mode-android/app/build/outputs/apk/debug/app-debug.apk"
-          echo 'Debug APK compilation passed.'
+          echo 'Director V3 debug APK compilation passed.'
 
       - name: Run Android lint report
         script: |
@@ -201,7 +206,7 @@ workflows:
         script: |
           set -euo pipefail
           APK="$CM_BUILD_DIR/director-mode-android/app/build/outputs/apk/debug/app-debug.apk"
-          OUT="$CM_BUILD_DIR/director-mode-android/DirectorMode-v2-offline-debug.apk"
+          OUT="$CM_BUILD_DIR/director-mode-android/Director-V3-autonomous-offline-debug.apk"
           APK_LIST="$CM_BUILD_DIR/director-mode-android/apk-contents.txt"
 
           test -s "$APK"
@@ -216,7 +221,6 @@ workflows:
             'assets/director_config.json'; do
             if ! grep -Fxq "$required" "$APK_LIST"; then
               echo "ERROR: Required APK entry missing: $required" >&2
-              echo 'Matching APK entries:' >&2
               grep -F "$(basename "$required")" "$APK_LIST" >&2 || true
               exit 1
             fi
@@ -226,10 +230,10 @@ workflows:
           test -s "$OUT"
           shasum -a 256 "$OUT" | tee "$CM_BUILD_DIR/director-mode-android/APK_SHA256.txt"
           echo "Verified APK size: $(stat -f%z "$OUT") bytes"
-          echo 'Director 2 APK package verification passed.'
+          echo 'Director V3 autonomous APK package verification passed.'
 
     artifacts:
-      - director-mode-android/DirectorMode-v2-offline-debug.apk
+      - director-mode-android/Director-V3-autonomous-offline-debug.apk
       - director-mode-android/APK_SHA256.txt
       - director-mode-android/MODEL_SHA256.txt
       - director-mode-android/apk-contents.txt
