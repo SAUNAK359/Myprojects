@@ -5,14 +5,16 @@ import ai.auraforge.director.camera.CameraEngine
 import ai.auraforge.director.capture.BurstCaptureController
 import ai.auraforge.director.core.DirectorFrameState
 import ai.auraforge.director.core.ExtensionPreference
+import ai.auraforge.director.core.FocusIntent
+import ai.auraforge.director.core.OutputIntent
 import ai.auraforge.director.core.PhotoPlan
 import ai.auraforge.director.core.PlanReadiness
 import ai.auraforge.director.core.SceneState
 import ai.auraforge.director.core.ThermalGovernor
 import ai.auraforge.director.databinding.ActivityMainBinding
 import ai.auraforge.director.director.AutonomousPhotoDirector
-import ai.auraforge.director.director.PhotoPlanValidator
 import ai.auraforge.director.director.PhotoReadinessEvaluator
+import ai.auraforge.director.director.StrictPhotoPlanValidator
 import ai.auraforge.director.ml.FrameAnalyzer
 import ai.auraforge.director.ml.VisionPipeline
 import ai.auraforge.director.quality.ImageQualityAnalyzer
@@ -63,7 +65,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var thermalGovernor: ThermalGovernor
     private lateinit var photoDirector: AutonomousPhotoDirector
 
-    private val planValidator = PhotoPlanValidator()
+    private val planValidator = StrictPhotoPlanValidator()
     private val readinessEvaluator = PhotoReadinessEvaluator()
 
     private var directorEnabled = true
@@ -74,6 +76,7 @@ class MainActivity : AppCompatActivity() {
     private var lastVlmSignature = ""
     private var lastVlmRequestAt = 0L
     private var lastAppliedPlanFingerprint = ""
+    private var lastSubjectMeterAt = 0L
     private var latestReadiness = PlanReadiness(false, 0f, "AI starting")
     private var externalOutputUri: Uri? = null
     private var extensionNames: Set<String> = emptySet()
@@ -157,6 +160,7 @@ class MainActivity : AppCompatActivity() {
         native4KAvailable = caps.native4K
         activePlan = null
         lastAppliedPlanFingerprint = ""
+        lastSubjectMeterAt = 0L
         val size = caps.maxJpegSize
         runOnUiThread {
             binding.resolutionBadge.text = if (caps.native4K) "NATIVE 4K+" else size?.let { "MAX ${it.width}×${it.height}" } ?: "MAX SENSOR"
@@ -189,7 +193,7 @@ class MainActivity : AppCompatActivity() {
             binding.directorToggle.text = if (directorEnabled) "AI AUTO" else "MANUAL"
             binding.directorToggle.setTextColor(getColorCompat(if (directorEnabled) R.color.director_cyan else R.color.director_muted))
         }
-        binding.shutterButton.setOnClickListener { capture(manual = true) }
+        binding.shutterButton.setOnClickListener { capture() }
         binding.lensWide.setOnClickListener { cameraEngine.setZoom(0.5f) }
         binding.lensOne.setOnClickListener { cameraEngine.setZoom(1f) }
         binding.lensTele.setOnClickListener { cameraEngine.setZoom(2f) }
@@ -200,6 +204,7 @@ class MainActivity : AppCompatActivity() {
         lastSceneSignature = ""
         lastVlmSignature = ""
         lastAppliedPlanFingerprint = ""
+        lastSubjectMeterAt = 0L
         latestReadiness = PlanReadiness(false, 0f, "Re-analyzing")
         cameraEngine.restoreAuto()
         if (resetBody) frameAnalyzer.resetSubjectCalibration()
@@ -229,7 +234,10 @@ class MainActivity : AppCompatActivity() {
         )
 
         runOnUiThread {
-            if (directorEnabled && plan != null) applyPlanIfChanged(plan)
+            if (directorEnabled && plan != null) {
+                applyPlanIfChanged(plan)
+                updateTrackedMetering(scene, plan)
+            }
             binding.directorOverlay.setState(frameState, cameraEngine.isFrontCamera)
             binding.directorOverlay.setPhotoPlan(if (directorEnabled) plan else null, latestReadiness)
             renderStatus(plan, latestReadiness)
@@ -268,6 +276,20 @@ class MainActivity : AppCompatActivity() {
         lastAppliedPlanFingerprint = fp
     }
 
+    /**
+     * VLM decides whether face/subject priority matters; deterministic live perception owns the
+     * moving metering point. This prevents stale model coordinates from fighting a moving person.
+     */
+    private fun updateTrackedMetering(scene: SceneState, plan: PhotoPlan) {
+        val needsSubjectLock = plan.facePriority || plan.focusIntent == FocusIntent.FACE || plan.focusIntent == FocusIntent.SUBJECT
+        if (!needsSubjectLock || scene.timestampMs - lastSubjectMeterAt < SUBJECT_METER_REFRESH_MS) return
+        val subject = scene.poses.firstOrNull() ?: return
+        lastSubjectMeterAt = scene.timestampMs
+        val x = subject.bbox.centerX().coerceIn(0.08f, 0.92f)
+        val y = (subject.bbox.top + subject.bbox.height() * 0.24f).coerceIn(0.08f, 0.92f)
+        cameraEngine.focusNormalized(if (cameraEngine.isFrontCamera) 1f - x else x, y, sticky = true)
+    }
+
     private fun renderStatus(plan: PhotoPlan?, readiness: PlanReadiness) {
         if (!vision.ready) {
             binding.directorState.text = "INITIALIZING LOCAL AI"
@@ -289,6 +311,7 @@ class MainActivity : AppCompatActivity() {
         val treatment = buildList {
             add(plan.program.name)
             if (plan.extensionPreference != ExtensionPreference.NONE) add(plan.extensionPreference.name)
+            if (plan.outputIntent == OutputIntent.ULTRA_HDR) add("ULTRA HDR")
             add("${"%.1f".format(plan.zoomRatio)}×")
             if (plan.colorStyle.name != "NATURAL") add(plan.colorStyle.name.replace('_', ' '))
         }.joinToString(" · ")
@@ -309,29 +332,34 @@ class MainActivity : AppCompatActivity() {
         append('|').append((scene.quality.highlightClipping * 10).toInt())
     }
 
-    private fun capture(manual: Boolean) {
+    private fun capture() {
         if (!cameraReady) {
             Toast.makeText(this, "Camera is still initializing.", Toast.LENGTH_SHORT).show()
             return
         }
+
         val plan = activePlan
         val wantsExtension = directorEnabled && plan != null && plan.extensionPreference != ExtensionPreference.NONE
         val extensionActive = wantsExtension && cameraEngine.prepareCaptureExtension(plan!!.extensionPreference)
+        val specialOutputActive = !extensionActive && directorEnabled && plan?.outputIntent == OutputIntent.ULTRA_HDR &&
+            cameraEngine.prepareCaptureOutput(OutputIntent.ULTRA_HDR)
+        val temporaryCaptureSession = extensionActive || specialOutputActive
 
         binding.directorState.text = "CAPTURING"
         binding.directorHint.text = when {
             extensionActive -> "${plan!!.theme} · OEM ${plan.extensionPreference.name.lowercase()} pipeline"
+            specialOutputActive -> "${plan!!.theme} · Ultra HDR pipeline"
             directorEnabled && plan != null -> "${plan.theme} · Director camera treatment"
             else -> "Maximum real native-resolution capture"
         }
         setShutterReady(false)
 
         captureController.capture(
-            count = if (extensionActive) 1 else if (directorEnabled && plan != null) plan.burstCount else 1,
+            count = if (temporaryCaptureSession) 1 else if (directorEnabled && plan != null) plan.burstCount else 1,
             externalOutput = externalOutputUri
         ) { result ->
             runOnUiThread {
-                if (extensionActive) {
+                if (temporaryCaptureSession) {
                     cameraEngine.restoreAnalysisSession()
                     lastAppliedPlanFingerprint = ""
                     plan?.let { applyPlanIfChanged(it) }
@@ -340,6 +368,7 @@ class MainActivity : AppCompatActivity() {
                     binding.directorState.text = "SAVED"
                     binding.directorHint.text = when {
                         extensionActive -> "OEM computational frame saved locally"
+                        specialOutputActive -> "Ultra HDR frame saved locally"
                         native4KAvailable -> "Best native 4K+ frame stored locally"
                         else -> "Best native camera frame stored locally"
                     }
@@ -390,7 +419,8 @@ class MainActivity : AppCompatActivity() {
             val isoLabel = label("ISO  $currentIso")
             panel.addView(isoLabel)
             panel.addView(SeekBar(this).apply {
-                max = 1000; progress = 450
+                max = 1000
+                progress = 450
                 setOnSeekBarChangeListener(simpleSeek { p ->
                     currentIso = geometricInt(caps.sensitivityRange.lower, caps.sensitivityRange.upper, p / 1000f)
                     isoLabel.text = "ISO  $currentIso"
@@ -400,7 +430,8 @@ class MainActivity : AppCompatActivity() {
             val shutterLabel = label("Shutter  ${formatExposure(currentExposure)}")
             panel.addView(shutterLabel)
             panel.addView(SeekBar(this).apply {
-                max = 1000; progress = 420
+                max = 1000
+                progress = 420
                 setOnSeekBarChangeListener(simpleSeek { p ->
                     currentExposure = geometricLong(caps.exposureTimeRange.lower, caps.exposureTimeRange.upper, p / 1000f)
                     shutterLabel.text = "Shutter  ${formatExposure(currentExposure)}"
@@ -412,6 +443,7 @@ class MainActivity : AppCompatActivity() {
                 panel.addView(focusLabel)
                 panel.addView(SeekBar(this).apply {
                     max = 1000
+                    progress = 0
                     setOnSeekBarChangeListener(simpleSeek { p ->
                         currentFocus = if (p == 0) null else maxFocus * p / 1000f
                         focusLabel.text = if (p == 0) "Manual focus  AUTO" else "Manual focus  ${"%.2f".format(currentFocus)} D"
@@ -437,6 +469,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun geometricInt(low: Int, high: Int, t: Float): Int = exp(ln(low.toDouble()) + (ln(high.toDouble()) - ln(low.toDouble())) * t).toInt()
     private fun geometricLong(low: Long, high: Long, t: Float): Long = exp(ln(low.toDouble()) + (ln(high.toDouble()) - ln(low.toDouble())) * t).toLong()
+
     private fun formatExposure(ns: Long): String {
         val seconds = ns / 1_000_000_000.0
         return if (seconds >= 1.0) "${"%.2f".format(seconds)}s" else "1/${max(1, (1.0 / seconds).toInt())}s"
@@ -455,6 +488,7 @@ class MainActivity : AppCompatActivity() {
                 return true
             }
         })
+
         override fun onTouch(v: View?, event: MotionEvent): Boolean {
             scale.onTouchEvent(event)
             gesture.onTouchEvent(event)
@@ -480,5 +514,6 @@ class MainActivity : AppCompatActivity() {
     companion object {
         private const val VLM_REFRESH_MS = 1_200L
         private const val PLAN_SMOOTHING = 0.34f
+        private const val SUBJECT_METER_REFRESH_MS = 650L
     }
 }
