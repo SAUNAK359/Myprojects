@@ -1,7 +1,9 @@
 package ai.auraforge.director.director
 
+import ai.auraforge.director.body.CropClass
 import ai.auraforge.director.core.Point2
 import android.content.Context
+import org.json.JSONArray
 import org.json.JSONObject
 
 data class RelationSpec(
@@ -30,7 +32,8 @@ data class ShotTemplate(
     val aestheticPrior: Float,
     val difficulty: Float,
     val relation: RelationSpec?,
-    val pose: PoseSpec
+    val pose: PoseSpec,
+    val supportedCrops: Set<CropClass>
 )
 
 class ShotTemplateRepository private constructor(
@@ -68,6 +71,12 @@ class ShotTemplateRepository private constructor(
                         )
                     } else null
 
+                    val crops = if (o.has("supportedCrops")) {
+                        o.getJSONArray("supportedCrops").toCropSet()
+                    } else {
+                        inferSupportedCrops(joints.keys)
+                    }
+
                     add(
                         ShotTemplate(
                             id = o.getString("id"),
@@ -86,16 +95,35 @@ class ShotTemplateRepository private constructor(
                                 scale = poseJson.getDouble("scale").toFloat(),
                                 mirrorAllowed = poseJson.optBoolean("mirrorAllowed", true),
                                 joints = joints
-                            )
+                            ),
+                            supportedCrops = crops
                         )
                     )
                 }
             }
             return ShotTemplateRepository(result)
         }
+
+        private fun inferSupportedCrops(joints: Set<Int>): Set<CropClass> = buildSet {
+            if (0 in joints) add(CropClass.FACE)
+            if (11 in joints && 12 in joints) add(CropClass.HEAD_SHOULDERS)
+            if ((13 in joints || 14 in joints) && 11 in joints && 12 in joints) add(CropClass.CHEST_UP)
+            if (23 in joints && 24 in joints) add(CropClass.WAIST_UP)
+            if (25 in joints || 26 in joints) add(CropClass.THREE_QUARTER)
+            if (27 in joints || 28 in joints) {
+                add(CropClass.FULL_BODY)
+                add(CropClass.ENVIRONMENTAL)
+            }
+        }
     }
 }
 
-private fun org.json.JSONArray.toStringSet(): Set<String> = buildSet {
+private fun JSONArray.toStringSet(): Set<String> = buildSet {
     for (i in 0 until length()) add(getString(i).lowercase())
+}
+
+private fun JSONArray.toCropSet(): Set<CropClass> = buildSet {
+    for (i in 0 until length()) {
+        runCatching { CropClass.valueOf(getString(i).uppercase()) }.getOrNull()?.let(::add)
+    }
 }
