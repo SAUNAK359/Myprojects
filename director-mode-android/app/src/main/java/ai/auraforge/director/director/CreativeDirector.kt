@@ -14,10 +14,6 @@ import java.io.File
 import java.io.FileOutputStream
 import java.util.concurrent.atomic.AtomicBoolean
 
-/**
- * A creative VLM proposal. It deliberately contains only bounded, high-level controls.
- * Exact skeleton geometry and camera commands remain deterministic.
- */
 data class CreativeBlueprint(
     val recipeId: String,
     val confidence: Float,
@@ -47,7 +43,9 @@ class BlueprintValidator {
         if (blueprint == null) return BlueprintValidation(false, "missing blueprint")
         val recipe = candidates.firstOrNull { it.id == blueprint.recipeId }
             ?: return BlueprintValidation(false, "recipe not in feasible candidate set")
-        if (blueprint.confidence !in 0f..1f) return BlueprintValidation(false, "invalid confidence")
+        if (!blueprint.confidence.isFinite() || blueprint.confidence !in 0f..1f) {
+            return BlueprintValidation(false, "invalid confidence")
+        }
 
         val profile = scene.primaryBodyProfile()
         if (profile != null && profile.crop !in recipe.supportedCrops) {
@@ -81,8 +79,9 @@ class BlueprintValidator {
 }
 
 /**
- * Real fully-offline LiteRT-LM creative director. It never downloads at runtime: the model must be
- * present in APK assets. GPU initialization failure simply marks this component unavailable.
+ * Fully offline LiteRT-LM creative director. The model is bundled into the APK at build time and
+ * materialized into app-private storage because LiteRT-LM requires a filesystem model path.
+ * Failure is non-fatal: the deterministic Director remains active.
  */
 class OfflineVlmDirector(private val context: Context) : Closeable {
     @Volatile var ready: Boolean = false
@@ -101,6 +100,7 @@ class OfflineVlmDirector(private val context: Context) : Closeable {
                 modelPath = modelFile.absolutePath,
                 backend = Backend.GPU(),
                 visionBackend = Backend.GPU(),
+                maxNumTokens = MAX_CONTEXT_TOKENS,
                 cacheDir = context.cacheDir.absolutePath
             )
             engine = Engine(config).also { it.initialize() }
@@ -115,7 +115,7 @@ class OfflineVlmDirector(private val context: Context) : Closeable {
         }
     }
 
-    /** Blocking by design; MainActivity calls this only on the dedicated VLM executor. */
+    /** Blocking by design; MainActivity invokes this only on the dedicated low-priority VLM thread. */
     fun propose(scene: SceneState, candidates: List<ShotTemplate>): CreativeBlueprint? {
         if (!ready || candidates.isEmpty()) return null
         val jpeg = scene.analysisFrameJpeg ?: return null
@@ -124,15 +124,18 @@ class OfflineVlmDirector(private val context: Context) : Closeable {
 
         return runCatching {
             e.createConversation().use { conversation ->
+                // LiteRT-LM's current multimodal guidance recommends text before media content.
                 val response = conversation.sendMessage(
                     Contents.of(
                         listOf(
-                            Content.ImageBytes(jpeg),
-                            Content.Text(prompt)
+                            Content.Text(prompt),
+                            Content.ImageBytes(jpeg)
                         )
-                    )
+                    ),
+                    maxOutputToken = MAX_OUTPUT_TOKENS
                 )
-                parseBlueprint(response.text, scene.timestampMs)
+                // Message intentionally exposes Contents/toString rather than a `text` property.
+                parseBlueprint(response.toString(), scene.timestampMs)
             }
         }.onFailure {
             error = it.message ?: it.javaClass.simpleName
@@ -153,8 +156,8 @@ class OfflineVlmDirector(private val context: Context) : Closeable {
             .joinToString(",") { "${it.label}:${"%.2f".format(java.util.Locale.US, it.score)}" }
 
         return """
-You are Director, an expert professional photographer running fully on-device.
-Choose exactly ONE recipe from the supplied feasible candidates. The deterministic system has already removed physically impossible recipes. Analyze the actual image for photographic meaning: background, light, negative space, subject placement, mood and distracting objects. Do not invent an object that is not visible.
+You are Director, an expert professional photographer running entirely on-device.
+Choose exactly ONE recipe from the supplied feasible candidates. The deterministic system has already removed physically impossible recipes. Analyze the attached image for photographic meaning: background, light, negative space, subject placement, mood and distracting objects. Do not invent an object that is not visible.
 
 Measured evidence:
 - people=${scene.personCount}
@@ -179,7 +182,7 @@ Return ONLY one compact JSON object with exactly these keys:
   "backgroundGuidance":"short instruction or empty",
   "rationale":"very short photographic reason"
 }
-Anchor values must stay between 0.14 and 0.86. Guidance must describe achievable changes, never exact ISO/shutter values. Do not ask for body parts outside the visible crop.
+Anchor values must stay between 0.14 and 0.86. Guidance must describe achievable changes, never exact ISO/shutter values. Do not request body parts outside the visible crop.
 """.trimIndent()
     }
 
@@ -209,6 +212,7 @@ Anchor values must stay between 0.14 and 0.86. Guidance must describe achievable
         val target = File(context.filesDir, MODEL_ASSET)
         if (target.exists() && target.length() >= MIN_MODEL_BYTES) return target
         val tmp = File(context.filesDir, "$MODEL_ASSET.tmp")
+        if (tmp.exists()) tmp.delete()
         context.assets.open(MODEL_ASSET).use { input ->
             FileOutputStream(tmp).use { output -> input.copyTo(output, 1024 * 1024) }
         }
@@ -231,6 +235,8 @@ Anchor values must stay between 0.14 and 0.86. Guidance must describe achievable
         private const val TAG = "DirectorVLM"
         private const val MODEL_ASSET = "SmolVLM2-500M.litertlm"
         private const val MIN_MODEL_BYTES = 300_000_000L
+        private const val MAX_CONTEXT_TOKENS = 2048
+        private const val MAX_OUTPUT_TOKENS = 320
     }
 }
 
