@@ -79,7 +79,11 @@ dependencies {
     implementation("androidx.camera:camera-extensions:$camerax")
 
     implementation("com.google.mediapipe:tasks-vision:1.1.1")
-    implementation("com.google.ai.edge.litertlm:litertlm-android:0.18.0")
+
+    // LiteRT-LM 0.18.x is built with Kotlin 2.4 metadata, which AGP 9.4's current
+    // built-in Kotlin compiler in this project cannot read. 0.17.0 uses Kotlin 2.3.x
+    // metadata while exposing the same multimodal Engine/Conversation API used here.
+    implementation("com.google.ai.edge.litertlm:litertlm-android:0.17.0")
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
 
