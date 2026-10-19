@@ -44,6 +44,8 @@ class FrameAnalyzer(
             val snapshot = vision.analyze(rotated, now)
             val profiles = snapshot.poses.associate { pose -> pose.id to bodyCalibrator.update(pose) }
 
+            // Keep a current low-resolution visual observation for the asynchronous camera director.
+            // Old pending snapshots are overwritten; inference never queues historical frames.
             if (now - lastSnapshotAt >= SCENE_SNAPSHOT_PERIOD_MS) {
                 lastSnapshotAt = now
                 cachedSnapshot = encodePlanningSnapshot(rotated)
@@ -64,7 +66,7 @@ class FrameAnalyzer(
             )
             rotated.recycle()
         } catch (_: Throwable) {
-            // Camera preview must never fail because analysis failed.
+            // Preview and manual shutter must remain alive if any analysis component fails.
         } finally {
             image.close()
             processing.set(false)
@@ -100,7 +102,7 @@ class FrameAnalyzer(
     }
 
     companion object {
-        private const val SCENE_SNAPSHOT_PERIOD_MS = 900L
+        private const val SCENE_SNAPSHOT_PERIOD_MS = 650L
         private const val PLANNING_MAX_SIDE = 512
     }
 }
