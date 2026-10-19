@@ -34,7 +34,7 @@ workflows:
           grep -q 'targetSdk = 36' director-mode-android/app/build.gradle.kts
           grep -q 'minSdk = 24' director-mode-android/app/build.gradle.kts
           grep -q 'tasks-vision:1.1.1' director-mode-android/app/build.gradle.kts
-          grep -q 'litertlm-android:0.18.0' director-mode-android/app/build.gradle.kts
+          grep -q 'litertlm-android:0.17.0' director-mode-android/app/build.gradle.kts
           echo 'Committed Director 2 Android project passed source preflight.'
 
       - name: Pin stable Android toolchain
@@ -150,7 +150,7 @@ workflows:
           if [ "$STATUS" -ne 0 ]; then
             echo
             echo '========== KOTLIN/ANDROID COMPILER ERRORS =========='
-            grep -E '(^e: |^w: |error: |Unresolved reference|Type mismatch|Cannot infer|Opt-in requirement|This API is experimental|Overload resolution ambiguity|No value passed for parameter|Too many arguments|Expecting |is not abstract and does not implement|overrides nothing)' "$LOG" | tail -n 300 || true
+            grep -E '(^e: |^w: |error: |Unresolved reference|Type mismatch|Cannot infer|Opt-in requirement|This API is experimental|Overload resolution ambiguity|No value passed for parameter|Too many arguments|Expecting |is not abstract and does not implement|overrides nothing|incompatible version of Kotlin|metadata version)' "$LOG" | tail -n 300 || true
             echo '===================================================='
             exit "$STATUS"
           fi
