@@ -13,7 +13,8 @@ import ai.auraforge.director.core.SceneState
 import ai.auraforge.director.core.ThermalGovernor
 import ai.auraforge.director.databinding.ActivityMainBinding
 import ai.auraforge.director.director.AutonomousPhotoDirector
-import ai.auraforge.director.director.PhotoReadinessEvaluator
+import ai.auraforge.director.director.BoundedPhotoReadinessEvaluator
+import ai.auraforge.director.director.FallbackPhotoPlanner
 import ai.auraforge.director.director.StrictPhotoPlanValidator
 import ai.auraforge.director.ml.FrameAnalyzer
 import ai.auraforge.director.ml.VisionPipeline
@@ -66,7 +67,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var photoDirector: AutonomousPhotoDirector
 
     private val planValidator = StrictPhotoPlanValidator()
-    private val readinessEvaluator = PhotoReadinessEvaluator()
+    private val readinessEvaluator = BoundedPhotoReadinessEvaluator()
+    private val fallbackPlanner = FallbackPhotoPlanner()
 
     private var directorEnabled = true
     private var gridEnabled = false
@@ -77,9 +79,11 @@ class MainActivity : AppCompatActivity() {
     private var lastVlmRequestAt = 0L
     private var lastAppliedPlanFingerprint = ""
     private var lastSubjectMeterAt = 0L
+    private var directorSessionStartedAtMs = 0L
     private var latestReadiness = PlanReadiness(false, 0f, "AI starting")
     private var externalOutputUri: Uri? = null
     private var extensionNames: Set<String> = emptySet()
+    private var usingFallbackPlan = false
 
     @Volatile private var activePlan: PhotoPlan? = null
     private val vlmInFlight = AtomicBoolean(false)
@@ -145,6 +149,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startSystem() {
+        directorSessionStartedAtMs = monotonicNowMs()
         sensorFusion.start()
         thermalGovernor.start()
         analysisExecutor.execute { vision.initialize() }
@@ -159,6 +164,10 @@ class MainActivity : AppCompatActivity() {
         cameraReady = true
         native4KAvailable = caps.native4K
         activePlan = null
+        usingFallbackPlan = false
+        directorSessionStartedAtMs = monotonicNowMs()
+        lastVlmSignature = ""
+        lastVlmRequestAt = 0L
         lastAppliedPlanFingerprint = ""
         lastSubjectMeterAt = 0L
         val size = caps.maxJpegSize
@@ -186,9 +195,14 @@ class MainActivity : AppCompatActivity() {
             directorEnabled = !directorEnabled
             if (!directorEnabled) {
                 activePlan = null
+                usingFallbackPlan = false
                 cameraEngine.restoreAuto()
                 latestReadiness = PlanReadiness(false, 0f, "Manual camera")
                 setShutterReady(false)
+            } else {
+                directorSessionStartedAtMs = monotonicNowMs()
+                lastVlmSignature = ""
+                lastVlmRequestAt = 0L
             }
             binding.directorToggle.text = if (directorEnabled) "AI AUTO" else "MANUAL"
             binding.directorToggle.setTextColor(getColorCompat(if (directorEnabled) R.color.director_cyan else R.color.director_muted))
@@ -201,8 +215,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun resetDirectorState(resetBody: Boolean) {
         activePlan = null
+        usingFallbackPlan = false
+        directorSessionStartedAtMs = monotonicNowMs()
         lastSceneSignature = ""
         lastVlmSignature = ""
+        lastVlmRequestAt = 0L
         lastAppliedPlanFingerprint = ""
         lastSubjectMeterAt = 0L
         latestReadiness = PlanReadiness(false, 0f, "Re-analyzing")
@@ -222,7 +239,11 @@ class MainActivity : AppCompatActivity() {
         val signature = sceneSignature(scene)
         if (signature != lastSceneSignature) lastSceneSignature = signature
 
-        if (directorEnabled) maybeRequestPhotoPlan(scene, signature)
+        if (directorEnabled) {
+            maybeRequestPhotoPlan(scene, signature)
+            ensureBoundedPhotoPlan(scene)
+        }
+
         val plan = activePlan
         latestReadiness = if (directorEnabled) readinessEvaluator.evaluate(scene, plan) else PlanReadiness(false, 0f, "Manual camera")
 
@@ -245,6 +266,23 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * The generative Director gets a bounded first-shot budget. A failed model initialization,
+     * blocked inference or malformed response may never leave the camera in READING SCENE forever.
+     */
+    private fun ensureBoundedPhotoPlan(scene: SceneState) {
+        if (activePlan != null) return
+        val caps = cameraEngine.capabilities ?: return
+        if (directorSessionStartedAtMs <= 0L) directorSessionStartedAtMs = scene.timestampMs
+        val elapsed = scene.timestampMs - directorSessionStartedAtMs
+        if (elapsed < INITIAL_PLAN_DEADLINE_MS) return
+
+        val fallback = fallbackPlanner.plan(scene, caps, extensionNames, scene.timestampMs)
+        val validated = planValidator.validate(fallback, scene, caps, extensionNames) ?: fallback
+        activePlan = validated
+        usingFallbackPlan = true
+    }
+
     private fun maybeRequestPhotoPlan(scene: SceneState, signature: String) {
         val caps = cameraEngine.capabilities ?: return
         if (!photoDirector.ready || scene.analysisFrameJpeg == null) return
@@ -261,7 +299,12 @@ class MainActivity : AppCompatActivity() {
                 val validated = planValidator.validate(proposed, scene, caps, extensionNames)
                 if (validated != null) {
                     val previous = activePlan
-                    activePlan = if (previous == null || changed) validated else previous.blendedWith(validated, PLAN_SMOOTHING)
+                    activePlan = if (previous == null || changed || usingFallbackPlan) {
+                        validated
+                    } else {
+                        previous.blendedWith(validated, PLAN_SMOOTHING)
+                    }
+                    usingFallbackPlan = false
                 }
             } finally {
                 vlmInFlight.set(false)
@@ -302,12 +345,22 @@ class MainActivity : AppCompatActivity() {
             return
         }
         if (plan == null) {
-            binding.directorState.text = if (photoDirector.ready) "READING SCENE" else "AI FALLBACK"
-            binding.directorHint.text = photoDirector.error ?: "Analyzing light, subject, background and camera"
+            val elapsed = (monotonicNowMs() - directorSessionStartedAtMs).coerceAtLeast(0L)
+            val remaining = ((INITIAL_PLAN_DEADLINE_MS - elapsed).coerceAtLeast(0L) + 999L) / 1000L
+            binding.directorState.text = if (photoDirector.ready) "READING SCENE" else "AI WARMING"
+            binding.directorHint.text = when {
+                remaining > 0L -> "Designing treatment · fallback in ${remaining}s"
+                else -> photoDirector.error ?: "Preparing smart camera treatment"
+            }
             return
         }
 
-        binding.directorState.text = if (readiness.ready) "READY · ${plan.theme.uppercase()}" else plan.theme.uppercase()
+        binding.directorState.text = when {
+            readiness.ready && usingFallbackPlan -> "READY · SMART AUTO"
+            readiness.ready -> "READY · ${plan.theme.uppercase()}"
+            usingFallbackPlan -> "SMART AUTO · ${plan.theme.uppercase()}"
+            else -> plan.theme.uppercase()
+        }
         val treatment = buildList {
             add(plan.program.name)
             if (plan.extensionPreference != ExtensionPreference.NONE) add(plan.extensionPreference.name)
@@ -498,6 +551,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
     private fun getColorCompat(id: Int): Int = ContextCompat.getColor(this, id)
+    private fun monotonicNowMs(): Long = System.nanoTime() / 1_000_000L
 
     override fun onDestroy() {
         thermalGovernor.stop()
@@ -512,6 +566,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     companion object {
+        private const val INITIAL_PLAN_DEADLINE_MS = 5_000L
         private const val VLM_REFRESH_MS = 1_200L
         private const val PLAN_SMOOTHING = 0.34f
         private const val SUBJECT_METER_REFRESH_MS = 650L
