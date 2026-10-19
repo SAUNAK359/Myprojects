@@ -1,6 +1,7 @@
 package ai.auraforge.director.camera
 
 import ai.auraforge.director.core.CaptureProgram
+import ai.auraforge.director.core.ExtensionPreference
 import ai.auraforge.director.core.FlashIntent
 import ai.auraforge.director.core.FocusIntent
 import ai.auraforge.director.core.HardwareEffect
@@ -19,6 +20,8 @@ import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.Preview
 import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.extensions.ExtensionMode
+import androidx.camera.extensions.ExtensionsManager
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
@@ -36,8 +39,10 @@ class CameraEngine(
     private val analysisExecutor: ExecutorService
 ) {
     private var provider: ProcessCameraProvider? = null
+    private var extensionsManager: ExtensionsManager? = null
     private var camera: Camera? = null
     private var facing = CameraSelector.LENS_FACING_BACK
+    private var activeExtensionMode: Int? = null
     private var lastAppliedPlanFingerprint: String? = null
 
     lateinit var imageCapture: ImageCapture
@@ -47,6 +52,7 @@ class CameraEngine(
         private set
 
     val isFrontCamera: Boolean get() = facing == CameraSelector.LENS_FACING_FRONT
+    val isExtensionCaptureSession: Boolean get() = activeExtensionMode != null
 
     fun start(onReady: (CameraCapabilities) -> Unit, onError: (Throwable) -> Unit) {
         val future = ProcessCameraProvider.getInstance(context)
@@ -54,9 +60,66 @@ class CameraEngine(
             runCatching {
                 provider = future.get()
                 bind()
+                initializeExtensions(provider!!)
                 capabilities?.let(onReady)
             }.onFailure(onError)
         }, ContextCompat.getMainExecutor(context))
+    }
+
+    private fun initializeExtensions(p: ProcessCameraProvider) {
+        val future = ExtensionsManager.getInstanceAsync(context, p)
+        future.addListener({
+            extensionsManager = runCatching { future.get() }.getOrNull()
+        }, ContextCompat.getMainExecutor(context))
+    }
+
+    fun availableExtensionNames(): Set<String> {
+        val manager = extensionsManager ?: return emptySet()
+        val selector = baseSelector()
+        return buildSet {
+            extensionModes().forEach { (name, mode) ->
+                if (runCatching { manager.isExtensionAvailable(selector, mode) }.getOrDefault(false)) add(name)
+            }
+        }
+    }
+
+    /**
+     * Switches to the OEM computational still-photo pipeline selected by Director. CameraX
+     * extensions support Preview+ImageCapture but not ImageAnalysis, so this is intentionally a
+     * capture-time session. Call restoreAnalysisSession() after saving the image.
+     */
+    fun prepareCaptureExtension(preference: ExtensionPreference): Boolean {
+        val mode = mapExtension(preference) ?: return false
+        val p = provider ?: return false
+        val manager = extensionsManager ?: return false
+        val base = baseSelector()
+        if (!runCatching { manager.isExtensionAvailable(base, mode) }.getOrDefault(false)) return false
+
+        return runCatching {
+            p.unbindAll()
+            val selector = manager.getExtensionEnabledCameraSelector(base, mode)
+            val preview = Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
+            imageCapture = ImageCapture.Builder()
+                .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+                .build()
+            camera = p.bindToLifecycle(lifecycleOwner, selector, preview, imageCapture)
+            activeExtensionMode = mode
+            lastAppliedPlanFingerprint = null
+            true
+        }.getOrElse {
+            activeExtensionMode = null
+            runCatching { bind() }
+            false
+        }
+    }
+
+    fun restoreAnalysisSession(): Boolean {
+        if (activeExtensionMode == null) return true
+        return runCatching {
+            activeExtensionMode = null
+            bind()
+            true
+        }.getOrElse { false }
     }
 
     fun flip(onReady: (CameraCapabilities) -> Unit = {}) {
@@ -67,6 +130,7 @@ class CameraEngine(
         if (!runCatching { p.hasCamera(selector) }.getOrDefault(false)) return
 
         facing = requested
+        activeExtensionMode = null
         lastAppliedPlanFingerprint = null
         runCatching {
             bind()
@@ -77,9 +141,12 @@ class CameraEngine(
         }
     }
 
+    private fun baseSelector(): CameraSelector = CameraSelector.Builder().requireLensFacing(facing).build()
+
     private fun bind() {
         val p = provider ?: return
-        val selector = CameraSelector.Builder().requireLensFacing(facing).build()
+        activeExtensionMode = null
+        val selector = baseSelector()
         runCatching { bindUseCases(p, selector, preferHighResolution = true) }
             .recoverCatching {
                 p.unbindAll()
@@ -189,11 +256,8 @@ class CameraEngine(
         Camera2CameraControl.from(c.cameraControl).setCaptureRequestOptions(options)
     }
 
-    /**
-     * Applies a validated AI photographic treatment. The plan expresses intent; this method clamps
-     * every value against actual camera capabilities and silently falls back when unsupported.
-     */
     fun applyPhotoPlan(plan: PhotoPlan, force: Boolean = false): AppliedCameraPlan {
+        if (isExtensionCaptureSession) return AppliedCameraPlan(true, listOf("OEM extension session"), emptyList())
         val c = camera ?: return AppliedCameraPlan(false, emptyList(), listOf("camera unavailable"))
         val caps = capabilities ?: return AppliedCameraPlan(false, emptyList(), listOf("capabilities unavailable"))
         val fp = plan.fingerprint()
@@ -215,8 +279,7 @@ class CameraEngine(
             FlashIntent.AUTO -> if (caps.flashAvailable) ImageCapture.FLASH_MODE_AUTO else ImageCapture.FLASH_MODE_OFF
             FlashIntent.ON -> if (caps.flashAvailable) ImageCapture.FLASH_MODE_ON else ImageCapture.FLASH_MODE_OFF
         }
-        if (plan.flashIntent != FlashIntent.OFF && !caps.flashAvailable) skipped += "flash"
-        else applied += "flash ${plan.flashIntent.name.lowercase()}"
+        if (plan.flashIntent != FlashIntent.OFF && !caps.flashAvailable) skipped += "flash" else applied += "flash ${plan.flashIntent.name.lowercase()}"
 
         mapAwb(plan.whiteBalanceIntent)?.let { mode ->
             if (mode in caps.awbModes) {
@@ -267,9 +330,7 @@ class CameraEngine(
             val y = plan.focusY ?: 0.5f
             focusNormalized(if (isFrontCamera) 1f - x else x, y, sticky = true)
             applied += "subject metering"
-        } else if (plan.focusIntent == FocusIntent.CENTER) {
-            focusNormalized(0.5f, 0.5f, sticky = true)
-        }
+        } else if (plan.focusIntent == FocusIntent.CENTER) focusNormalized(0.5f, 0.5f, sticky = true)
 
         lastAppliedPlanFingerprint = fp
         return AppliedCameraPlan(true, applied, skipped)
@@ -285,7 +346,6 @@ class CameraEngine(
             .setCaptureRequestOption(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
             .setCaptureRequestOption(CaptureRequest.SENSOR_SENSITIVITY, isoSafe)
             .setCaptureRequestOption(CaptureRequest.SENSOR_EXPOSURE_TIME, expSafe)
-
         if (focusDistance != null && (caps.minFocusDistance ?: 0f) > 0f) {
             builder.setCaptureRequestOption(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
             builder.setCaptureRequestOption(CaptureRequest.LENS_FOCUS_DISTANCE, focusDistance.coerceIn(0f, caps.minFocusDistance ?: focusDistance))
@@ -297,6 +357,7 @@ class CameraEngine(
 
     fun restoreAuto() {
         val c = camera ?: return
+        if (isExtensionCaptureSession) return
         Camera2CameraControl.from(c.cameraControl).clearCaptureRequestOptions()
         lastAppliedPlanFingerprint = null
     }
@@ -304,11 +365,13 @@ class CameraEngine(
     fun close() {
         runCatching { provider?.unbindAll() }
         provider = null
+        extensionsManager = null
         camera = null
+        activeExtensionMode = null
         lastAppliedPlanFingerprint = null
     }
 
-    private fun mapAwb(intent: WhiteBalanceIntent): Int? = when (intent) {
+    private fun mapAwb(intent: WhiteBalanceIntent): Int = when (intent) {
         WhiteBalanceIntent.AUTO -> CaptureRequest.CONTROL_AWB_MODE_AUTO
         WhiteBalanceIntent.DAYLIGHT -> CaptureRequest.CONTROL_AWB_MODE_DAYLIGHT
         WhiteBalanceIntent.CLOUDY -> CaptureRequest.CONTROL_AWB_MODE_CLOUDY_DAYLIGHT
@@ -318,7 +381,7 @@ class CameraEngine(
         WhiteBalanceIntent.COOL -> CaptureRequest.CONTROL_AWB_MODE_DAYLIGHT
     }
 
-    private fun mapEffect(effect: HardwareEffect): Int? = when (effect) {
+    private fun mapEffect(effect: HardwareEffect): Int = when (effect) {
         HardwareEffect.OFF -> CaptureRequest.CONTROL_EFFECT_MODE_OFF
         HardwareEffect.MONO -> CaptureRequest.CONTROL_EFFECT_MODE_MONO
         HardwareEffect.SEPIA -> CaptureRequest.CONTROL_EFFECT_MODE_SEPIA
@@ -335,6 +398,23 @@ class CameraEngine(
         CaptureProgram.LANDSCAPE -> CaptureRequest.CONTROL_SCENE_MODE_LANDSCAPE
         else -> null
     }
+
+    private fun mapExtension(preference: ExtensionPreference): Int? = when (preference) {
+        ExtensionPreference.NONE -> null
+        ExtensionPreference.AUTO -> ExtensionMode.AUTO
+        ExtensionPreference.BOKEH -> ExtensionMode.BOKEH
+        ExtensionPreference.HDR -> ExtensionMode.HDR
+        ExtensionPreference.NIGHT -> ExtensionMode.NIGHT
+        ExtensionPreference.FACE_RETOUCH -> ExtensionMode.FACE_RETOUCH
+    }
+
+    private fun extensionModes(): List<Pair<String, Int>> = listOf(
+        ExtensionPreference.AUTO.name to ExtensionMode.AUTO,
+        ExtensionPreference.BOKEH.name to ExtensionMode.BOKEH,
+        ExtensionPreference.HDR.name to ExtensionMode.HDR,
+        ExtensionPreference.NIGHT.name to ExtensionMode.NIGHT,
+        ExtensionPreference.FACE_RETOUCH.name to ExtensionMode.FACE_RETOUCH
+    )
 }
 
 data class AppliedCameraPlan(
