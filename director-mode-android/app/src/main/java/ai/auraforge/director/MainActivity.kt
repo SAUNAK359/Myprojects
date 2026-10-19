@@ -4,6 +4,7 @@ import ai.auraforge.director.camera.CameraCapabilities
 import ai.auraforge.director.camera.CameraEngine
 import ai.auraforge.director.capture.BurstCaptureController
 import ai.auraforge.director.core.DirectorFrameState
+import ai.auraforge.director.core.ExtensionPreference
 import ai.auraforge.director.core.PhotoPlan
 import ai.auraforge.director.core.PlanReadiness
 import ai.auraforge.director.core.SceneState
@@ -212,6 +213,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun onScene(scene: SceneState) {
+        extensionNames = cameraEngine.availableExtensionNames()
         val signature = sceneSignature(scene)
         if (signature != lastSceneSignature) lastSceneSignature = signature
 
@@ -286,7 +288,7 @@ class MainActivity : AppCompatActivity() {
         binding.directorState.text = if (readiness.ready) "READY · ${plan.theme.uppercase()}" else plan.theme.uppercase()
         val treatment = buildList {
             add(plan.program.name)
-            if (plan.extensionPreference.name != "NONE") add(plan.extensionPreference.name)
+            if (plan.extensionPreference != ExtensionPreference.NONE) add(plan.extensionPreference.name)
             add("${"%.1f".format(plan.zoomRatio)}×")
             if (plan.colorStyle.name != "NATURAL") add(plan.colorStyle.name.replace('_', ' '))
         }.joinToString(" · ")
@@ -313,18 +315,34 @@ class MainActivity : AppCompatActivity() {
             return
         }
         val plan = activePlan
+        val wantsExtension = directorEnabled && plan != null && plan.extensionPreference != ExtensionPreference.NONE
+        val extensionActive = wantsExtension && cameraEngine.prepareCaptureExtension(plan!!.extensionPreference)
+
         binding.directorState.text = "CAPTURING"
-        binding.directorHint.text = if (directorEnabled && plan != null) "${plan.theme} · native camera pipeline" else "Maximum real native-resolution capture"
+        binding.directorHint.text = when {
+            extensionActive -> "${plan!!.theme} · OEM ${plan.extensionPreference.name.lowercase()} pipeline"
+            directorEnabled && plan != null -> "${plan.theme} · Director camera treatment"
+            else -> "Maximum real native-resolution capture"
+        }
         setShutterReady(false)
 
         captureController.capture(
-            count = if (directorEnabled && plan != null) plan.burstCount else 1,
+            count = if (extensionActive) 1 else if (directorEnabled && plan != null) plan.burstCount else 1,
             externalOutput = externalOutputUri
         ) { result ->
             runOnUiThread {
+                if (extensionActive) {
+                    cameraEngine.restoreAnalysisSession()
+                    lastAppliedPlanFingerprint = ""
+                    plan?.let { applyPlanIfChanged(it) }
+                }
                 result.onSuccess { uri ->
                     binding.directorState.text = "SAVED"
-                    binding.directorHint.text = if (native4KAvailable) "Best native 4K+ frame stored locally" else "Best native camera frame stored locally"
+                    binding.directorHint.text = when {
+                        extensionActive -> "OEM computational frame saved locally"
+                        native4KAvailable -> "Best native 4K+ frame stored locally"
+                        else -> "Best native camera frame stored locally"
+                    }
                     if (intent.action == MediaStore.ACTION_IMAGE_CAPTURE) {
                         setResult(Activity.RESULT_OK, Intent().setData(uri))
                         finish()
