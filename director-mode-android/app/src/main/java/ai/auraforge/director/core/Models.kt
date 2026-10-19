@@ -40,7 +40,6 @@ data class FaceState(
     val eyesOpenScore: Float get() = (1f - max(blinkLeft, blinkRight)).coerceIn(0f, 1f)
 }
 
-/** Lightweight low-resolution luminance field used for lighting/background decisions. */
 data class LuminanceGrid(
     val columns: Int = 0,
     val rows: Int = 0,
@@ -96,7 +95,6 @@ data class SceneState(
     val imageWidth: Int,
     val imageHeight: Int,
     val bodyProfiles: Map<Int, BodyProfile> = emptyMap(),
-    /** Small JPEG snapshot used only for occasional on-device VLM planning. */
     val analysisFrameJpeg: ByteArray? = null
 ) {
     val personCount: Int get() = max(poses.size, entities.count { it.label.equals("person", true) })
@@ -135,7 +133,13 @@ data class DirectorPlan(
     val relation: TargetRelation?,
     val confidence: Float,
     val expectedGain: Float,
-    val style: String
+    val style: String,
+    val source: String = "DETERMINISTIC",
+    val subjectGuidance: String? = null,
+    val cameraGuidance: String? = null,
+    val lightingGuidance: String? = null,
+    val backgroundGuidance: String? = null,
+    val rationale: String? = null
 )
 
 data class AlignmentState(
