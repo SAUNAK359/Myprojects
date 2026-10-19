@@ -1,5 +1,6 @@
 package ai.auraforge.director.core
 
+import ai.auraforge.director.body.BodyProfile
 import android.graphics.RectF
 import kotlin.math.max
 import kotlin.math.min
@@ -39,6 +40,30 @@ data class FaceState(
     val eyesOpenScore: Float get() = (1f - max(blinkLeft, blinkRight)).coerceIn(0f, 1f)
 }
 
+/** Lightweight low-resolution luminance field used for lighting/background decisions. */
+data class LuminanceGrid(
+    val columns: Int = 0,
+    val rows: Int = 0,
+    val values: List<Float> = emptyList()
+) {
+    fun mean(rect: RectF): Float? {
+        if (columns <= 0 || rows <= 0 || values.size != columns * rows) return null
+        val l = (rect.left.coerceIn(0f, 1f) * columns).toInt().coerceIn(0, columns - 1)
+        val r = (rect.right.coerceIn(0f, 1f) * columns).toInt().coerceIn(l, columns - 1)
+        val t = (rect.top.coerceIn(0f, 1f) * rows).toInt().coerceIn(0, rows - 1)
+        val b = (rect.bottom.coerceIn(0f, 1f) * rows).toInt().coerceIn(t, rows - 1)
+        var sum = 0f
+        var n = 0
+        for (y in t..b) for (x in l..r) {
+            sum += values[y * columns + x]
+            n++
+        }
+        return if (n == 0) null else sum / n
+    }
+
+    fun meanAll(): Float? = if (values.isEmpty()) null else values.average().toFloat()
+}
+
 data class ImageQuality(
     val meanLuma: Float = 0.5f,
     val contrast: Float = 0.5f,
@@ -46,7 +71,8 @@ data class ImageQuality(
     val shadowClipping: Float = 0f,
     val sharpness: Float = 0.5f,
     val cameraMotion: Float = 0f,
-    val deviceRollDeg: Float = 0f
+    val deviceRollDeg: Float = 0f,
+    val lumaGrid: LuminanceGrid = LuminanceGrid()
 ) {
     val exposureScore: Float
         get() {
@@ -68,11 +94,15 @@ data class SceneState(
     val face: FaceState?,
     val quality: ImageQuality,
     val imageWidth: Int,
-    val imageHeight: Int
+    val imageHeight: Int,
+    val bodyProfiles: Map<Int, BodyProfile> = emptyMap(),
+    /** Small JPEG snapshot used only for occasional on-device VLM planning. */
+    val analysisFrameJpeg: ByteArray? = null
 ) {
     val personCount: Int get() = max(poses.size, entities.count { it.label.equals("person", true) })
     fun has(label: String): Boolean = entities.any { it.label.equals(label, true) }
     fun primary(label: String): EntityState? = entities.filter { it.label.equals(label, true) }.maxByOrNull { it.score * it.bbox.width() * it.bbox.height() }
+    fun primaryBodyProfile(): BodyProfile? = poses.firstOrNull()?.let { bodyProfiles[it.id] }
 }
 
 enum class DirectorLockState {
