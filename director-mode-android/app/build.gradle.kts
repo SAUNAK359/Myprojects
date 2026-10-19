@@ -10,8 +10,8 @@ android {
         applicationId = "ai.auraforge.director"
         minSdk = 24
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0.0-alpha1"
+        versionCode = 2
+        versionName = "2.0.0-alpha1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
@@ -51,7 +51,9 @@ android {
     }
 
     androidResources {
-        noCompress += setOf("tflite", "task")
+        // Models are already internally compressed/quantized. Recompressing them makes startup
+        // slower and can prevent native runtimes from mapping them efficiently.
+        noCompress += setOf("tflite", "task", "litertlm")
     }
 
     lint {
@@ -77,6 +79,7 @@ dependencies {
     implementation("androidx.camera:camera-extensions:$camerax")
 
     implementation("com.google.mediapipe:tasks-vision:1.1.1")
+    implementation("com.google.ai.edge.litertlm:litertlm-android:0.18.0")
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
 
