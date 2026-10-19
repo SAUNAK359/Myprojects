@@ -91,8 +91,9 @@ workflows:
             -o "$ASSETS/efficientdet_lite0.tflite"
 
           VLM="$ASSETS/SmolVLM2-500M.litertlm"
+          VLM_REVISION='aa352336f6929cf0fc576d573d7de9116e5a7faa'
           curl --fail --location --retry 5 --retry-delay 3 \
-            'https://huggingface.co/litert-community/SmolVLM2-500M/resolve/main/SmolVLM2-500M.litertlm?download=true' \
+            "https://huggingface.co/litert-community/SmolVLM2-500M/resolve/${VLM_REVISION}/SmolVLM2-500M.litertlm?download=true" \
             -o "$VLM"
 
           test -s "$ASSETS/pose_landmarker_lite.task"
@@ -106,7 +107,7 @@ workflows:
             exit 1
           fi
 
-          EXPECTED_VLM_SHA='b808b328d845a600a33c5295f93d9217487317bd334dbc91b2a8d50e26e60ad0'
+          EXPECTED_VLM_SHA='0dfb6fb881eb16e5ef2b2be04de5476caf939b7d9ae601fdee308bbc5462fd55'
           ACTUAL_VLM_SHA=$(shasum -a 256 "$VLM" | awk '{print $1}')
           if [ "$ACTUAL_VLM_SHA" != "$EXPECTED_VLM_SHA" ]; then
             echo "ERROR: SmolVLM2 model SHA mismatch." >&2
