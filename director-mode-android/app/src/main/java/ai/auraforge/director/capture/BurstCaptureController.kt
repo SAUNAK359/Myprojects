@@ -27,7 +27,11 @@ class BurstCaptureController(
         externalOutput: Uri? = null,
         onComplete: (Result<Uri>) -> Unit
     ) {
-        if (!capturing.compareAndSet(false, true)) return
+        if (!capturing.compareAndSet(false, true)) {
+            onComplete(Result.failure(IllegalStateException("A capture is already in progress")))
+            return
+        }
+
         val files = mutableListOf<File>()
         captureNext(0, count.coerceIn(1, 3), files) { result ->
             if (result.isFailure) {
@@ -38,11 +42,12 @@ class BurstCaptureController(
             }
 
             runCatching {
-                val valid4K = files.filter(::isNative4KFile)
-                require(valid4K.isNotEmpty()) {
-                    "Camera HAL advertised native 4K, but the captured JPEG was below 3840×2160. The image was not upscaled or saved as fake 4K."
-                }
-                val best = selectBest(valid4K)
+                // Keep the camera's real native output. Never upscale, but never reject a
+                // legitimate photograph merely because a lens does not expose 4K JPEG.
+                val valid = files.filter(::isDecodableJpeg)
+                require(valid.isNotEmpty()) { "Camera returned no decodable JPEG frame" }
+
+                val best = selectBest(valid)
                 val uri = if (externalOutput != null) {
                     context.contentResolver.openOutputStream(externalOutput, "w")!!.use { out ->
                         FileInputStream(best).use { it.copyTo(out) }
@@ -90,12 +95,10 @@ class BurstCaptureController(
         )
     }
 
-    private fun isNative4KFile(file: File): Boolean {
+    private fun isDecodableJpeg(file: File): Boolean {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeFile(file.absolutePath, bounds)
-        val longSide = maxOf(bounds.outWidth, bounds.outHeight)
-        val shortSide = minOf(bounds.outWidth, bounds.outHeight)
-        return longSide >= 3840 && shortSide >= 2160
+        return bounds.outWidth > 0 && bounds.outHeight > 0
     }
 
     private fun selectBest(files: List<File>): File {
@@ -103,9 +106,11 @@ class BurstCaptureController(
         return files.maxByOrNull { file ->
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             BitmapFactory.decodeFile(file.absolutePath, bounds)
+            val longSide = maxOf(bounds.outWidth, bounds.outHeight)
             val sample = when {
-                bounds.outWidth > 6000 -> 12
-                bounds.outWidth > 4000 -> 8
+                longSide > 6000 -> 12
+                longSide > 4000 -> 8
+                longSide > 2500 -> 6
                 else -> 4
             }
             val opts = BitmapFactory.Options().apply { inSampleSize = sample }
