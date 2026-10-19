@@ -21,23 +21,25 @@ workflows:
           test -f director-mode-android/app/src/main/java/ai/auraforge/director/ml/VisionPipeline.kt
           test -f director-mode-android/app/src/main/java/ai/auraforge/director/body/BodyModel.kt
           test -f director-mode-android/app/src/main/java/ai/auraforge/director/director/DirectorBrain.kt
+          test -f director-mode-android/app/src/main/java/ai/auraforge/director/director/CreativeDirector.kt
           test -f director-mode-android/app/src/main/assets/shot_templates.json
           test -f director-mode-android/app/src/main/assets/director_config.json
           test -f director-mode-android/app/src/main/res/layout/activity_main.xml
 
-          if grep -R --line-number 'org.jetbrains.kotlin.android\|kotlinOptions' director-mode-android/*.gradle.kts director-mode-android/app/*.gradle.kts; then
-            echo 'ERROR: legacy Kotlin Gradle configuration detected; AGP 9.4 uses built-in Kotlin.' >&2
+          if grep -R --line-number 'id("org.jetbrains.kotlin.android")\|kotlinOptions' director-mode-android/*.gradle.kts director-mode-android/app/*.gradle.kts; then
+            echo 'ERROR: legacy Kotlin Android plugin/DSL detected; AGP 9.x uses built-in Kotlin.' >&2
             exit 1
           fi
-          grep -q 'com.android.application.*9.4.0' director-mode-android/build.gradle.kts
+          grep -q 'com.android.application.*9.4.1' director-mode-android/build.gradle.kts
+          grep -q 'kotlin-gradle-plugin:2.4.10' director-mode-android/build.gradle.kts
           grep -q 'compileSdk = 36' director-mode-android/app/build.gradle.kts
           grep -q 'targetSdk = 36' director-mode-android/app/build.gradle.kts
           grep -q 'minSdk = 24' director-mode-android/app/build.gradle.kts
           grep -q 'tasks-vision:1.1.1' director-mode-android/app/build.gradle.kts
-          grep -q 'litertlm-android:0.17.0' director-mode-android/app/build.gradle.kts
+          grep -q 'litertlm-android:0.18.0' director-mode-android/app/build.gradle.kts
           echo 'Committed Director 2 Android project passed source preflight.'
 
-      - name: Pin stable Android toolchain
+      - name: Pin and verify Android/Kotlin toolchain
         script: |
           set -euo pipefail
           java -version
@@ -73,6 +75,24 @@ workflows:
           echo "GRADLE_BIN=$GRADLE_HOME/bin/gradle" >> "$CM_ENV"
           echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$CM_ENV"
           echo "ANDROID_HOME=$SDK_ROOT" >> "$CM_ENV"
+
+          cd "$CM_BUILD_DIR/director-mode-android"
+          TOOLCHAIN_LOG="$CM_BUILD_DIR/director-mode-android/toolchain.log"
+          "$GRADLE_HOME/bin/gradle" --no-daemon --console=plain buildEnvironment 2>&1 | tee "$TOOLCHAIN_LOG"
+          if ! grep -q 'org.jetbrains.kotlin:kotlin-gradle-plugin:2.4.10' "$TOOLCHAIN_LOG"; then
+            echo 'ERROR: Kotlin Gradle Plugin 2.4.10 was not resolved. Refusing to compile against LiteRT-LM Kotlin 2.4 metadata.' >&2
+            exit 1
+          fi
+
+          DEPS_LOG="$CM_BUILD_DIR/director-mode-android/dependencies.log"
+          "$GRADLE_HOME/bin/gradle" --no-daemon --console=plain :app:dependencyInsight \
+            --dependency org.jetbrains.kotlin:kotlin-stdlib \
+            --configuration debugCompileClasspath 2>&1 | tee "$DEPS_LOG"
+          if ! grep -Eq 'kotlin-stdlib[^:]*:2\.4\.' "$DEPS_LOG"; then
+            echo 'ERROR: debug compile classpath is not aligned to Kotlin stdlib 2.4.x.' >&2
+            exit 1
+          fi
+          echo 'Android/Kotlin toolchain compatibility gate passed.'
 
       - name: Bundle offline AI models
         script: |
@@ -150,10 +170,12 @@ workflows:
           if [ "$STATUS" -ne 0 ]; then
             echo
             echo '========== KOTLIN/ANDROID COMPILER ERRORS =========='
-            grep -E '(^e: |^w: |error: |Unresolved reference|Type mismatch|Cannot infer|Opt-in requirement|This API is experimental|Overload resolution ambiguity|No value passed for parameter|Too many arguments|Expecting |is not abstract and does not implement|overrides nothing|incompatible version of Kotlin|metadata version)' "$LOG" | tail -n 300 || true
+            grep -E '(^e: |^w: |error: |Unresolved reference|Type mismatch|Cannot infer|Opt-in requirement|This API is experimental|Overload resolution ambiguity|No value passed for parameter|Too many arguments|Expecting |is not abstract and does not implement|overrides nothing|incompatible version of Kotlin|metadata version)' "$LOG" | tail -n 350 || true
             echo '===================================================='
             exit "$STATUS"
           fi
+          test -s "$CM_BUILD_DIR/director-mode-android/app/build/outputs/apk/debug/app-debug.apk"
+          echo 'Debug APK compilation passed.'
 
       - name: Run Android lint report
         script: |
@@ -211,6 +233,8 @@ workflows:
       - director-mode-android/APK_SHA256.txt
       - director-mode-android/MODEL_SHA256.txt
       - director-mode-android/apk-contents.txt
+      - director-mode-android/toolchain.log
+      - director-mode-android/dependencies.log
       - director-mode-android/compile.log
       - director-mode-android/lint.log
       - director-mode-android/app/build/reports/**
