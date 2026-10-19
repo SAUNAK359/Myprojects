@@ -5,6 +5,7 @@ import ai.auraforge.director.core.ExtensionPreference
 import ai.auraforge.director.core.FlashIntent
 import ai.auraforge.director.core.FocusIntent
 import ai.auraforge.director.core.HardwareEffect
+import ai.auraforge.director.core.OutputIntent
 import ai.auraforge.director.core.PhotoPlan
 import ai.auraforge.director.core.WhiteBalanceIntent
 import ai.auraforge.director.ml.FrameAnalyzer
@@ -43,6 +44,7 @@ class CameraEngine(
     private var camera: Camera? = null
     private var facing = CameraSelector.LENS_FACING_BACK
     private var activeExtensionMode: Int? = null
+    private var activeSpecialOutput = false
     private var lastAppliedPlanFingerprint: String? = null
 
     lateinit var imageCapture: ImageCapture
@@ -52,7 +54,7 @@ class CameraEngine(
         private set
 
     val isFrontCamera: Boolean get() = facing == CameraSelector.LENS_FACING_FRONT
-    val isExtensionCaptureSession: Boolean get() = activeExtensionMode != null
+    val isSpecialCaptureSession: Boolean get() = activeExtensionMode != null || activeSpecialOutput
 
     fun start(onReady: (CameraCapabilities) -> Unit, onError: (Throwable) -> Unit) {
         val future = ProcessCameraProvider.getInstance(context)
@@ -68,9 +70,7 @@ class CameraEngine(
 
     private fun initializeExtensions(p: ProcessCameraProvider) {
         val future = ExtensionsManager.getInstanceAsync(context, p)
-        future.addListener({
-            extensionsManager = runCatching { future.get() }.getOrNull()
-        }, ContextCompat.getMainExecutor(context))
+        future.addListener({ extensionsManager = runCatching { future.get() }.getOrNull() }, ContextCompat.getMainExecutor(context))
     }
 
     fun availableExtensionNames(): Set<String> {
@@ -83,11 +83,6 @@ class CameraEngine(
         }
     }
 
-    /**
-     * Switches to the OEM computational still-photo pipeline selected by Director. CameraX
-     * extensions support Preview+ImageCapture but not ImageAnalysis, so this is intentionally a
-     * capture-time session. Call restoreAnalysisSession() after saving the image.
-     */
     fun prepareCaptureExtension(preference: ExtensionPreference): Boolean {
         val mode = mapExtension(preference) ?: return false
         val p = provider ?: return false
@@ -99,24 +94,51 @@ class CameraEngine(
             p.unbindAll()
             val selector = manager.getExtensionEnabledCameraSelector(base, mode)
             val preview = Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
-            imageCapture = ImageCapture.Builder()
-                .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
-                .build()
+            imageCapture = ImageCapture.Builder().setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY).build()
             camera = p.bindToLifecycle(lifecycleOwner, selector, preview, imageCapture)
             activeExtensionMode = mode
+            activeSpecialOutput = false
             lastAppliedPlanFingerprint = null
             true
         }.getOrElse {
             activeExtensionMode = null
+            activeSpecialOutput = false
+            runCatching { bind() }
+            false
+        }
+    }
+
+    /** Prepares a one-shot non-default output path. Currently Ultra HDR is supported here. */
+    fun prepareCaptureOutput(intent: OutputIntent): Boolean {
+        if (intent != OutputIntent.ULTRA_HDR) return false
+        val caps = capabilities ?: return false
+        if (!caps.supportsUltraHdr) return false
+        val p = provider ?: return false
+
+        return runCatching {
+            p.unbindAll()
+            val preview = Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
+            imageCapture = ImageCapture.Builder()
+                .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+                .setOutputFormat(ImageCapture.OUTPUT_FORMAT_JPEG_ULTRA_HDR)
+                .build()
+            camera = p.bindToLifecycle(lifecycleOwner, baseSelector(), preview, imageCapture)
+            activeExtensionMode = null
+            activeSpecialOutput = true
+            lastAppliedPlanFingerprint = null
+            true
+        }.getOrElse {
+            activeSpecialOutput = false
             runCatching { bind() }
             false
         }
     }
 
     fun restoreAnalysisSession(): Boolean {
-        if (activeExtensionMode == null) return true
+        if (!isSpecialCaptureSession) return true
         return runCatching {
             activeExtensionMode = null
+            activeSpecialOutput = false
             bind()
             true
         }.getOrElse { false }
@@ -131,6 +153,7 @@ class CameraEngine(
 
         facing = requested
         activeExtensionMode = null
+        activeSpecialOutput = false
         lastAppliedPlanFingerprint = null
         runCatching {
             bind()
@@ -146,6 +169,7 @@ class CameraEngine(
     private fun bind() {
         val p = provider ?: return
         activeExtensionMode = null
+        activeSpecialOutput = false
         val selector = baseSelector()
         runCatching { bindUseCases(p, selector, preferHighResolution = true) }
             .recoverCatching {
@@ -215,10 +239,7 @@ class CameraEngine(
     fun focusNormalized(x: Float, y: Float, sticky: Boolean = true) {
         val c = camera ?: return
         if (previewView.width <= 0 || previewView.height <= 0) return
-        val point = previewView.meteringPointFactory.createPoint(
-            x.coerceIn(0f, 1f) * previewView.width,
-            y.coerceIn(0f, 1f) * previewView.height
-        )
+        val point = previewView.meteringPointFactory.createPoint(x.coerceIn(0f, 1f) * previewView.width, y.coerceIn(0f, 1f) * previewView.height)
         val builder = FocusMeteringAction.Builder(
             point,
             FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE or FocusMeteringAction.FLAG_AWB
@@ -239,8 +260,7 @@ class CameraEngine(
         val range = caps.exposureCompensationRange ?: return
         val step = caps.exposureCompensationStep?.toDouble() ?: return
         if (step <= 0.0) return
-        val index = (ev / step).roundToInt().coerceIn(range.lower, range.upper)
-        setExposureCompensation(index)
+        setExposureCompensation((ev / step).roundToInt().coerceIn(range.lower, range.upper))
     }
 
     fun exposureRange(): IntRange {
@@ -250,14 +270,13 @@ class CameraEngine(
 
     fun setAwbLock(locked: Boolean) {
         val c = camera ?: return
-        val options = CaptureRequestOptions.Builder()
-            .setCaptureRequestOption(CaptureRequest.CONTROL_AWB_LOCK, locked)
-            .build()
+        if (isSpecialCaptureSession) return
+        val options = CaptureRequestOptions.Builder().setCaptureRequestOption(CaptureRequest.CONTROL_AWB_LOCK, locked).build()
         Camera2CameraControl.from(c.cameraControl).setCaptureRequestOptions(options)
     }
 
     fun applyPhotoPlan(plan: PhotoPlan, force: Boolean = false): AppliedCameraPlan {
-        if (isExtensionCaptureSession) return AppliedCameraPlan(true, listOf("OEM extension session"), emptyList())
+        if (isSpecialCaptureSession) return AppliedCameraPlan(true, listOf("special capture session"), emptyList())
         val c = camera ?: return AppliedCameraPlan(false, emptyList(), listOf("camera unavailable"))
         val caps = capabilities ?: return AppliedCameraPlan(false, emptyList(), listOf("capabilities unavailable"))
         val fp = plan.fingerprint()
@@ -270,7 +289,6 @@ class CameraEngine(
         val zoom = plan.zoomRatio.coerceIn(zoomRange().start, zoomRange().endInclusive)
         setZoom(zoom)
         applied += "zoom ${"%.2f".format(zoom)}×"
-
         setExposureEv(plan.exposureEv.coerceIn(-3f, 3f))
         applied += "EV ${"%+.1f".format(plan.exposureEv.coerceIn(-3f, 3f))}"
 
@@ -281,19 +299,17 @@ class CameraEngine(
         }
         if (plan.flashIntent != FlashIntent.OFF && !caps.flashAvailable) skipped += "flash" else applied += "flash ${plan.flashIntent.name.lowercase()}"
 
-        mapAwb(plan.whiteBalanceIntent)?.let { mode ->
-            if (mode in caps.awbModes) {
-                options.setCaptureRequestOption(CaptureRequest.CONTROL_AWB_MODE, mode)
-                applied += "WB ${plan.whiteBalanceIntent.name.lowercase()}"
-            } else skipped += "WB ${plan.whiteBalanceIntent.name.lowercase()}"
-        }
+        val wb = mapAwb(plan.whiteBalanceIntent)
+        if (wb in caps.awbModes) {
+            options.setCaptureRequestOption(CaptureRequest.CONTROL_AWB_MODE, wb)
+            applied += "WB ${plan.whiteBalanceIntent.name.lowercase()}"
+        } else skipped += "WB ${plan.whiteBalanceIntent.name.lowercase()}"
 
-        mapEffect(plan.hardwareEffect)?.let { mode ->
-            if (mode in caps.effectModes) {
-                options.setCaptureRequestOption(CaptureRequest.CONTROL_EFFECT_MODE, mode)
-                applied += "effect ${plan.hardwareEffect.name.lowercase()}"
-            } else skipped += "effect ${plan.hardwareEffect.name.lowercase()}"
-        }
+        val effect = mapEffect(plan.hardwareEffect)
+        if (effect in caps.effectModes) {
+            options.setCaptureRequestOption(CaptureRequest.CONTROL_EFFECT_MODE, effect)
+            applied += "effect ${plan.hardwareEffect.name.lowercase()}"
+        } else skipped += "effect ${plan.hardwareEffect.name.lowercase()}"
 
         val sceneMode = mapSceneMode(plan.program)
         if (sceneMode != null && sceneMode in caps.sceneModes) {
@@ -309,9 +325,7 @@ class CameraEngine(
         }
         if (afMode in caps.afModes) {
             options.setCaptureRequestOption(CaptureRequest.CONTROL_AF_MODE, afMode)
-            if (plan.focusIntent == FocusIntent.INFINITY && caps.supportsManualFocus) {
-                options.setCaptureRequestOption(CaptureRequest.LENS_FOCUS_DISTANCE, 0f)
-            }
+            if (plan.focusIntent == FocusIntent.INFINITY && caps.supportsManualFocus) options.setCaptureRequestOption(CaptureRequest.LENS_FOCUS_DISTANCE, 0f)
             applied += "focus ${plan.focusIntent.name.lowercase()}"
         }
 
@@ -324,7 +338,6 @@ class CameraEngine(
         }
 
         Camera2CameraControl.from(c.cameraControl).setCaptureRequestOptions(options.build())
-
         if (plan.focusIntent == FocusIntent.FACE || plan.focusIntent == FocusIntent.SUBJECT) {
             val x = plan.focusX ?: 0.5f
             val y = plan.focusY ?: 0.5f
@@ -339,7 +352,7 @@ class CameraEngine(
     fun applyManualSensor(iso: Int, exposureTimeNs: Long, focusDistance: Float?): Boolean {
         val c = camera ?: return false
         val caps = capabilities ?: return false
-        if (!caps.supportsManualSensor) return false
+        if (!caps.supportsManualSensor || isSpecialCaptureSession) return false
         val isoSafe = caps.sensitivityRange?.let { iso.coerceIn(it.lower, it.upper) } ?: iso
         val expSafe = caps.exposureTimeRange?.let { exposureTimeNs.coerceIn(it.lower, it.upper) } ?: exposureTimeNs
         val builder = CaptureRequestOptions.Builder()
@@ -357,7 +370,7 @@ class CameraEngine(
 
     fun restoreAuto() {
         val c = camera ?: return
-        if (isExtensionCaptureSession) return
+        if (isSpecialCaptureSession) return
         Camera2CameraControl.from(c.cameraControl).clearCaptureRequestOptions()
         lastAppliedPlanFingerprint = null
     }
@@ -368,6 +381,7 @@ class CameraEngine(
         extensionsManager = null
         camera = null
         activeExtensionMode = null
+        activeSpecialOutput = false
         lastAppliedPlanFingerprint = null
     }
 
