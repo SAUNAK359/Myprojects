@@ -21,6 +21,12 @@
         android:theme="@style/Theme.Director"
         android:usesCleartextTraffic="false">
 
+        <!-- Optional vendor libraries used by LiteRT-LM GPU vision. They are not required for
+             devices without OpenCL support; the Director falls back to deterministic planning. -->
+        <uses-native-library android:name="libvndksupport.so" android:required="false" />
+        <uses-native-library android:name="libOpenCL.so" android:required="false" />
+        <uses-native-library android:name="libcdsprpc.so" android:required="false" />
+
         <activity
             android:name=".MainActivity"
             android:configChanges="orientation|screenSize|keyboardHidden"
