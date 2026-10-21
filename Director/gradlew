@@ -20,6 +20,10 @@ sha256_of() {
   fi
 }
 
+lowercase() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
 download_file() {
   local url="$1" dest="$2"
   local tmp="${dest}.tmp.$$"
@@ -32,11 +36,13 @@ download_file() {
 
 verify_zip() {
   [[ -s "$ZIP" && -s "$SHA_FILE" ]] || return 1
-  local expected actual
+  local expected actual expected_lc actual_lc
   expected="$(tr -d '[:space:]' < "$SHA_FILE")"
   [[ "$expected" =~ ^[0-9a-fA-F]{64}$ ]] || return 1
   actual="$(sha256_of "$ZIP")"
-  [[ "${actual,,}" == "${expected,,}" ]] || return 1
+  expected_lc="$(lowercase "$expected")"
+  actual_lc="$(lowercase "$actual")"
+  [[ "$actual_lc" == "$expected_lc" ]] || return 1
   unzip -tq "$ZIP" >/dev/null 2>&1
 }
 
