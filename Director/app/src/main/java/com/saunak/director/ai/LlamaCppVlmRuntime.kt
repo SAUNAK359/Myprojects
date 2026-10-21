@@ -34,32 +34,32 @@ class LlamaCppVlmRuntime(private val promptBuilder: PromptBuilder = PromptBuilde
 
     override suspend fun plan(image: Bitmap, capabilities: CapabilityRegistry, camera: CameraSnapshot, skillContext: String): Result<PlanOutput> = runCatching {
         withTimeout(PLAN_TIMEOUT_MS) {
-            val raw = infer(image, promptBuilder.planPrompt(capabilities, camera, skillContext), PLAN_GRAMMAR, 220)
+            val raw = infer(image, promptBuilder.planPrompt(capabilities, camera, skillContext), 220)
             VlmContractValidator.plan(json.decodeFromString(PlanOutput.serializer(), extractJson(raw)))
         }
     }
 
     override suspend fun evaluate(image: Bitmap, objective: String, attempt: Int, camera: CameraSnapshot, previousIssues: List<String>, evaluationContext: String, capabilities: CapabilityRegistry): Result<EvaluationOutput> = runCatching {
         withTimeout(EVAL_TIMEOUT_MS) {
-            val raw = infer(image, promptBuilder.evaluationPrompt(objective, attempt, camera, previousIssues, evaluationContext, capabilities), EVAL_GRAMMAR, 180)
+            val raw = infer(image, promptBuilder.evaluationPrompt(objective, attempt, camera, previousIssues, evaluationContext, capabilities), 180)
             VlmContractValidator.evaluation(json.decodeFromString(EvaluationOutput.serializer(), extractJson(raw)))
         }
     }
 
-    private suspend fun infer(image: Bitmap, prompt: String, grammar: String, maxTokens: Int): String {
+    private suspend fun infer(image: Bitmap, prompt: String, maxTokens: Int): String {
         check(ready.get()) { "VLM is not loaded" }
         val safe = ImagePreprocessor.forVlm(image, maxImageDimension.get().coerceIn(384, 1024))
         try {
             val pixels = IntArray(safe.width * safe.height)
             safe.getPixels(pixels, 0, safe.width, 0, 0, safe.width, safe.height)
-            return nativeGenerate(pixels, safe.width, safe.height, prompt, grammar, maxTokens)[0]
+            return nativeGenerate(pixels, safe.width, safe.height, prompt, maxTokens)[0]
         } finally { if (safe !== image) safe.recycle() }
     }
 
-    private suspend fun nativeGenerate(pixels: IntArray, width: Int, height: Int, prompt: String, grammar: String, maxTokens: Int): Array<String> = suspendCancellableCoroutine { cont: CancellableContinuation<Array<String>> ->
+    private suspend fun nativeGenerate(pixels: IntArray, width: Int, height: Int, prompt: String, maxTokens: Int): Array<String> = suspendCancellableCoroutine { cont: CancellableContinuation<Array<String>> ->
         inferenceExecutor.execute {
             try {
-                val result = NativeVlmBridge.generate(pixels, width, height, prompt, grammar, maxTokens, 0.08f, 20, 0.85f)
+                val result = NativeVlmBridge.generate(pixels, width, height, prompt, JSON_GRAMMAR, maxTokens, 0.08f, 20, 0.85f)
                 if (cont.isActive) cont.resume(result)
             } catch (t: Throwable) { if (cont.isActive) cont.resumeWithException(t) }
         }
@@ -86,27 +86,16 @@ class LlamaCppVlmRuntime(private val promptBuilder: PromptBuilder = PromptBuilde
     companion object {
         private const val PLAN_TIMEOUT_MS = 14_000L
         private const val EVAL_TIMEOUT_MS = 12_000L
-        private val JSON_STRING = "\\\"([^\\\"\\\\]|\\\\[\\\"\\\\/bfnrt]|\\\\u[0-9a-fA-F]{4})*\\\""
-        private val NUMBER = "-?(0|[1-9][0-9]*)(\\.[0-9]+)?([eE][+-]?[0-9]+)?"
-        private val CALL = "\\{\\\"id\\\":[0-9]+,\\\"v\\\":($NUMBER|null),\\\"x\\\":($NUMBER|null),\\\"y\\\":($NUMBER|null),\\\"s\\\":($JSON_STRING|null)\\}"
-        private val CALLS = "\\[($CALL(,$CALL)*)?\\]"
-        private val ISSUES = "\\[($JSON_STRING(,$JSON_STRING)*)?\\]"
-        val PLAN_GRAMMAR: String = """
-root ::= "{" "\\\"scene\\\":" string ",\\\"objective\\\":" string ",\\\"branch\\\":" string ",\\\"reference_score\\\":" number ",\\\"reference_accept\\\":" boolean ",\\\"calls\\\":" calls ",\\\"recapture\\\":" boolean "}"
-string ::= $JSON_STRING
-number ::= $NUMBER
-boolean ::= "true" | "false"
-call ::= $CALL
-calls ::= $CALLS
-        """.trimIndent()
-        val EVAL_GRAMMAR: String = """
-root ::= "{" "\\\"score\\\":" number ",\\\"technical\\\":" number ",\\\"composition\\\":" number ",\\\"subject\\\":" number ",\\\"aesthetic\\\":" number ",\\\"accept\\\":" boolean ",\\\"issues\\\":" issues ",\\\"delta\\\":" calls "}"
-string ::= $JSON_STRING
-number ::= $NUMBER
-boolean ::= "true" | "false"
-call ::= $CALL
-calls ::= $CALLS
-issues ::= $ISSUES
+
+        // Verified against grammars/json.gbnf at the pinned llama.cpp revision.
+        val JSON_GRAMMAR: String = """
+root   ::= object
+value  ::= object | array | string | number | ("true" | "false" | "null") ws
+object ::= "{" ws (string ":" ws value ("," ws string ":" ws value)*)? "}" ws
+array  ::= "[" ws (value ("," ws value)*)? "]" ws
+string ::= "\"" ([^"\\\x7F\x00-\x1F] | "\\" (["\\bfnrt] | "u" [0-9a-fA-F]{4}))* "\"" ws
+number ::= ("-"? ([0-9] | [1-9] [0-9]{0,15})) ("." [0-9]+)? ([eE] [-+]? [0-9] [1-9]{0,15})? ws
+ws ::= | " " | "\n" [ \t]{0,20}
         """.trimIndent()
     }
 }
