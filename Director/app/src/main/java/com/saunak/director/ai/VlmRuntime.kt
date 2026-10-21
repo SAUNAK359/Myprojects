@@ -9,7 +9,7 @@ import com.saunak.director.director.PlanOutput
 interface VlmRuntime {
     suspend fun load(modelPath: String, projectorPath: String): Result<Unit>
     suspend fun plan(image: Bitmap, capabilities: CapabilityRegistry, camera: CameraSnapshot, skillContext: String): Result<PlanOutput>
-    suspend fun evaluate(image: Bitmap, objective: String, attempt: Int, camera: CameraSnapshot, previousIssues: List<String>, evaluationContext: String): Result<EvaluationOutput>
+    suspend fun evaluate(image: Bitmap, objective: String, attempt: Int, camera: CameraSnapshot, previousIssues: List<String>, evaluationContext: String, capabilities: CapabilityRegistry): Result<EvaluationOutput>
     fun setMaxImageDimension(pixels: Int)
     fun cancel()
     fun isReady(): Boolean

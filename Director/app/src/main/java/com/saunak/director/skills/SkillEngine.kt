@@ -4,15 +4,27 @@ import android.content.Context
 import org.json.JSONObject
 
 class SkillEngine(context: Context) {
-    private val raw = context.assets.open("skills.json").bufferedReader().use { it.readText() }
-    private val root = JSONObject(raw)
-    fun rootContext(): String = root.getString("root")
-    fun branch(name: String): String { val branches = root.getJSONObject("branches"); return if (branches.has(name)) branches.getString(name) else branches.getString("general") }
+    private val rootJson = JSONObject(context.assets.open("skills.json").bufferedReader().use { it.readText() })
+    init { require(rootJson.optInt("version") >= 2) { "Director skill IR v2 required" } }
+
     fun planningContext(): String {
-        val branches = root.getJSONObject("branches")
-        val compact = buildString { branches.keys().asSequence().toList().sorted().forEach { key -> append("[").append(key).append("] ").append(branches.getString(key)).append(' ') } }
-        return "${rootContext()} Scene branches: $compact Tool policy: ${root.optString("tools")}".trim()
+        val routing = rootJson.getJSONArray("routing")
+        val routes = buildString {
+            for (i in 0 until routing.length()) {
+                val item = routing.getJSONObject(i)
+                if (isNotEmpty()) append(" | ")
+                append(item.getString("id")).append(": ").append(item.getString("summary"))
+            }
+        }
+        return "Root: ${rootJson.getString("root")} Routing: $routes Tool policy: ${rootJson.optString("tools")}".trim()
     }
-    fun evaluationContext(): String = root.optString("evaluation")
-    fun combined(branch: String): String = "${rootContext()} ${branch(branch)}"
+
+    fun resolveBranch(requested: String?): String {
+        val key = requested?.trim()?.lowercase().orEmpty()
+        return if (rootJson.getJSONObject("branches").has(key)) key else "general"
+    }
+
+    fun branch(name: String): String = rootJson.getJSONObject("branches").getString(resolveBranch(name))
+    fun evaluationContext(branch: String): String = "Scene branch: ${branch(branch)} Evaluation: ${rootJson.optString("evaluation")}".trim()
+    fun availableBranches(): Set<String> = rootJson.getJSONObject("branches").keys().asSequence().toSet()
 }

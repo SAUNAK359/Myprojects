@@ -7,6 +7,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 SKILLS = ROOT / "skills"
 OUT = ROOT / "app/src/main/assets/skills.json"
 
+
 def parse(path: pathlib.Path):
     text = path.read_text(encoding="utf-8").strip()
     m = re.match(r"^---\n(.*?)\n---\n(.*)$", text, flags=re.S)
@@ -23,8 +24,10 @@ def parse(path: pathlib.Path):
         raise SystemExit(f"Invalid skill: {path}")
     return meta, body
 
+
 root = None
 branches = {}
+routing = []
 evaluation = []
 tools = []
 seen = set()
@@ -36,15 +39,33 @@ for path in sorted(SKILLS.rglob("*.SKILL.md")):
     seen.add(sid)
     kind = meta["kind"]
     if kind == "root":
-        if root is not None: raise SystemExit("Only one root skill is allowed")
+        if root is not None:
+            raise SystemExit("Only one root skill is allowed")
         root = body
-    elif kind == "scene": branches[sid] = body
-    elif kind == "evaluation": evaluation.append(body)
-    elif kind == "tool": tools.append(body)
-    else: raise SystemExit(f"Unknown skill kind {kind}: {path}")
+    elif kind == "scene":
+        summary = meta.get("summary", "").strip()
+        if not summary:
+            raise SystemExit(f"Scene skill requires summary: {path}")
+        branches[sid] = body
+        routing.append({"id": sid, "summary": summary})
+    elif kind == "evaluation":
+        evaluation.append(body)
+    elif kind == "tool":
+        tools.append(body)
+    else:
+        raise SystemExit(f"Unknown skill kind {kind}: {path}")
+
 if root is None or "general" not in branches:
     raise SystemExit("Skills require one root and a general scene branch")
-payload = {"version":1,"root":root,"branches":branches,"evaluation":" ".join(evaluation),"tools":" ".join(tools)}
+
+payload = {
+    "version": 2,
+    "root": root,
+    "routing": sorted(routing, key=lambda x: x["id"]),
+    "branches": branches,
+    "evaluation": " ".join(evaluation),
+    "tools": " ".join(tools),
+}
 OUT.parent.mkdir(parents=True, exist_ok=True)
-OUT.write_text(json.dumps(payload, indent=2, ensure_ascii=False)+"\n", encoding="utf-8")
-print(f"Compiled {len(seen)} skills -> {OUT}")
+OUT.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+print(f"Compiled {len(seen)} skills -> {OUT} (IR v2)")
