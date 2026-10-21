@@ -8,11 +8,12 @@ plugins {
 android {
     namespace = "com.saunak.director"
     compileSdk = 36
+    buildToolsVersion = "35.0.0"
     ndkVersion = "28.2.13676358"
 
     defaultConfig {
         applicationId = "com.saunak.director"
-        minSdk = 28
+        minSdk = 29
         targetSdk = 36
         versionCode = (project.findProperty("versionCode") as String?)?.toIntOrNull() ?: 1
         versionName = (project.findProperty("versionName") as String?) ?: "1.0.0"
