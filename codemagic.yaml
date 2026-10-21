@@ -1,6 +1,6 @@
 workflows:
-  director-android-debug-v6:
-    name: Director Android Debug V6
+  director-android-debug-v7:
+    name: Director Android Debug V7
     max_build_duration: 120
     instance_type: mac_mini_m2
     environment:
@@ -17,85 +17,75 @@ workflows:
       - name: Build identity
         script: |
           set -euo pipefail
-          echo "Director Codemagic workflow: debug-v6"
+          echo "Director Codemagic workflow: debug-v7"
           echo "Commit: $(git rev-parse HEAD)"
           echo "Branch: $(git branch --show-current || true)"
           echo "Host: $(uname -a)"
           java -version
+          df -h "$CM_BUILD_DIR"
 
       - name: Bootstrap Android native toolchain
         script: |
           set -euo pipefail
           cd "$CM_BUILD_DIR/Director"
-          chmod +x scripts/*.sh scripts/*.py gradlew
+          chmod +x gradlew scripts/*.sh scripts/*.py
           ./scripts/bootstrap_android_sdk.sh
 
-      - name: Validate product contract and sources
+      - name: Deterministic build preflight
         script: |
           set -euo pipefail
           cd "$CM_BUILD_DIR/Director"
-          python3 scripts/compile_skills.py
-          python3 -m json.tool app/src/main/assets/skills.json >/dev/null
-          python3 scripts/validate_product_contract.py
-          SDK_ROOT="$(cat "$CM_BUILD_DIR/.director-android-sdk-root")"
-          printf 'sdk.dir=%s\n' "$SDK_ROOT" > local.properties
-          echo "sdk.dir=$SDK_ROOT"
-          test -s "$SDK_ROOT/platforms/android-36/android.jar"
-          test -x "$SDK_ROOT/build-tools/36.0.0/aapt2"
-          test -s "$SDK_ROOT/ndk/28.2.13676358/source.properties"
-          test -x "$SDK_ROOT/cmake/3.22.1/bin/cmake"
+          ./scripts/ci_preflight.sh
           mkdir -p "$CM_BUILD_DIR/director-build-logs"
 
-      - name: Fetch pinned llama.cpp
+      - name: Fetch verified llama.cpp
         script: |
           set -euo pipefail
           cd "$CM_BUILD_DIR/Director"
           ./scripts/fetch_llama_cpp.sh
-          test -f third_party/llama.cpp/CMakeLists.txt
+          test -s third_party/llama.cpp/CMakeLists.txt
+          test -s third_party/llama.cpp/include/llama.h
+          test -s third_party/llama.cpp/tools/mtmd/mtmd.h
 
       - name: Compile debug APK
         script: |
-          set -uo pipefail
+          set +e
           cd "$CM_BUILD_DIR/Director"
           LOG="$CM_BUILD_DIR/director-build-logs/assemble-debug.log"
-          set +e
-          ./gradlew assembleDebug --stacktrace --console=plain --no-daemon 2>&1 | tee "$LOG"
+          ./scripts/run_gradle_ci.sh "$LOG" assembleDebug
           STATUS=$?
           set -e
           if [ "$STATUS" -ne 0 ]; then
             echo "========== DIRECTOR ROOT CAUSE =========="
-            grep -nE '^\* What went wrong:|^e: |^w: |C/C\+\+:|(^|[[:space:]])error:|Caused by:|Could not resolve|Execution failed for task|A problem occurred' "$LOG" | head -n 240 || true
+            grep -nE '^\* What went wrong:|^e: |^w: |C/C\+\+:|(^|[[:space:]])error:|fatal error:|Caused by:|Could not resolve|Execution failed for task|A problem occurred|FAILED' "$LOG" | head -n 300 || true
             echo "========================================="
             exit "$STATUS"
           fi
           APK="$(find app/build/outputs/apk/debug -name '*.apk' -type f -print -quit)"
-          test -n "$APK"
-          test -s "$APK"
+          test -n "$APK" && test -s "$APK"
           echo "APK ready: $APK"
 
       - name: Unit tests
         script: |
-          set -uo pipefail
+          set +e
           cd "$CM_BUILD_DIR/Director"
           LOG="$CM_BUILD_DIR/director-build-logs/unit-tests.log"
-          set +e
-          ./gradlew testDebugUnitTest --stacktrace --console=plain --no-daemon 2>&1 | tee "$LOG"
+          ./scripts/run_gradle_ci.sh "$LOG" testDebugUnitTest
           STATUS=$?
           set -e
           if [ "$STATUS" -ne 0 ]; then
             echo "========== TEST ROOT CAUSE =========="
-            grep -nE '^\* What went wrong:|^e: |error:|Caused by:|Execution failed for task|FAILED' "$LOG" | head -n 240 || true
+            grep -nE '^\* What went wrong:|^e: |error:|Caused by:|Execution failed for task|FAILED|AssertionError' "$LOG" | head -n 300 || true
             echo "====================================="
             exit "$STATUS"
           fi
 
       - name: Android lint report
         script: |
-          set -uo pipefail
+          set +e
           cd "$CM_BUILD_DIR/Director"
           LOG="$CM_BUILD_DIR/director-build-logs/lint-debug.log"
-          set +e
-          ./gradlew lintDebug --stacktrace --console=plain --no-daemon 2>&1 | tee "$LOG"
+          ./scripts/run_gradle_ci.sh "$LOG" lintDebug
           STATUS=$?
           set -e
           TXT="app/build/reports/lint-results-debug.txt"
@@ -105,8 +95,8 @@ workflows:
             echo "==========================================="
           fi
           if [ "$STATUS" -ne 0 ]; then
-            echo "DEBUG APK remains publishable for device validation; Release V6 remains strict."
-            grep -nE '^\* What went wrong:|^e: |error:|Caused by:|Execution failed for task|Fatal:' "$LOG" | head -n 240 || true
+            echo "DEBUG APK remains publishable for device validation; Release V7 remains strict."
+            grep -nE '^\* What went wrong:|^e: |error:|Caused by:|Execution failed for task|Fatal:' "$LOG" | head -n 300 || true
           fi
           exit 0
 
@@ -118,8 +108,8 @@ workflows:
       - Director/app/build/test-results/**/*.xml
       - director-build-logs/**/*.log
 
-  director-android-release-v6:
-    name: Director Android Release V6
+  director-android-release-v7:
+    name: Director Android Release V7
     max_build_duration: 120
     instance_type: mac_mini_m2
     environment:
@@ -136,46 +126,40 @@ workflows:
       - name: Build identity
         script: |
           set -euo pipefail
-          echo "Director Codemagic workflow: release-v6"
+          echo "Director Codemagic workflow: release-v7"
           echo "Commit: $(git rev-parse HEAD)"
           java -version
+          df -h "$CM_BUILD_DIR"
 
-      - name: Bootstrap and validate
+      - name: Bootstrap and preflight
         script: |
           set -euo pipefail
           cd "$CM_BUILD_DIR/Director"
-          chmod +x scripts/*.sh scripts/*.py gradlew
+          chmod +x gradlew scripts/*.sh scripts/*.py
           ./scripts/bootstrap_android_sdk.sh
-          python3 scripts/compile_skills.py
-          python3 -m json.tool app/src/main/assets/skills.json >/dev/null
-          python3 scripts/validate_product_contract.py
-          SDK_ROOT="$(cat "$CM_BUILD_DIR/.director-android-sdk-root")"
-          printf 'sdk.dir=%s\n' "$SDK_ROOT" > local.properties
-          test -s "$SDK_ROOT/platforms/android-36/android.jar"
-          test -x "$SDK_ROOT/build-tools/36.0.0/aapt2"
-          test -s "$SDK_ROOT/ndk/28.2.13676358/source.properties"
-          test -x "$SDK_ROOT/cmake/3.22.1/bin/cmake"
+          ./scripts/ci_preflight.sh
           mkdir -p "$CM_BUILD_DIR/director-build-logs"
           ./scripts/fetch_llama_cpp.sh
-          test -f third_party/llama.cpp/CMakeLists.txt
+          test -s third_party/llama.cpp/CMakeLists.txt
+          test -s third_party/llama.cpp/include/llama.h
+          test -s third_party/llama.cpp/tools/mtmd/mtmd.h
 
       - name: Build and verify release
         script: |
-          set -uo pipefail
+          set +e
           cd "$CM_BUILD_DIR/Director"
           LOG="$CM_BUILD_DIR/director-build-logs/release.log"
-          set +e
-          ./gradlew assembleRelease bundleRelease testReleaseUnitTest lintRelease \
+          ./scripts/run_gradle_ci.sh "$LOG" \
+            assembleRelease bundleRelease testReleaseUnitTest lintRelease \
             -PversionCode=$BUILD_NUMBER \
-            -PversionName=1.0.$BUILD_NUMBER \
-            --stacktrace --console=plain --no-daemon 2>&1 | tee "$LOG"
+            -PversionName=1.0.$BUILD_NUMBER
           STATUS=$?
           set -e
           if [ "$STATUS" -ne 0 ]; then
             TXT="app/build/reports/lint-results-release.txt"
             if [ -f "$TXT" ]; then cat "$TXT"; fi
             echo "========== RELEASE ROOT CAUSE =========="
-            grep -nE '^\* What went wrong:|^e: |C/C\+\+:|error:|Caused by:|Could not resolve|Execution failed for task|A problem occurred|Fatal:' "$LOG" | head -n 280 || true
+            grep -nE '^\* What went wrong:|^e: |C/C\+\+:|error:|fatal error:|Caused by:|Could not resolve|Execution failed for task|A problem occurred|Fatal:|FAILED' "$LOG" | head -n 360 || true
             echo "========================================"
             exit "$STATUS"
           fi
