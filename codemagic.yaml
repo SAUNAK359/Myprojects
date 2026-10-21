@@ -16,7 +16,40 @@ workflows:
       - name: Install Android native toolchain
         script: |
           set -euo pipefail
-          yes | sdkmanager "platforms;android-36" "build-tools;35.0.0" "ndk;28.2.13676358" "cmake;3.22.1" >/dev/null
+
+          SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/share/android-sdk}}"
+          SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER="/usr/local/share/android-sdk/cmdline-tools/latest/bin/sdkmanager"
+          fi
+
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER="$(find "$SDK_ROOT" -type f -name sdkmanager -perm -111 2>/dev/null | head -n 1 || true)"
+          fi
+
+          if [ -z "${SDKMANAGER:-}" ] || [ ! -x "$SDKMANAGER" ]; then
+            echo "ERROR: Android sdkmanager was not found."
+            echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-unset}"
+            echo "ANDROID_HOME=${ANDROID_HOME:-unset}"
+            find /usr/local/share/android-sdk -maxdepth 4 -name sdkmanager -print 2>/dev/null || true
+            exit 1
+          fi
+
+          echo "Using Android SDK: $SDK_ROOT"
+          echo "Using sdkmanager: $SDKMANAGER"
+          "$SDKMANAGER" --version
+
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          "$SDKMANAGER" --install \
+            "platforms;android-36" \
+            "ndk;28.2.13676358" \
+            "cmake;3.22.1"
+
+          test -d "$SDK_ROOT/platforms/android-36"
+          test -d "$SDK_ROOT/ndk/28.2.13676358"
+          test -d "$SDK_ROOT/cmake/3.22.1"
+
       - name: Configure Director sources
         script: |
           set -euo pipefail
@@ -24,22 +57,27 @@ workflows:
           chmod +x gradlew scripts/*.sh scripts/*.py
           python3 scripts/compile_skills.py
           python3 -m json.tool app/src/main/assets/skills.json >/dev/null
-          echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
+          SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/share/android-sdk}}"
+          printf 'sdk.dir=%s\n' "$SDK_ROOT" > local.properties
+
       - name: Fetch pinned llama.cpp
         script: |
           set -euo pipefail
           cd "$CM_BUILD_DIR/Director"
           ./scripts/fetch_llama_cpp.sh
+
       - name: Unit tests and lint
         script: |
           set -euo pipefail
           cd "$CM_BUILD_DIR/Director"
           ./gradlew testDebugUnitTest lintDebug --stacktrace --no-daemon
+
       - name: Build debug APK
         script: |
           set -euo pipefail
           cd "$CM_BUILD_DIR/Director"
           ./gradlew assembleDebug --stacktrace --no-daemon
+
     artifacts:
       - Director/app/build/outputs/**/*.apk
       - Director/app/build/reports/lint-results-*.html
@@ -62,7 +100,40 @@ workflows:
       - name: Install Android native toolchain
         script: |
           set -euo pipefail
-          yes | sdkmanager "platforms;android-36" "build-tools;35.0.0" "ndk;28.2.13676358" "cmake;3.22.1" >/dev/null
+
+          SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/share/android-sdk}}"
+          SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER="/usr/local/share/android-sdk/cmdline-tools/latest/bin/sdkmanager"
+          fi
+
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER="$(find "$SDK_ROOT" -type f -name sdkmanager -perm -111 2>/dev/null | head -n 1 || true)"
+          fi
+
+          if [ -z "${SDKMANAGER:-}" ] || [ ! -x "$SDKMANAGER" ]; then
+            echo "ERROR: Android sdkmanager was not found."
+            echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-unset}"
+            echo "ANDROID_HOME=${ANDROID_HOME:-unset}"
+            find /usr/local/share/android-sdk -maxdepth 4 -name sdkmanager -print 2>/dev/null || true
+            exit 1
+          fi
+
+          echo "Using Android SDK: $SDK_ROOT"
+          echo "Using sdkmanager: $SDKMANAGER"
+          "$SDKMANAGER" --version
+
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          "$SDKMANAGER" --install \
+            "platforms;android-36" \
+            "ndk;28.2.13676358" \
+            "cmake;3.22.1"
+
+          test -d "$SDK_ROOT/platforms/android-36"
+          test -d "$SDK_ROOT/ndk/28.2.13676358"
+          test -d "$SDK_ROOT/cmake/3.22.1"
+
       - name: Configure Director sources
         script: |
           set -euo pipefail
@@ -70,17 +141,24 @@ workflows:
           chmod +x gradlew scripts/*.sh scripts/*.py
           python3 scripts/compile_skills.py
           python3 -m json.tool app/src/main/assets/skills.json >/dev/null
-          echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
+          SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/share/android-sdk}}"
+          printf 'sdk.dir=%s\n' "$SDK_ROOT" > local.properties
+
       - name: Fetch pinned llama.cpp
         script: |
           set -euo pipefail
           cd "$CM_BUILD_DIR/Director"
           ./scripts/fetch_llama_cpp.sh
+
       - name: Test, lint, and build release
         script: |
           set -euo pipefail
           cd "$CM_BUILD_DIR/Director"
-          ./gradlew testReleaseUnitTest lintRelease assembleRelease bundleRelease -PversionCode=$BUILD_NUMBER -PversionName=1.0.$BUILD_NUMBER --stacktrace --no-daemon
+          ./gradlew testReleaseUnitTest lintRelease assembleRelease bundleRelease \
+            -PversionCode=$BUILD_NUMBER \
+            -PversionName=1.0.$BUILD_NUMBER \
+            --stacktrace --no-daemon
+
     artifacts:
       - Director/app/build/outputs/**/*.apk
       - Director/app/build/outputs/**/*.aab
