@@ -54,16 +54,19 @@ Files are stored app-private and SHA-256 verified. The APK contains no model wei
 - CMake `3.22.1`
 - CameraX `1.5.0`
 
-## Android SDK bootstrap resilience
+## Build resilience
 
-`scripts/bootstrap_android_sdk.sh` verifies the actual SDK files/binaries instead of trusting package directories. It provisions packages one at a time and performs bounded retries. If Codemagic's shared SDK is incomplete or its downloaded archive is corrupt, Director purges partial package/temp/cache state and retries. If shared-SDK repair still fails, it automatically switches to a clean user-owned SDK under `$HOME/.director/android-sdk` and verifies the complete toolchain there before Gradle is allowed to run.
+Director treats CI caches as untrusted input.
 
-Required verified components are:
+`scripts/bootstrap_android_sdk.sh` provisions Android packages one at a time, accepts valid NDK symlinks/wrappers, validates `source.properties`, `android.toolchain.cmake`, Clang/Clang++, aapt2 and CMake functionally, and performs bounded repair attempts. If Codemagic's shared SDK cannot be repaired, it automatically switches to a clean private SDK under `$HOME/.director/android-sdk`.
 
-- `platforms;android-36`
-- `build-tools;36.0.0`
-- `ndk;28.2.13676358`
-- `cmake;3.22.1`
+The custom `gradlew` verifies Gradle's official SHA-256 sidecar and ZIP integrity before extraction, rejects broken restored wrapper caches and cleanly redownloads them.
+
+`scripts/fetch_llama_cpp.sh` verifies the pinned archive SHA-256 and the required CMake/llama/ggml/mtmd source files before a restored cache can be reused.
+
+`scripts/ci_preflight.sh` rejects unsupported JDKs, missing host commands, incomplete SDK/NDK/CMake installations and dangerously low disk space before compilation starts.
+
+`scripts/run_gradle_ci.sh` performs one recovery retry only for recognized dependency-cache/network corruption. Real Kotlin/Java/C++ compiler errors, lint errors and test failures are never hidden behind retries.
 
 ## Local build
 
@@ -71,30 +74,28 @@ Required verified components are:
 cd Director
 chmod +x gradlew scripts/*.sh scripts/*.py
 ./scripts/bootstrap_android_sdk.sh
-SDK_ROOT="$(cat ../.director-android-sdk-root 2>/dev/null || cat .director-android-sdk-root)"
-printf 'sdk.dir=%s\n' "$SDK_ROOT" > local.properties
+./scripts/ci_preflight.sh
 ./scripts/fetch_llama_cpp.sh
-./scripts/validate_project.sh
+./scripts/run_gradle_ci.sh /tmp/director-assemble.log assembleDebug
 ```
-
-`validate_project.sh` compiles Skills IR v2, validates XML/JSON and enforces the product contract. With an Android SDK present it also runs unit tests, lint and debug assembly.
 
 ## Codemagic
 
-Use **Director Android Debug V6** from a **new build** on the latest `main` commit. Do not use Re-run on an older V5/V4 failure because Codemagic re-runs that job's old revision/configuration.
+Use **Director Android Debug V7** from a **new build** on the latest `main` commit. Do not use Re-run on an older V6/V5/V4 failure because Codemagic re-runs that job's old revision/configuration.
 
-Debug V6:
+Debug V7:
 
-1. identifies the exact commit/workflow;
+1. identifies the exact commit/workflow and reports free disk;
 2. self-heals or clean-room provisions the Android SDK/toolchain;
-3. verifies Android 36, Build Tools 36.0.0, NDK 28.2 and CMake 3.22.1 binaries;
-4. compiles Skills IR v2 and enforces the shutter product contract;
-5. fetches checksum-pinned llama.cpp;
-6. compiles and verifies a non-empty debug APK;
-7. runs unit tests and diagnostic lint.
+3. runs the deterministic JDK/SDK/NDK/CMake/Gradle/disk/product-contract preflight;
+4. fetches and validates checksum-pinned llama.cpp source;
+5. compiles the debug APK with targeted recovery for cache/network corruption only;
+6. verifies the APK exists and is non-empty;
+7. runs unit tests with the same targeted infrastructure recovery;
+8. produces diagnostic lint reports while keeping the debug APK installable.
 
-Release **Director Android Release V6** remains strict: APK/AAB, tests and lint must pass, and release signing must be configured before distribution.
+Release **Director Android Release V7** remains strict: APK/AAB, tests and lint must pass, and release signing must be configured before distribution.
 
 ## Production status
 
-The implementation contains production-oriented fallbacks and validation gates, but it is not truthful to call any Android camera app production-certified solely from source review/CI. Physical-device qualification in `RELEASE_VALIDATION.md` is a release requirement, especially for OEM extensions, native VLM latency, memory, thermal behavior and quality-threshold calibration.
+The implementation contains production-oriented fallbacks and validation gates, but no source review or CI configuration can honestly guarantee that every external service, network transfer, or future dependency will never fail. V7 is designed to automatically recover from the infrastructure failure classes encountered so far and to fail early with precise diagnostics for non-recoverable conditions. Physical-device qualification in `RELEASE_VALIDATION.md` remains a release requirement, especially for OEM extensions, native VLM latency, memory, thermal behavior and quality-threshold calibration.
