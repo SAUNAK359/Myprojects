@@ -1,6 +1,6 @@
 workflows:
-  director-android-debug-v7:
-    name: Director Android Debug V7
+  director-android-debug-v8:
+    name: Director Android Debug V8
     max_build_duration: 120
     instance_type: mac_mini_m2
     environment:
@@ -17,10 +17,11 @@ workflows:
       - name: Build identity
         script: |
           set -euo pipefail
-          echo "Director Codemagic workflow: debug-v7"
+          echo "Director Codemagic workflow: debug-v8"
           echo "Commit: $(git rev-parse HEAD)"
           echo "Branch: $(git branch --show-current || true)"
           echo "Host: $(uname -a)"
+          echo "Bash: ${BASH_VERSION:-unknown}"
           java -version
           df -h "$CM_BUILD_DIR"
 
@@ -95,7 +96,7 @@ workflows:
             echo "==========================================="
           fi
           if [ "$STATUS" -ne 0 ]; then
-            echo "DEBUG APK remains publishable for device validation; Release V7 remains strict."
+            echo "DEBUG APK remains publishable for device validation; Release V8 remains strict."
             grep -nE '^\* What went wrong:|^e: |error:|Caused by:|Execution failed for task|Fatal:' "$LOG" | head -n 300 || true
           fi
           exit 0
@@ -108,8 +109,8 @@ workflows:
       - Director/app/build/test-results/**/*.xml
       - director-build-logs/**/*.log
 
-  director-android-release-v7:
-    name: Director Android Release V7
+  director-android-release-v8:
+    name: Director Android Release V8
     max_build_duration: 120
     instance_type: mac_mini_m2
     environment:
@@ -126,8 +127,9 @@ workflows:
       - name: Build identity
         script: |
           set -euo pipefail
-          echo "Director Codemagic workflow: release-v7"
+          echo "Director Codemagic workflow: release-v8"
           echo "Commit: $(git rev-parse HEAD)"
+          echo "Bash: ${BASH_VERSION:-unknown}"
           java -version
           df -h "$CM_BUILD_DIR"
 
