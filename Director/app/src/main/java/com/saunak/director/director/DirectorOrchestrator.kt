@@ -1,45 +1,232 @@
 package com.saunak.director.director
 
-import android.graphics.Bitmap
+import android.net.Uri
 import com.saunak.director.ai.VlmRuntime
 import com.saunak.director.camera.CameraEngine
 import com.saunak.director.platform.ThermalMonitor
-import com.saunak.director.processing.Look
 import com.saunak.director.processing.LookProcessor
+import com.saunak.director.processing.LookSpec
+import com.saunak.director.processing.PhotoQuality
 import com.saunak.director.skills.SkillEngine
 import com.saunak.director.storage.PhotoRepository
 import com.saunak.director.tools.ToolExecutor
+import com.saunak.director.tools.ToolIds
 import kotlinx.coroutines.CancellationException
 import java.io.File
-import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
-class DirectorOrchestrator(private val camera: CameraEngine, private val vlm: VlmRuntime, private val skills: SkillEngine, private val tools: ToolExecutor, private val storage: PhotoRepository, private val thermal: ThermalMonitor, private val onState: (DirectorUiState) -> Unit) {
-    private val busy=AtomicBoolean(false); private val controlEpoch=AtomicLong(0L); private val sampler=FrameSampler(); private val sceneMonitor=SceneChangeMonitor(); private val acceptanceThreshold=0.84; private val lastCompletedSceneVersion=AtomicLong(-1L)
-    fun isBusy():Boolean=busy.get()
-    fun observeScene(bitmap:Bitmap,timestampNanos:Long){if(sceneMonitor.observe(bitmap,timestampNanos)&&busy.get())invalidateAutonomy()}
-    fun invalidateAutonomy(){controlEpoch.incrementAndGet();vlm.cancel()}
-    suspend fun onPreviewFrame(bitmap:Bitmap,timestampNanos:Long){
-        val frame=sampler.accept(bitmap,timestampNanos,busy.get())?:return;val currentSceneVersion=sceneMonitor.currentVersion();if(currentSceneVersion==lastCompletedSceneVersion.get()){frame.recycle();return}
-        val thermalPolicy=thermal.policy();if(!camera.isAnalysisAvailable()||!vlm.isReady()||!thermalPolicy.allowAi){frame.recycle();return};vlm.setMaxImageDimension(thermalPolicy.maxAiDimension);if(!busy.compareAndSet(false,true)){frame.recycle();return}
-        val epoch=controlEpoch.get();val sceneVersion=sceneMonitor.currentVersion()
-        try{direct(frame,epoch,sceneVersion)}catch(_:StaleDirectorWork){}catch(_:CancellationException){}catch(t:Throwable){onState(DirectorUiState(DirectorStage.ERROR,true,"Director skipped this shot",error=t.message))}finally{if(!frame.isRecycled)frame.recycle();busy.set(false);if(vlm.isReady())onState(DirectorUiState(DirectorStage.OBSERVING,true,"Director ready"))}
+class DirectorOrchestrator(
+    private val camera: CameraEngine,
+    private val vlm: VlmRuntime,
+    private val skills: SkillEngine,
+    private val tools: ToolExecutor,
+    private val storage: PhotoRepository,
+    private val thermal: ThermalMonitor,
+    private val onState: (DirectorUiState) -> Unit
+) {
+    private val generation = AtomicLong(0L)
+
+    private data class Candidate(
+        val file: File,
+        val look: LookSpec,
+        val score: Double,
+        val valid: Boolean,
+        val accepted: Boolean,
+        val captureNumber: Int
+    )
+
+    suspend fun recoverPendingReferences(): List<Uri> = storage.recoverPendingToGallery()
+
+    fun cancelForUserAction(): Long {
+        val next = generation.incrementAndGet()
+        vlm.cancel()
+        return next
     }
-    private suspend fun direct(frame:Bitmap,epoch:Long,sceneVersion:Long){
-        assertFresh(epoch,sceneVersion);onState(DirectorUiState(DirectorStage.PLANNING,true,"Optimizing shot…"));val caps=camera.capabilities();val initialState=camera.snapshot()
-        val plan=vlm.plan(frame,caps,initialState,skills.planningContext()).getOrElse{onState(DirectorUiState(DirectorStage.ERROR,true,"Director skipped this frame",error=it.message));return};assertFresh(epoch,sceneVersion)
-        onState(DirectorUiState(DirectorStage.APPLYING,true,"Setting the shot…"));var look=tools.apply(plan.toolCalls,caps).look;assertFresh(epoch,sceneVersion);if(!plan.capture)return
-        val attempts=mutableListOf<Attempt>();val tempFiles=mutableListOf<File>();var issues=emptyList<String>();val maxAttempts=if(thermal.policy().allowRetry)3 else 1
-        try{for(attemptIndex in 1..maxAttempts){assertFresh(epoch,sceneVersion);if(!thermal.policy().allowAi)break;camera.awaitSettledState();assertFresh(epoch,sceneVersion);onState(DirectorUiState(DirectorStage.CAPTURING,true,"Capturing…",attempt=attemptIndex));val file=camera.captureTemp();tempFiles+=file;assertFresh(epoch,sceneVersion)
-            val decoded=storage.decode(file);val rendered=LookProcessor.apply(decoded,look)
-            try{onState(DirectorUiState(DirectorStage.CHECKING,true,"Checking…",attempt=attemptIndex));val eval=vlm.evaluate(rendered,plan.objective,attemptIndex,camera.snapshot(),issues,skills.evaluationContext()).getOrElse{EvaluationOutput(0.0,accept=false,issues=listOf("evaluation_failed"))};assertFresh(epoch,sceneVersion);val technicallyValid=rendered.width>0&&rendered.height>0&&file.length()>16_384;attempts+=Attempt(file,eval.score.coerceIn(0.0,1.0),technicallyValid,look);if(technicallyValid&&eval.accept&&eval.score>=acceptanceThreshold){saveFinal(file,look,attempts,sceneVersion);return};issues=eval.issues.take(8);if(attemptIndex<maxAttempts&&thermal.policy().allowRetry){onState(DirectorUiState(DirectorStage.CORRECTING,true,"Refining…",attempt=attemptIndex,lastScore=eval.score));look=tools.apply(eval.deltaCalls,caps,look).look}}
-            finally{if(rendered!==decoded&&!rendered.isRecycled)rendered.recycle();if(!decoded.isRecycled)decoded.recycle()}}
-            assertFresh(epoch,sceneVersion);val best=attempts.filter{it.valid}.maxByOrNull{it.score}?:attempts.maxByOrNull{it.score};if(best!=null)saveFinal(best.file,best.look,attempts,sceneVersion)
-        }finally{storage.cleanup(tempFiles)}
+
+    suspend fun onShutterPressed(): Uri? {
+        val session = cancelForUserAction()
+        var reference: File? = null
+        val attempts = mutableListOf<File>()
+        var finalized = false
+        try {
+            // A newer shutter must begin from the user's state, never a stale AI mutation.
+            tools.restoreUserState()
+            emit(session, DirectorUiState(DirectorStage.CAPTURING, vlm.isReady(), "Capturing reference…", camera = camera.uiState()))
+            if (!storage.hasWorkingSpace()) emit(session, DirectorUiState(DirectorStage.CAPTURING, vlm.isReady(), "Low storage • protecting capture", camera = camera.uiState()))
+
+            val ref = storage.newPendingReference(session)
+            reference = ref
+            camera.capturePrivate(ref)
+            assertCurrent(session)
+
+            val thermalPolicy = thermal.policy()
+            if (!vlm.isReady() || !thermalPolicy.allowAi) {
+                val uri = storage.saveRawJpeg(ref)
+                storage.markFinalized(ref); finalized = true
+                emit(session, DirectorUiState(DirectorStage.READY, vlm.isReady(), if (thermalPolicy.allowAi) "Saved • AI unavailable" else "Saved • AI paused for temperature", camera = camera.uiState(), lastSavedUri = uri.toString()))
+                return uri
+            }
+
+            val referenceBitmap = runCatching { storage.decodeOriented(ref) }.getOrElse {
+                val uri = storage.saveRawJpeg(ref)
+                storage.markFinalized(ref); finalized = true
+                emit(session, DirectorUiState(DirectorStage.READY, true, "Saved reference", camera = camera.uiState(), lastSavedUri = uri.toString()))
+                return uri
+            }
+            try {
+                val referenceQuality = PhotoQuality.analyze(referenceBitmap)
+                if (referenceQuality.catastrophic) {
+                    val uri = storage.saveRawJpeg(ref)
+                    storage.markFinalized(ref); finalized = true
+                    emit(session, DirectorUiState(DirectorStage.READY, true, "Saved reference", camera = camera.uiState(), lastSavedUri = uri.toString()))
+                    return uri
+                }
+
+                emit(session, DirectorUiState(DirectorStage.ANALYZING, true, "Analyzing captured photo…", camera = camera.uiState()))
+                vlm.setMaxImageDimension(thermalPolicy.maxAiDimension)
+                val caps = camera.capabilities()
+                val baseline = camera.snapshot()
+                val plan = vlm.plan(referenceBitmap, caps, baseline, skills.planningContext()).getOrElse {
+                    return fallbackReference(session, ref, "Saved • AI analysis unavailable").also { finalized = it != null }
+                }
+                assertCurrent(session)
+                val branch = skills.resolveBranch(plan.skillBranch)
+                val candidates = mutableListOf(Candidate(ref, LookSpec(), CapturePolicy.combinedFallbackScore(plan.referenceScore, referenceQuality.heuristicScore), true, plan.referenceAccept, 1))
+                val physicalBudget = CapturePolicy.physicalBudget(thermal.policy().maxPhysicalCaptures)
+
+                val initialCalls = if (physicalBudget > 1) plan.toolCalls else plan.toolCalls.filter { it.id in ToolIds.LOOK_IDS }
+                emit(session, DirectorUiState(DirectorStage.APPLYING, true, "Preparing improvement…", camera = camera.uiState()))
+                val initialExecution = tools.apply(initialCalls, caps)
+                assertCurrent(session)
+                var look = initialExecution.look
+                var issues = initialExecution.rejected.map { "tool_${it.call.id}:${it.reason}" }.take(8)
+                var physicalCaptures = 1
+                var evaluationCount = 0
+                var currentFile = ref
+
+                val needsPhysicalRecapture = initialExecution.requiresRecapture && plan.recapture && physicalCaptures < physicalBudget
+                if (needsPhysicalRecapture) {
+                    assertCurrent(session)
+                    camera.awaitSettledState()
+                    assertCurrent(session)
+                    physicalCaptures++
+                    emit(session, DirectorUiState(DirectorStage.RECAPTURING, true, "Capturing improvement…", attempt = physicalCaptures, camera = camera.uiState()))
+                    currentFile = storage.newAttempt(session, physicalCaptures).also { attempts += it }
+                    camera.capturePrivate(currentFile)
+                    assertCurrent(session)
+                } else if (plan.referenceAccept && look.isIdentity() && initialExecution.applied.none { it.id in ToolIds.LOOK_IDS }) {
+                    val uri = finalizeCandidate(session, candidates.first(), ref, attempts)
+                    finalized = uri != null
+                    return uri
+                }
+
+                while (evaluationCount < CapturePolicy.MAX_EVALUATIONS) {
+                    assertCurrent(session)
+                    evaluationCount++
+                    val decoded = storage.decodeOriented(currentFile)
+                    val quality = PhotoQuality.analyze(decoded)
+                    val rendered = LookProcessor.apply(decoded, look)
+                    try {
+                        emit(session, DirectorUiState(DirectorStage.CHECKING, true, "Checking result…", attempt = physicalCaptures, camera = camera.uiState()))
+                        val eval = vlm.evaluate(rendered, plan.objective, physicalCaptures, camera.snapshot(), issues, skills.evaluationContext(branch), caps).getOrElse {
+                            break
+                        }
+                        assertCurrent(session)
+                        val score = CapturePolicy.combinedFallbackScore(eval.score, quality.heuristicScore)
+                        val accepted = CapturePolicy.accepted(eval, quality.catastrophic)
+                        candidates += Candidate(currentFile, look, score, !quality.catastrophic, accepted, physicalCaptures)
+                        if (accepted) {
+                            val uri = finalizeCandidate(session, candidates.last(), ref, attempts)
+                            finalized = uri != null
+                            return uri
+                        }
+
+                        issues = (eval.issues + issues).distinct().take(8)
+                        if (evaluationCount >= CapturePolicy.MAX_EVALUATIONS) break
+                        val deltaInput = if (physicalCaptures < physicalBudget) eval.deltaCalls else eval.deltaCalls.filter { it.id in ToolIds.LOOK_IDS }
+                        if (deltaInput.isEmpty()) break
+                        emit(session, DirectorUiState(DirectorStage.CORRECTING, true, "Refining…", attempt = physicalCaptures, lastScore = eval.score, camera = camera.uiState()))
+                        val delta = tools.apply(deltaInput, caps, look)
+                        assertCurrent(session)
+                        if (delta.applied.isEmpty()) break
+                        look = delta.look
+                        issues = (delta.rejected.map { "tool_${it.call.id}:${it.reason}" } + issues).distinct().take(8)
+                        if (delta.requiresRecapture) {
+                            if (physicalCaptures >= physicalBudget) break
+                            camera.awaitSettledState()
+                            assertCurrent(session)
+                            physicalCaptures++
+                            emit(session, DirectorUiState(DirectorStage.RECAPTURING, true, "Capturing refinement…", attempt = physicalCaptures, camera = camera.uiState()))
+                            currentFile = storage.newAttempt(session, physicalCaptures).also { attempts += it }
+                            camera.capturePrivate(currentFile)
+                            assertCurrent(session)
+                        }
+                    } finally {
+                        if (rendered !== decoded && !rendered.isRecycled) rendered.recycle()
+                        if (!decoded.isRecycled) decoded.recycle()
+                    }
+                }
+
+                assertCurrent(session)
+                val best = candidates.filter { it.valid }.maxByOrNull { it.score } ?: candidates.first()
+                val uri = finalizeCandidate(session, best, ref, attempts)
+                finalized = uri != null
+                return uri
+            } finally {
+                if (!referenceBitmap.isRecycled) referenceBitmap.recycle()
+            }
+        } catch (_: StaleSession) {
+            // Each shutter still deserves a photo. Stale work may save its original reference,
+            // but it must never mutate camera state again or overwrite the latest UI.
+            val ref = reference
+            if (!finalized && ref != null && ref.exists() && ref.length() > 0L) {
+                runCatching { storage.saveRawJpeg(ref) }.onSuccess { storage.markFinalized(ref); finalized = true }
+            }
+            return null
+        } catch (_: CancellationException) {
+            val ref = reference
+            if (!finalized && ref != null && ref.exists() && ref.length() > 0L) {
+                runCatching { storage.saveRawJpeg(ref) }.onSuccess { storage.markFinalized(ref); finalized = true }
+            }
+            return null
+        } catch (t: Throwable) {
+            val ref = reference
+            if (!finalized && ref != null && ref.exists() && ref.length() > 0L) {
+                val fallback = runCatching { storage.saveRawJpeg(ref) }.getOrNull()
+                if (fallback != null) {
+                    storage.markFinalized(ref); finalized = true
+                    emit(session, DirectorUiState(DirectorStage.ERROR, vlm.isReady(), "AI failed • reference saved", error = t.message, camera = camera.uiState(), lastSavedUri = fallback.toString()))
+                    return fallback
+                }
+            }
+            emit(session, DirectorUiState(DirectorStage.ERROR, vlm.isReady(), "Capture retained privately • storage action needed", error = t.message, camera = camera.uiState()))
+            return null
+        } finally {
+            storage.cleanup(attempts)
+            if (isCurrent(session)) runCatching { tools.restoreUserState() }
+        }
     }
-    private suspend fun saveFinal(file:File,look:Look,attempts:List<Attempt>,sceneVersion:Long){onState(DirectorUiState(DirectorStage.SAVING,true,"Saving…"));val source=storage.decode(file);val finalBitmap=LookProcessor.apply(source,look);var saved=false;try{storage.saveProcessed(finalBitmap);saved=true;lastCompletedSceneVersion.set(sceneVersion)}finally{if(finalBitmap!==source&&!finalBitmap.isRecycled)finalBitmap.recycle();if(!source.isRecycled)source.recycle();if(saved)storage.cleanup(attempts.map{it.file})}}
-    private fun assertFresh(epoch:Long,sceneVersion:Long){if(controlEpoch.get()!=epoch||sceneMonitor.currentVersion()!=sceneVersion)throw StaleDirectorWork()}
-    fun cancel()=invalidateAutonomy()
-    private class StaleDirectorWork:RuntimeException()
-    private data class Attempt(val file:File,val score:Double,val valid:Boolean,val look:Look)
+
+    private suspend fun finalizeCandidate(session: Long, candidate: Candidate, reference: File, attempts: List<File>): Uri? {
+        assertCurrent(session)
+        emit(session, DirectorUiState(DirectorStage.SAVING, true, "Saving best photo…", attempt = candidate.captureNumber, lastScore = candidate.score, camera = camera.uiState()))
+        val uri = storage.saveFinal(candidate.file, candidate.look)
+        storage.markFinalized(reference)
+        storage.cleanup(attempts)
+        emit(session, DirectorUiState(DirectorStage.READY, vlm.isReady(), "Saved", lastScore = candidate.score, camera = camera.uiState(), lastSavedUri = uri.toString()))
+        return uri
+    }
+
+    private suspend fun fallbackReference(session: Long, reference: File, status: String): Uri? {
+        assertCurrent(session)
+        val uri = storage.saveRawJpeg(reference)
+        storage.markFinalized(reference)
+        emit(session, DirectorUiState(DirectorStage.READY, vlm.isReady(), status, camera = camera.uiState(), lastSavedUri = uri.toString()))
+        return uri
+    }
+
+    private fun emit(session: Long, state: DirectorUiState) { if (isCurrent(session)) onState(state) }
+    private fun isCurrent(session: Long): Boolean = generation.get() == session
+    private fun assertCurrent(session: Long) { if (!isCurrent(session)) throw StaleSession() }
+    private class StaleSession : RuntimeException()
 }
