@@ -3,12 +3,12 @@ package com.saunak.director.camera
 import android.content.Context
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.CaptureResult
 import android.hardware.camera2.TotalCaptureResult
 import android.util.Log
 import android.view.Surface
-import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.Camera
@@ -104,9 +104,7 @@ class CameraEngine(private val context: Context) : AutoCloseable {
         lastAf = null; lastAe = null; lastAwb = null
 
         val previewBuilder = Preview.Builder()
-        if (extension == DirectorExtension.NONE) {
-            Camera2Interop.Extender(previewBuilder).setSessionCaptureCallback(captureCallback)
-        }
+        if (extension == DirectorExtension.NONE) Camera2Interop.Extender(previewBuilder).setSessionCaptureCallback(captureCallback)
         preview = previewBuilder.build().also { it.surfaceProvider = view.surfaceProvider }
         imageCapture = ImageCapture.Builder()
             .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
@@ -118,17 +116,16 @@ class CameraEngine(private val context: Context) : AutoCloseable {
             camera = p.bindToLifecycle(lifecycleOwner, selector, preview, imageCapture)
             currentExtension = extension
         } catch (t: Throwable) {
-            if (extension != DirectorExtension.NONE) {
-                Log.w("DirectorCamera", "Extension bind failed; restoring normal camera", t)
-                p.unbindAll()
-                val fallbackPreviewBuilder = Preview.Builder()
-                Camera2Interop.Extender(fallbackPreviewBuilder).setSessionCaptureCallback(captureCallback)
-                preview = fallbackPreviewBuilder.build().also { it.surfaceProvider = view.surfaceProvider }
-                imageCapture = ImageCapture.Builder().setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
-                    .setTargetRotation(view.display?.rotation ?: Surface.ROTATION_0).build().also { it.flashMode = flashModeToCameraX(userFlash) }
-                camera = p.bindToLifecycle(lifecycleOwner, baseSelector(), preview, imageCapture)
-                currentExtension = DirectorExtension.NONE
-            } else throw t
+            if (extension == DirectorExtension.NONE) throw t
+            Log.w("DirectorCamera", "Extension bind failed; restoring normal camera", t)
+            p.unbindAll()
+            val fallbackPreviewBuilder = Preview.Builder()
+            Camera2Interop.Extender(fallbackPreviewBuilder).setSessionCaptureCallback(captureCallback)
+            preview = fallbackPreviewBuilder.build().also { it.surfaceProvider = view.surfaceProvider }
+            imageCapture = ImageCapture.Builder().setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+                .setTargetRotation(view.display?.rotation ?: Surface.ROTATION_0).build().also { it.flashMode = flashModeToCameraX(userFlash) }
+            camera = p.bindToLifecycle(lifecycleOwner, baseSelector(), preview, imageCapture)
+            currentExtension = DirectorExtension.NONE
         }
     }
 
@@ -174,6 +171,7 @@ class CameraEngine(private val context: Context) : AutoCloseable {
         userEvIndex = index.coerceIn(e.exposureCompensationRange.lower, e.exposureCompensationRange.upper)
         camera?.cameraControl?.setExposureCompensationIndex(userEvIndex)
     }
+
     suspend fun aiSetExposureEv(ev: Float) {
         val e = camera?.cameraInfo?.exposureState ?: return
         if (!e.isExposureCompensationSupported || e.exposureCompensationStep.toFloat() == 0f) return
@@ -187,6 +185,7 @@ class CameraEngine(private val context: Context) : AutoCloseable {
         userTorch = enabled
         c.cameraControl.enableTorch(enabled)
     }
+
     suspend fun aiSetTorch(enabled: Boolean) {
         val c = camera ?: return
         if (c.cameraInfo.hasFlashUnit()) c.cameraControl.enableTorch(enabled).await()
@@ -201,15 +200,16 @@ class CameraEngine(private val context: Context) : AutoCloseable {
     }
 
     suspend fun aiSetExtension(extension: DirectorExtension) {
-        if (extension == currentExtension) return
-        bindInternal(extension)
+        if (extension != currentExtension) bindInternal(extension)
     }
 
     suspend fun restoreUserState() {
         if (currentExtension != userExtension) bindInternal(userExtension)
         aiSetZoom(userZoom)
         val e = camera?.cameraInfo?.exposureState
-        if (e?.isExposureCompensationSupported == true) camera?.cameraControl?.setExposureCompensationIndex(userEvIndex.coerceIn(e.exposureCompensationRange.lower, e.exposureCompensationRange.upper))?.await()
+        if (e?.isExposureCompensationSupported == true) {
+            camera?.cameraControl?.setExposureCompensationIndex(userEvIndex.coerceIn(e.exposureCompensationRange.lower, e.exposureCompensationRange.upper))?.await()
+        }
         aiSetTorch(userTorch)
         imageCapture?.flashMode = flashModeToCameraX(userFlash)
     }
@@ -234,9 +234,7 @@ class CameraEngine(private val context: Context) : AutoCloseable {
     }
 
     private fun threeASettled(): Boolean {
-        val af = lastAf
-        val ae = lastAe
-        val awb = lastAwb
+        val af = lastAf; val ae = lastAe; val awb = lastAwb
         val afOk = af == null || af == CaptureResult.CONTROL_AF_STATE_INACTIVE || af == CaptureResult.CONTROL_AF_STATE_FOCUSED_LOCKED || af == CaptureResult.CONTROL_AF_STATE_NOT_FOCUSED_LOCKED || af == CaptureResult.CONTROL_AF_STATE_PASSIVE_FOCUSED || af == CaptureResult.CONTROL_AF_STATE_PASSIVE_UNFOCUSED
         val aeOk = ae == null || ae == CaptureResult.CONTROL_AE_STATE_INACTIVE || ae == CaptureResult.CONTROL_AE_STATE_CONVERGED || ae == CaptureResult.CONTROL_AE_STATE_LOCKED || ae == CaptureResult.CONTROL_AE_STATE_FLASH_REQUIRED
         val awbOk = awb == null || awb == CaptureResult.CONTROL_AWB_STATE_INACTIVE || awb == CaptureResult.CONTROL_AWB_STATE_CONVERGED || awb == CaptureResult.CONTROL_AWB_STATE_LOCKED
@@ -247,18 +245,17 @@ class CameraEngine(private val context: Context) : AutoCloseable {
         val c = camera ?: return CapabilityRegistry(lensFacing, 1f, 1f, 0, 0, 0f, false, false, false, false, false, allowedToolIds = setOf(30,31,32,33,34,35,36,37))
         val zoom = c.cameraInfo.zoomState.value
         val e = c.cameraInfo.exposureState
-        val info2 = runCatching { Camera2CameraInfo.from(c.cameraInfo) }.getOrNull()
-        val caps = info2?.getCameraCharacteristic(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)?.toSet().orEmpty()
-        val afModes = info2?.getCameraCharacteristic(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES)?.toSet().orEmpty()
-        val sensitivity = info2?.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
-        val exposureTimes = info2?.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)
-        val focalLengths = info2?.getCameraCharacteristic(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.toList().orEmpty()
-        val minFocus = info2?.getCameraCharacteristic(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE)
-        val opticalModes = info2?.getCameraCharacteristic(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION)?.toList().orEmpty()
-        val videoModes = info2?.getCameraCharacteristic(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES)?.toList().orEmpty()
+        val characteristics = platformCharacteristicsForLens()
+        val hwCaps = characteristics?.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)?.toSet().orEmpty()
+        val sensitivity = characteristics?.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
+        val exposureTimes = characteristics?.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)
+        val focalLengths = characteristics?.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.toList().orEmpty()
+        val minFocus = characteristics?.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE)
+        val opticalModes = characteristics?.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION)?.toList().orEmpty()
+        val videoModes = characteristics?.get(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES)?.toList().orEmpty()
         val ext = supportedExtensions()
+        val focusSupported = focusMeteringSupported(c)
         val ids = mutableSetOf(30,31,32,33,34,35,36,37)
-        val focusSupported = afModes.any { it != CaptureRequest.CONTROL_AF_MODE_OFF }
         if (focusSupported) ids += 1
         if (zoom != null && zoom.maxZoomRatio > zoom.minZoomRatio) ids += 2
         if (e.isExposureCompensationSupported) ids += 3
@@ -274,8 +271,8 @@ class CameraEngine(private val context: Context) : AutoCloseable {
             hasFlash = c.cameraInfo.hasFlashUnit(),
             torchSupported = c.cameraInfo.hasFlashUnit(),
             focusMeteringSupported = focusSupported,
-            manualSensorSupported = CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR in caps,
-            rawSupported = CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_RAW in caps,
+            manualSensorSupported = CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR in hwCaps,
+            rawSupported = CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_RAW in hwCaps,
             isoMin = sensitivity?.lower,
             isoMax = sensitivity?.upper,
             exposureTimeMinNs = exposureTimes?.lower,
@@ -288,6 +285,28 @@ class CameraEngine(private val context: Context) : AutoCloseable {
             allowedToolIds = ids
         )
     }
+
+    private fun focusMeteringSupported(c: Camera): Boolean {
+        val view = boundView ?: return false
+        if (view.width <= 0 || view.height <= 0) return false
+        return runCatching {
+            val point = view.meteringPointFactory.createPoint(view.width / 2f, view.height / 2f)
+            val action = FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE).build()
+            c.cameraInfo.isFocusMeteringSupported(action)
+        }.getOrDefault(false)
+    }
+
+    private fun platformCharacteristicsForLens(): CameraCharacteristics? = runCatching {
+        val manager = context.getSystemService(CameraManager::class.java)
+        val desired = if (lensFacing == CameraSelector.LENS_FACING_FRONT) CameraCharacteristics.LENS_FACING_FRONT else CameraCharacteristics.LENS_FACING_BACK
+        val candidates = manager.cameraIdList.mapNotNull { id ->
+            runCatching { manager.getCameraCharacteristics(id) }.getOrNull()?.takeIf { it.get(CameraCharacteristics.LENS_FACING) == desired }
+        }
+        candidates.maxByOrNull { chars ->
+            val caps = chars.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)?.toSet().orEmpty()
+            (if (CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA in caps) 100 else 0) + caps.size
+        }
+    }.getOrNull()
 
     private fun supportedExtensions(): Set<DirectorExtension> {
         val manager = extensionsManager ?: return emptySet()
