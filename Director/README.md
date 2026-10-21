@@ -1,50 +1,60 @@
 # Director
 
-Director is an offline-first AI-native Android camera. It behaves like a normal camera first, then layers one on-device VLM over the native camera pipeline to analyze a representative frame, select photography skills, produce validated tool calls, capture, evaluate the result, and retry up to three times.
+Director is an offline-first AI-native Android camera built around a **shutter-triggered** workflow. It behaves as a normal CameraX camera at all times. AI begins only after the user presses the white shutter.
 
-## Core invariants
+## Product contract
 
-- Camera availability is more important than AI availability.
-- Manual shutter always wins over autonomous work.
-- One VLM only: Qwen3-VL-2B-Instruct GGUF.
-- Model output is data, never executable code.
-- Every tool call is validated against the active camera capability registry.
-- Preview frames are sampled; the VLM never receives the live frame stream.
-- Full-resolution capture and AI-resolution images are separate paths.
-- AI is suspended before the camera under thermal or memory pressure.
+The normal flow is:
+
+`white shutter → full-quality private reference JPEG → that exact captured photo is analyzed by the on-device VLM → capability-filtered typed tool plan → optional corrected recapture → same VLM evaluates → bounded correction → save accepted/best result`.
+
+Key guarantees:
+
+- Preview frames never autonomously start VLM planning or photography.
+- Every shutter first creates a protected reference image.
+- AI failure, timeout, memory/thermal pressure, malformed output or unsupported camera controls cannot discard that reference.
+- Camera mutations are temporary and user-selected state is restored.
+- Total physical captures default to three per shutter event, including the reference.
+- One VLM only: Qwen3-VL-2B-Instruct GGUF. Native camera APIs and deterministic quality metrics are not additional AI models.
+- Model output is constrained JSON data, then semantic/tool validation occurs before Android APIs are touched.
+- Unsupported capability is never fabricated.
+
+See `PRODUCT_CONTRACT.md`, `PRODUCTION_REMEDIATION.md`, and `RELEASE_VALIDATION.md`.
 
 ## Model
 
-Director downloads the official Apache-2.0 Qwen GGUF files on first AI startup:
+Director downloads official Qwen GGUF files on first AI enablement:
 
-- `Qwen3VL-2B-Instruct-Q4_K_M.gguf` (~1.11 GB)
-- `mmproj-Qwen3VL-2B-Instruct-Q8_0.gguf` (~445 MB)
+- `Qwen3VL-2B-Instruct-Q4_K_M.gguf`
+- `mmproj-Qwen3VL-2B-Instruct-Q8_0.gguf`
 
-Both files are SHA-256 checked before activation. The APK therefore does not contain model weights.
+Files are stored app-private and SHA-256 verified. The APK contains no model weights. Interrupted downloads can resume; verification is invalidated if native model loading fails so corrupted files can be rechecked/repaired.
 
-## Supported device baseline
+## Camera and image behavior
 
-- Android 10 / API 29 or newer.
-- `arm64-v8a` device for the on-device AI runtime.
-- The native runtime deliberately avoids a global `-march` requirement and enables llama.cpp KleidiAI runtime dispatch.
-- The normal CameraX camera remains usable if the model is missing, unsupported, thermally suspended, or fails to load.
+- Android 10 / API 29+.
+- arm64-v8a AI runtime.
+- Preview + ImageCapture only; no continuous VLM frame analysis.
+- Real CameraX zoom/EV/focus/flash capabilities drive both UI and AI tool contracts.
+- OEM HDR/Night/Bokeh/Face Retouch are capability-gated and transactionally isolated.
+- Manual-sensor/RAW characteristics may be reported, but manual ISO/shutter/WB are intentionally not executable AI tools until physical-device qualification proves them safe.
+- Natural/identity output copies the original full-resolution JPEG bytes.
+- Creative processing uses an EXIF-correct, memory-bounded 4096px long-edge path by default; the untouched reference remains protected until save succeeds.
+- Pending references live under no-backup private storage and are recovered after process death.
 
 ## Build stack
 
-Pinned build stack:
-
 - Android Gradle Plugin `8.13.2`
 - Gradle `8.13`
-- Kotlin / Compose compiler plugin `2.3.10`
+- Kotlin / Compose plugin `2.3.10`
 - JDK `17`
 - compile/target SDK `36`
-- Android Build Tools `35.0.0`
+- Build Tools `35.0.0`
 - NDK `28.2.13676358`
 - CMake `3.22.1`
+- CameraX `1.5.0`
 
-## Build locally
-
-The repository includes `scripts/bootstrap_android_sdk.sh`. It first looks for a usable Android SDK and `sdkmanager`. If the command-line tools are missing, it downloads the current pinned Google command-line-tools archive for the CI host architecture, verifies SHA-256, installs the exact platform/build-tools/NDK/CMake versions, and writes the resolved SDK path to `.director-android-sdk-root`.
+## Local build
 
 ```bash
 cd Director
@@ -53,29 +63,17 @@ chmod +x gradlew scripts/*.sh scripts/*.py
 SDK_ROOT="$(cat ../.director-android-sdk-root 2>/dev/null || cat .director-android-sdk-root)"
 printf 'sdk.dir=%s\n' "$SDK_ROOT" > local.properties
 ./scripts/fetch_llama_cpp.sh
-python3 scripts/compile_skills.py
-./gradlew testDebugUnitTest lintDebug assembleDebug --stacktrace --no-daemon
+./scripts/validate_project.sh
 ```
+
+`validate_project.sh` compiles Skills IR v2, validates XML/JSON and enforces the product contract. With an Android SDK present it also runs unit tests, lint and debug assembly.
 
 ## Codemagic
 
-`codemagic.yaml` is stored at the repository root because Codemagic discovers YAML workflows from there.
+Use **Director Android Debug V5** from a new build on the latest `main` commit. Do not re-run an older failed job because Codemagic re-runs that job's old revision/configuration.
 
-Use **Director Android Debug V2** (`director-android-debug-v2`). Do not use an old build's **Re-run** button because a re-run is tied to the commit/configuration that originally failed. Start a **new build from the latest `main` commit**.
+Debug V5 builds the APK first, runs contract/unit/lint checks, and publishes diagnostics. Release V5 remains strict: tests/lint/build must pass and release signing must be configured before distribution.
 
-The V2 workflow:
+## Production status
 
-1. prints its workflow name, Git commit, branch, host, and Java version;
-2. discovers or bootstraps `sdkmanager` instead of assuming it is on `PATH`;
-3. installs/verifies SDK 36, Build Tools 35.0.0, NDK 28.2, and CMake 3.22.1;
-4. compiles and validates the hierarchical skills asset;
-5. fetches a checksum-pinned llama.cpp source revision and rejects stale cache contents;
-6. runs unit tests;
-7. runs Android lint;
-8. builds the debug APK and verifies that an APK was produced.
-
-The release workflow is **Director Android Release V2**. Release signing should be configured through Codemagic environment variables/keystore before store distribution.
-
-## Production note
-
-No software-only implementation can guarantee identical camera controls on every Android phone. Director discovers device capabilities and degrades to safe CameraX auto behavior when a requested feature is unavailable. Real-device validation remains required for supported device families, especially for memory, thermal behavior, camera extension support, and actual on-device VLM latency.
+The implementation contains production-oriented fallbacks and validation gates, but it is not truthful to call any Android camera app production-certified solely from source review/CI. Physical-device qualification in `RELEASE_VALIDATION.md` is a release requirement, especially for OEM extensions, native VLM latency, memory, thermal behavior and quality-threshold calibration.

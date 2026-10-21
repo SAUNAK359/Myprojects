@@ -1,6 +1,6 @@
 workflows:
-  director-android-debug-v4:
-    name: Director Android Debug V4
+  director-android-debug-v5:
+    name: Director Android Debug V5
     max_build_duration: 120
     instance_type: mac_mini_m2
     environment:
@@ -17,7 +17,7 @@ workflows:
       - name: Build identity
         script: |
           set -euo pipefail
-          echo "Director Codemagic workflow: debug-v4"
+          echo "Director Codemagic workflow: debug-v5"
           echo "Commit: $(git rev-parse HEAD)"
           echo "Branch: $(git branch --show-current || true)"
           echo "Host: $(uname -a)"
@@ -27,16 +27,16 @@ workflows:
         script: |
           set -euo pipefail
           cd "$CM_BUILD_DIR/Director"
-          chmod +x scripts/bootstrap_android_sdk.sh
+          chmod +x scripts/*.sh scripts/*.py gradlew
           ./scripts/bootstrap_android_sdk.sh
 
-      - name: Configure Director sources
+      - name: Validate product contract and sources
         script: |
           set -euo pipefail
           cd "$CM_BUILD_DIR/Director"
-          chmod +x gradlew scripts/*.sh scripts/*.py
           python3 scripts/compile_skills.py
           python3 -m json.tool app/src/main/assets/skills.json >/dev/null
+          python3 scripts/validate_product_contract.py
           SDK_ROOT="$(cat "$CM_BUILD_DIR/.director-android-sdk-root")"
           printf 'sdk.dir=%s\n' "$SDK_ROOT" > local.properties
           echo "sdk.dir=$SDK_ROOT"
@@ -59,9 +59,8 @@ workflows:
           STATUS=$?
           set -e
           if [ "$STATUS" -ne 0 ]; then
-            echo ""
             echo "========== DIRECTOR ROOT CAUSE =========="
-            grep -nE '^\* What went wrong:|^e: |^w: |C/C\+\+:|(^|[[:space:]])error:|Caused by:|Could not resolve|Execution failed for task|A problem occurred' "$LOG" | head -n 160 || true
+            grep -nE '^\* What went wrong:|^e: |^w: |C/C\+\+:|(^|[[:space:]])error:|Caused by:|Could not resolve|Execution failed for task|A problem occurred' "$LOG" | head -n 200 || true
             echo "========================================="
             exit "$STATUS"
           fi
@@ -80,7 +79,7 @@ workflows:
           set -e
           if [ "$STATUS" -ne 0 ]; then
             echo "========== TEST ROOT CAUSE =========="
-            grep -nE '^\* What went wrong:|^e: |error:|Caused by:|Execution failed for task|FAILED' "$LOG" | head -n 160 || true
+            grep -nE '^\* What went wrong:|^e: |error:|Caused by:|Execution failed for task|FAILED' "$LOG" | head -n 200 || true
             echo "====================================="
             exit "$STATUS"
           fi
@@ -94,26 +93,15 @@ workflows:
           ./gradlew lintDebug --stacktrace --console=plain --no-daemon 2>&1 | tee "$LOG"
           STATUS=$?
           set -e
-
           TXT="app/build/reports/lint-results-debug.txt"
-          XML="app/build/reports/lint-results-debug.xml"
-          HTML="app/build/reports/lint-results-debug.html"
-
           if [ -f "$TXT" ]; then
             echo "========== ANDROID LINT FINDINGS =========="
             cat "$TXT"
             echo "==========================================="
-          elif [ -f "$XML" ]; then
-            echo "Lint XML report produced at $XML"
           fi
-
           if [ "$STATUS" -ne 0 ]; then
-            echo ""
-            echo "DEBUG APK REMAINS PUBLISHABLE: lint found issues, but debug CI is diagnostic."
-            echo "Release V4 remains strict and will not ship while lint errors exist."
-            echo "========== LINT ROOT CAUSE =========="
-            grep -nE '^\* What went wrong:|^e: |error:|Caused by:|Execution failed for task|Fatal:' "$LOG" | head -n 160 || true
-            echo "====================================="
+            echo "DEBUG APK remains publishable for device validation; Release V5 remains strict."
+            grep -nE '^\* What went wrong:|^e: |error:|Caused by:|Execution failed for task|Fatal:' "$LOG" | head -n 200 || true
           fi
           exit 0
 
@@ -125,8 +113,8 @@ workflows:
       - Director/app/build/test-results/**/*.xml
       - director-build-logs/**/*.log
 
-  director-android-release-v4:
-    name: Director Android Release V4
+  director-android-release-v5:
+    name: Director Android Release V5
     max_build_duration: 120
     instance_type: mac_mini_m2
     environment:
@@ -143,35 +131,22 @@ workflows:
       - name: Build identity
         script: |
           set -euo pipefail
-          echo "Director Codemagic workflow: release-v4"
+          echo "Director Codemagic workflow: release-v5"
           echo "Commit: $(git rev-parse HEAD)"
-          echo "Branch: $(git branch --show-current || true)"
           java -version
 
-      - name: Bootstrap Android native toolchain
+      - name: Bootstrap and validate
         script: |
           set -euo pipefail
           cd "$CM_BUILD_DIR/Director"
-          chmod +x scripts/bootstrap_android_sdk.sh
+          chmod +x scripts/*.sh scripts/*.py gradlew
           ./scripts/bootstrap_android_sdk.sh
-
-      - name: Configure Director sources
-        script: |
-          set -euo pipefail
-          cd "$CM_BUILD_DIR/Director"
-          chmod +x gradlew scripts/*.sh scripts/*.py
           python3 scripts/compile_skills.py
-          python3 -m json.tool app/src/main/assets/skills.json >/dev/null
+          python3 scripts/validate_product_contract.py
           SDK_ROOT="$(cat "$CM_BUILD_DIR/.director-android-sdk-root")"
           printf 'sdk.dir=%s\n' "$SDK_ROOT" > local.properties
           mkdir -p "$CM_BUILD_DIR/director-build-logs"
-
-      - name: Fetch pinned llama.cpp
-        script: |
-          set -euo pipefail
-          cd "$CM_BUILD_DIR/Director"
           ./scripts/fetch_llama_cpp.sh
-          test -f third_party/llama.cpp/CMakeLists.txt
 
       - name: Build and verify release
         script: |
@@ -187,13 +162,9 @@ workflows:
           set -e
           if [ "$STATUS" -ne 0 ]; then
             TXT="app/build/reports/lint-results-release.txt"
-            if [ -f "$TXT" ]; then
-              echo "========== RELEASE LINT FINDINGS =========="
-              cat "$TXT"
-              echo "==========================================="
-            fi
+            if [ -f "$TXT" ]; then cat "$TXT"; fi
             echo "========== RELEASE ROOT CAUSE =========="
-            grep -nE '^\* What went wrong:|^e: |C/C\+\+:|error:|Caused by:|Could not resolve|Execution failed for task|A problem occurred|Fatal:' "$LOG" | head -n 200 || true
+            grep -nE '^\* What went wrong:|^e: |C/C\+\+:|error:|Caused by:|Could not resolve|Execution failed for task|A problem occurred|Fatal:' "$LOG" | head -n 240 || true
             echo "========================================"
             exit "$STATUS"
           fi

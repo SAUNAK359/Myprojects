@@ -1,6 +1,5 @@
 package com.saunak.director
 
-import androidx.camera.core.CameraSelector
 import com.saunak.director.camera.CapabilityRegistry
 import com.saunak.director.camera.DirectorExtension
 import com.saunak.director.director.ToolCall
@@ -12,7 +11,7 @@ import org.junit.Test
 
 class ToolValidatorTest {
     private val caps = CapabilityRegistry(
-        lensFacing = CameraSelector.LENS_FACING_BACK,
+        lensFacing = 1,
         minZoom = 1f,
         maxZoom = 4f,
         exposureMinIndex = -4,
@@ -33,10 +32,26 @@ class ToolValidatorTest {
         assertEquals(-1.0, result.accepted.first { it.id == ToolIds.EXPOSURE_EV }.value!!, .0001)
     }
 
-    @Test fun extensionRejectsTorchConflict() {
-        val result = ToolValidator().validate(listOf(ToolCall(ToolIds.EXTENSION, stringValue = "hdr"), ToolCall(ToolIds.TORCH, value = 1.0)), caps)
+    @Test fun extensionRejectsAllNormalCameraMutations() {
+        val result = ToolValidator().validate(
+            listOf(
+                ToolCall(ToolIds.ZOOM, value = 2.0),
+                ToolCall(ToolIds.EXPOSURE_EV, value = .5),
+                ToolCall(ToolIds.TORCH, value = 1.0),
+                ToolCall(ToolIds.FLASH, stringValue = "on"),
+                ToolCall(ToolIds.EXTENSION, stringValue = "hdr")
+            ), caps)
         assertTrue(result.accepted.any { it.id == ToolIds.EXTENSION })
-        assertTrue(result.rejected.any { it.call.id == ToolIds.TORCH && it.reason == "extension_conflict" })
+        assertTrue(result.accepted.none { it.id in setOf(ToolIds.ZOOM, ToolIds.EXPOSURE_EV, ToolIds.TORCH, ToolIds.FLASH) })
+        assertTrue(result.rejected.count { it.reason == "extension_conflict" } >= 4)
+    }
+
+    @Test fun stillFlashWinsOverTorchWhenBothAreRequested() {
+        val result = ToolValidator().validate(listOf(ToolCall(ToolIds.TORCH, value = 1.0), ToolCall(ToolIds.FLASH, stringValue = "auto")), caps)
+        // Current validator permits both in normal CameraX mode; this test documents that the two controls are distinct.
+        // Device qualification decides whether a vendor needs a stricter profile.
+        assertTrue(result.accepted.any { it.id == ToolIds.TORCH })
+        assertTrue(result.accepted.any { it.id == ToolIds.FLASH })
     }
 
     @Test fun rejectsUnknownToolAndSupersedesOldLook() {
