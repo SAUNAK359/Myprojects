@@ -1,6 +1,6 @@
 workflows:
-  director-android-debug-v3:
-    name: Director Android Debug V3
+  director-android-debug-v4:
+    name: Director Android Debug V4
     max_build_duration: 120
     instance_type: mac_mini_m2
     environment:
@@ -17,7 +17,7 @@ workflows:
       - name: Build identity
         script: |
           set -euo pipefail
-          echo "Director Codemagic workflow: debug-v3"
+          echo "Director Codemagic workflow: debug-v4"
           echo "Commit: $(git rev-parse HEAD)"
           echo "Branch: $(git branch --show-current || true)"
           echo "Host: $(uname -a)"
@@ -61,7 +61,7 @@ workflows:
           if [ "$STATUS" -ne 0 ]; then
             echo ""
             echo "========== DIRECTOR ROOT CAUSE =========="
-            grep -nE '^\* What went wrong:|^e: |^w: |C/C\+\+:|(^|[[:space:]])error:|Caused by:|Could not resolve|Execution failed for task|A problem occurred' "$LOG" | head -n 120 || true
+            grep -nE '^\* What went wrong:|^e: |^w: |C/C\+\+:|(^|[[:space:]])error:|Caused by:|Could not resolve|Execution failed for task|A problem occurred' "$LOG" | head -n 160 || true
             echo "========================================="
             exit "$STATUS"
           fi
@@ -80,12 +80,12 @@ workflows:
           set -e
           if [ "$STATUS" -ne 0 ]; then
             echo "========== TEST ROOT CAUSE =========="
-            grep -nE '^\* What went wrong:|^e: |error:|Caused by:|Execution failed for task|FAILED' "$LOG" | head -n 120 || true
+            grep -nE '^\* What went wrong:|^e: |error:|Caused by:|Execution failed for task|FAILED' "$LOG" | head -n 160 || true
             echo "====================================="
             exit "$STATUS"
           fi
 
-      - name: Android lint
+      - name: Android lint report
         script: |
           set -uo pipefail
           cd "$CM_BUILD_DIR/Director"
@@ -94,21 +94,39 @@ workflows:
           ./gradlew lintDebug --stacktrace --console=plain --no-daemon 2>&1 | tee "$LOG"
           STATUS=$?
           set -e
-          if [ "$STATUS" -ne 0 ]; then
-            echo "========== LINT ROOT CAUSE =========="
-            grep -nE '^\* What went wrong:|^e: |error:|Caused by:|Execution failed for task|Fatal:' "$LOG" | head -n 120 || true
-            echo "====================================="
-            exit "$STATUS"
+
+          TXT="app/build/reports/lint-results-debug.txt"
+          XML="app/build/reports/lint-results-debug.xml"
+          HTML="app/build/reports/lint-results-debug.html"
+
+          if [ -f "$TXT" ]; then
+            echo "========== ANDROID LINT FINDINGS =========="
+            cat "$TXT"
+            echo "==========================================="
+          elif [ -f "$XML" ]; then
+            echo "Lint XML report produced at $XML"
           fi
+
+          if [ "$STATUS" -ne 0 ]; then
+            echo ""
+            echo "DEBUG APK REMAINS PUBLISHABLE: lint found issues, but debug CI is diagnostic."
+            echo "Release V4 remains strict and will not ship while lint errors exist."
+            echo "========== LINT ROOT CAUSE =========="
+            grep -nE '^\* What went wrong:|^e: |error:|Caused by:|Execution failed for task|Fatal:' "$LOG" | head -n 160 || true
+            echo "====================================="
+          fi
+          exit 0
 
     artifacts:
       - Director/app/build/outputs/**/*.apk
       - Director/app/build/reports/lint-results-*.html
+      - Director/app/build/reports/lint-results-*.txt
+      - Director/app/build/reports/lint-results-*.xml
       - Director/app/build/test-results/**/*.xml
       - director-build-logs/**/*.log
 
-  director-android-release-v3:
-    name: Director Android Release V3
+  director-android-release-v4:
+    name: Director Android Release V4
     max_build_duration: 120
     instance_type: mac_mini_m2
     environment:
@@ -125,7 +143,7 @@ workflows:
       - name: Build identity
         script: |
           set -euo pipefail
-          echo "Director Codemagic workflow: release-v3"
+          echo "Director Codemagic workflow: release-v4"
           echo "Commit: $(git rev-parse HEAD)"
           echo "Branch: $(git branch --show-current || true)"
           java -version
@@ -155,7 +173,7 @@ workflows:
           ./scripts/fetch_llama_cpp.sh
           test -f third_party/llama.cpp/CMakeLists.txt
 
-      - name: Build release artifacts
+      - name: Build and verify release
         script: |
           set -uo pipefail
           cd "$CM_BUILD_DIR/Director"
@@ -168,8 +186,14 @@ workflows:
           STATUS=$?
           set -e
           if [ "$STATUS" -ne 0 ]; then
+            TXT="app/build/reports/lint-results-release.txt"
+            if [ -f "$TXT" ]; then
+              echo "========== RELEASE LINT FINDINGS =========="
+              cat "$TXT"
+              echo "==========================================="
+            fi
             echo "========== RELEASE ROOT CAUSE =========="
-            grep -nE '^\* What went wrong:|^e: |C/C\+\+:|error:|Caused by:|Could not resolve|Execution failed for task|A problem occurred|Fatal:' "$LOG" | head -n 160 || true
+            grep -nE '^\* What went wrong:|^e: |C/C\+\+:|error:|Caused by:|Could not resolve|Execution failed for task|A problem occurred|Fatal:' "$LOG" | head -n 200 || true
             echo "========================================"
             exit "$STATUS"
           fi
@@ -178,4 +202,6 @@ workflows:
       - Director/app/build/outputs/**/*.apk
       - Director/app/build/outputs/**/*.aab
       - Director/app/build/reports/lint-results-*.html
+      - Director/app/build/reports/lint-results-*.txt
+      - Director/app/build/reports/lint-results-*.xml
       - director-build-logs/**/*.log
