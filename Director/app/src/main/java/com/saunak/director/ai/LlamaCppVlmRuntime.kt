@@ -25,6 +25,7 @@ class LlamaCppVlmRuntime(private val promptBuilder: PromptBuilder = PromptBuilde
 
     override suspend fun load(modelPath: String, projectorPath: String): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
+            if (ready.get()) return@runCatching
             val cores = Runtime.getRuntime().availableProcessors().coerceIn(2, 6)
             NativeVlmBridge.loadModel(modelPath, projectorPath, 4096, cores)
             ready.set(true)
@@ -74,7 +75,13 @@ class LlamaCppVlmRuntime(private val promptBuilder: PromptBuilder = PromptBuilde
     override fun setMaxImageDimension(pixels: Int) { maxImageDimension.set(pixels.coerceIn(384, 1024)) }
     override fun cancel() = NativeVlmBridge.cancel()
     override fun isReady(): Boolean = ready.get()
-    override fun close() { ready.set(false); NativeVlmBridge.cancel(); runCatching { NativeVlmBridge.close() }; inferenceExecutor.shutdownNow() }
+    override fun unload() {
+        if (ready.getAndSet(false)) {
+            NativeVlmBridge.cancel()
+            runCatching { NativeVlmBridge.close() }
+        }
+    }
+    override fun close() { unload(); inferenceExecutor.shutdownNow() }
 
     companion object {
         private const val PLAN_TIMEOUT_MS = 14_000L

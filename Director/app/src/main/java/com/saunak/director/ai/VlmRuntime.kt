@@ -13,5 +13,6 @@ interface VlmRuntime {
     fun setMaxImageDimension(pixels: Int)
     fun cancel()
     fun isReady(): Boolean
+    fun unload()
     fun close()
 }

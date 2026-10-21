@@ -26,14 +26,7 @@ class DirectorOrchestrator(
 ) {
     private val generation = AtomicLong(0L)
 
-    private data class Candidate(
-        val file: File,
-        val look: LookSpec,
-        val score: Double,
-        val valid: Boolean,
-        val accepted: Boolean,
-        val captureNumber: Int
-    )
+    private data class Candidate(val file: File, val look: LookSpec, val score: Double, val valid: Boolean, val accepted: Boolean, val captureNumber: Int)
 
     suspend fun recoverPendingReferences(): List<Uri> = storage.recoverPendingToGallery()
 
@@ -49,7 +42,6 @@ class DirectorOrchestrator(
         val attempts = mutableListOf<File>()
         var finalized = false
         try {
-            // A newer shutter must begin from the user's state, never a stale AI mutation.
             tools.restoreUserState()
             emit(session, DirectorUiState(DirectorStage.CAPTURING, vlm.isReady(), "Capturing reference…", camera = camera.uiState()))
             if (!storage.hasWorkingSpace()) emit(session, DirectorUiState(DirectorStage.CAPTURING, vlm.isReady(), "Low storage • protecting capture", camera = camera.uiState()))
@@ -94,7 +86,8 @@ class DirectorOrchestrator(
                 val candidates = mutableListOf(Candidate(ref, LookSpec(), CapturePolicy.combinedFallbackScore(plan.referenceScore, referenceQuality.heuristicScore), true, plan.referenceAccept, 1))
                 val physicalBudget = CapturePolicy.physicalBudget(thermal.policy().maxPhysicalCaptures)
 
-                val initialCalls = if (physicalBudget > 1) plan.toolCalls else plan.toolCalls.filter { it.id in ToolIds.LOOK_IDS }
+                // If a physical retry is not allowed/desired, never mutate camera state merely to discard it.
+                val initialCalls = if (physicalBudget > 1 && plan.recapture) plan.toolCalls else plan.toolCalls.filter { it.id in ToolIds.LOOK_IDS }
                 emit(session, DirectorUiState(DirectorStage.APPLYING, true, "Preparing improvement…", camera = camera.uiState()))
                 val initialExecution = tools.apply(initialCalls, caps)
                 assertCurrent(session)
@@ -104,41 +97,30 @@ class DirectorOrchestrator(
                 var evaluationCount = 0
                 var currentFile = ref
 
-                val needsPhysicalRecapture = initialExecution.requiresRecapture && plan.recapture && physicalCaptures < physicalBudget
-                if (needsPhysicalRecapture) {
-                    assertCurrent(session)
-                    camera.awaitSettledState()
-                    assertCurrent(session)
+                if (initialExecution.requiresRecapture && physicalCaptures < physicalBudget) {
+                    assertCurrent(session); camera.awaitSettledState(); assertCurrent(session)
                     physicalCaptures++
                     emit(session, DirectorUiState(DirectorStage.RECAPTURING, true, "Capturing improvement…", attempt = physicalCaptures, camera = camera.uiState()))
                     currentFile = storage.newAttempt(session, physicalCaptures).also { attempts += it }
-                    camera.capturePrivate(currentFile)
-                    assertCurrent(session)
+                    camera.capturePrivate(currentFile); assertCurrent(session)
                 } else if (plan.referenceAccept && look.isIdentity() && initialExecution.applied.none { it.id in ToolIds.LOOK_IDS }) {
-                    val uri = finalizeCandidate(session, candidates.first(), ref, attempts)
-                    finalized = uri != null
-                    return uri
+                    val uri = finalizeCandidate(session, candidates.first(), ref, attempts); finalized = uri != null; return uri
                 }
 
                 while (evaluationCount < CapturePolicy.MAX_EVALUATIONS) {
-                    assertCurrent(session)
-                    evaluationCount++
+                    assertCurrent(session); evaluationCount++
                     val decoded = storage.decodeOriented(currentFile)
                     val quality = PhotoQuality.analyze(decoded)
                     val rendered = LookProcessor.apply(decoded, look)
                     try {
                         emit(session, DirectorUiState(DirectorStage.CHECKING, true, "Checking result…", attempt = physicalCaptures, camera = camera.uiState()))
-                        val eval = vlm.evaluate(rendered, plan.objective, physicalCaptures, camera.snapshot(), issues, skills.evaluationContext(branch), caps).getOrElse {
-                            break
-                        }
+                        val eval = vlm.evaluate(rendered, plan.objective, physicalCaptures, camera.snapshot(), issues, skills.evaluationContext(branch), caps).getOrElse { break }
                         assertCurrent(session)
                         val score = CapturePolicy.combinedFallbackScore(eval.score, quality.heuristicScore)
                         val accepted = CapturePolicy.accepted(eval, quality.catastrophic)
                         candidates += Candidate(currentFile, look, score, !quality.catastrophic, accepted, physicalCaptures)
                         if (accepted) {
-                            val uri = finalizeCandidate(session, candidates.last(), ref, attempts)
-                            finalized = uri != null
-                            return uri
+                            val uri = finalizeCandidate(session, candidates.last(), ref, attempts); finalized = uri != null; return uri
                         }
 
                         issues = (eval.issues + issues).distinct().take(8)
@@ -153,13 +135,11 @@ class DirectorOrchestrator(
                         issues = (delta.rejected.map { "tool_${it.call.id}:${it.reason}" } + issues).distinct().take(8)
                         if (delta.requiresRecapture) {
                             if (physicalCaptures >= physicalBudget) break
-                            camera.awaitSettledState()
-                            assertCurrent(session)
+                            camera.awaitSettledState(); assertCurrent(session)
                             physicalCaptures++
                             emit(session, DirectorUiState(DirectorStage.RECAPTURING, true, "Capturing refinement…", attempt = physicalCaptures, camera = camera.uiState()))
                             currentFile = storage.newAttempt(session, physicalCaptures).also { attempts += it }
-                            camera.capturePrivate(currentFile)
-                            assertCurrent(session)
+                            camera.capturePrivate(currentFile); assertCurrent(session)
                         }
                     } finally {
                         if (rendered !== decoded && !rendered.isRecycled) rendered.recycle()
@@ -169,25 +149,15 @@ class DirectorOrchestrator(
 
                 assertCurrent(session)
                 val best = candidates.filter { it.valid }.maxByOrNull { it.score } ?: candidates.first()
-                val uri = finalizeCandidate(session, best, ref, attempts)
-                finalized = uri != null
-                return uri
-            } finally {
-                if (!referenceBitmap.isRecycled) referenceBitmap.recycle()
-            }
+                val uri = finalizeCandidate(session, best, ref, attempts); finalized = uri != null; return uri
+            } finally { if (!referenceBitmap.isRecycled) referenceBitmap.recycle() }
         } catch (_: StaleSession) {
-            // Each shutter still deserves a photo. Stale work may save its original reference,
-            // but it must never mutate camera state again or overwrite the latest UI.
             val ref = reference
-            if (!finalized && ref != null && ref.exists() && ref.length() > 0L) {
-                runCatching { storage.saveRawJpeg(ref) }.onSuccess { storage.markFinalized(ref); finalized = true }
-            }
+            if (!finalized && ref != null && ref.exists() && ref.length() > 0L) runCatching { storage.saveRawJpeg(ref) }.onSuccess { storage.markFinalized(ref); finalized = true }
             return null
         } catch (_: CancellationException) {
             val ref = reference
-            if (!finalized && ref != null && ref.exists() && ref.length() > 0L) {
-                runCatching { storage.saveRawJpeg(ref) }.onSuccess { storage.markFinalized(ref); finalized = true }
-            }
+            if (!finalized && ref != null && ref.exists() && ref.length() > 0L) runCatching { storage.saveRawJpeg(ref) }.onSuccess { storage.markFinalized(ref); finalized = true }
             return null
         } catch (t: Throwable) {
             val ref = reference
@@ -211,16 +181,14 @@ class DirectorOrchestrator(
         assertCurrent(session)
         emit(session, DirectorUiState(DirectorStage.SAVING, true, "Saving best photo…", attempt = candidate.captureNumber, lastScore = candidate.score, camera = camera.uiState()))
         val uri = storage.saveFinal(candidate.file, candidate.look)
-        storage.markFinalized(reference)
-        storage.cleanup(attempts)
+        storage.markFinalized(reference); storage.cleanup(attempts)
         emit(session, DirectorUiState(DirectorStage.READY, vlm.isReady(), "Saved", lastScore = candidate.score, camera = camera.uiState(), lastSavedUri = uri.toString()))
         return uri
     }
 
     private suspend fun fallbackReference(session: Long, reference: File, status: String): Uri? {
         assertCurrent(session)
-        val uri = storage.saveRawJpeg(reference)
-        storage.markFinalized(reference)
+        val uri = storage.saveRawJpeg(reference); storage.markFinalized(reference)
         emit(session, DirectorUiState(DirectorStage.READY, vlm.isReady(), status, camera = camera.uiState(), lastSavedUri = uri.toString()))
         return uri
     }
