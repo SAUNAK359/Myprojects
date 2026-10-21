@@ -11,7 +11,7 @@ plugins {
 android {
     namespace = "com.saunak.director"
     compileSdk = 36
-    buildToolsVersion = "35.0.0"
+    buildToolsVersion = "36.0.0"
     ndkVersion = "28.2.13676358"
 
     defaultConfig {
