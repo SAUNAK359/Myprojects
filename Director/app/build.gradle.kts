@@ -72,8 +72,6 @@ kotlin {
 }
 
 dependencies {
-    // Keep the AndroidX set on one pre-AGP-9 generation. Newer 2026 artifacts
-    // declare an AGP 9.1+ floor in AAR metadata and cannot be consumed by AGP 8.13.x.
     val composeBom = platform("androidx.compose:compose-bom:2025.09.01")
     implementation(composeBom)
     androidTestImplementation(composeBom)
@@ -90,12 +88,12 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     debugImplementation("androidx.compose.ui:ui-tooling")
 
-    // CameraX 1.5.0 is the stable September 2025 generation and remains fully
-    // sufficient for Preview/ImageCapture/ImageAnalysis used by Director.
     implementation("androidx.camera:camera-core:1.5.0")
     implementation("androidx.camera:camera-camera2:1.5.0")
     implementation("androidx.camera:camera-lifecycle:1.5.0")
     implementation("androidx.camera:camera-view:1.5.0")
+    implementation("androidx.camera:camera-extensions:1.5.0")
+    implementation("androidx.exifinterface:exifinterface:1.4.1")
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")

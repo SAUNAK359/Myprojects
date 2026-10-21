@@ -1,18 +1,27 @@
 package com.saunak.director.director
 
+import com.saunak.director.camera.CameraUiState
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
 @Serializable
-data class ToolCall(@SerialName("id") val id: Int, @SerialName("v") val value: Double? = null, @SerialName("s") val stringValue: String? = null)
+data class ToolCall(
+    @SerialName("id") val id: Int,
+    @SerialName("v") val value: Double? = null,
+    @SerialName("x") val x: Double? = null,
+    @SerialName("y") val y: Double? = null,
+    @SerialName("s") val stringValue: String? = null
+)
 
 @Serializable
 data class PlanOutput(
     @SerialName("scene") val scene: String,
     @SerialName("objective") val objective: String,
     @SerialName("branch") val skillBranch: String,
+    @SerialName("reference_score") val referenceScore: Double = 0.5,
+    @SerialName("reference_accept") val referenceAccept: Boolean = false,
     @SerialName("calls") val toolCalls: List<ToolCall> = emptyList(),
-    @SerialName("capture") val capture: Boolean = true
+    @SerialName("recapture") val recapture: Boolean = true
 )
 
 @Serializable
@@ -27,7 +36,7 @@ data class EvaluationOutput(
     @SerialName("delta") val deltaCalls: List<ToolCall> = emptyList()
 )
 
-enum class DirectorStage { CAMERA_ONLY, AI_DOWNLOAD_REQUIRED, LOADING_AI, OBSERVING, PLANNING, APPLYING, CAPTURING, CHECKING, CORRECTING, SAVING, ERROR }
+enum class DirectorStage { CAMERA_ONLY, AI_DOWNLOAD_REQUIRED, LOADING_AI, READY, CAPTURING, ANALYZING, PLANNING, APPLYING, RECAPTURING, CHECKING, CORRECTING, SAVING, ERROR, OBSERVING }
 
 data class DirectorUiState(
     val stage: DirectorStage = DirectorStage.CAMERA_ONLY,
@@ -37,5 +46,7 @@ data class DirectorUiState(
     val lastScore: Double? = null,
     val modelProgress: Float? = null,
     val requestModelDownload: Boolean = false,
-    val error: String? = null
+    val error: String? = null,
+    val camera: CameraUiState = CameraUiState(),
+    val lastSavedUri: String? = null
 )
