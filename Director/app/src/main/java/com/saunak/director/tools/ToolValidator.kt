@@ -55,6 +55,13 @@ class ToolValidator {
                 conflicting.forEach { rejected += Rejection(it, "extension_conflict") }
             }
         }
+
+        val flash = accepted.firstOrNull { it.id == ToolIds.FLASH && it.stringValue != StillFlashMode.OFF.wireName }
+        val torchOn = accepted.firstOrNull { it.id == ToolIds.TORCH && (it.value ?: 0.0) >= 0.5 }
+        if (flash != null && torchOn != null) {
+            accepted.remove(torchOn)
+            rejected += Rejection(torchOn, "flash_torch_conflict")
+        }
         return Result(accepted, rejected)
     }
 

@@ -46,12 +46,18 @@ class ToolValidatorTest {
         assertTrue(result.rejected.count { it.reason == "extension_conflict" } >= 4)
     }
 
-    @Test fun stillFlashWinsOverTorchWhenBothAreRequested() {
+    @Test fun stillFlashSuppressesTorchOn() {
         val result = ToolValidator().validate(listOf(ToolCall(ToolIds.TORCH, value = 1.0), ToolCall(ToolIds.FLASH, stringValue = "auto")), caps)
-        // Current validator permits both in normal CameraX mode; this test documents that the two controls are distinct.
-        // Device qualification decides whether a vendor needs a stricter profile.
-        assertTrue(result.accepted.any { it.id == ToolIds.TORCH })
+        assertTrue(result.accepted.none { it.id == ToolIds.TORCH })
         assertTrue(result.accepted.any { it.id == ToolIds.FLASH })
+        assertTrue(result.rejected.any { it.reason == "flash_torch_conflict" })
+    }
+
+    @Test fun activeExtensionBlocksNormalCameraMutation() {
+        val active = caps.copy(activeExtension = DirectorExtension.HDR)
+        val result = ToolValidator().validate(listOf(ToolCall(ToolIds.ZOOM, value = 2.0), ToolCall(ToolIds.EXTENSION, stringValue = "none")), active)
+        assertTrue(result.rejected.any { it.call.id == ToolIds.ZOOM && it.reason == "extension_active" })
+        assertTrue(result.accepted.any { it.id == ToolIds.EXTENSION && it.stringValue == "none" })
     }
 
     @Test fun rejectsUnknownToolAndSupersedesOldLook() {

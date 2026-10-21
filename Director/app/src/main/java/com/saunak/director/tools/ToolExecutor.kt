@@ -16,7 +16,8 @@ class ToolExecutor(private val camera: CameraEngine, private val validator: Tool
     private val mutationMutex = Mutex()
 
     suspend fun apply(calls: List<ToolCall>, capabilities: CapabilityRegistry, currentLook: LookSpec = LookSpec()): Result = mutationMutex.withLock {
-        val validated = validator.validate(calls, capabilities)
+        val effectiveCaps = capabilities.copy(activeExtension = camera.snapshot().extension)
+        val validated = validator.validate(calls, effectiveCaps)
         val applied = mutableListOf<ToolCall>()
         val rejected = validated.rejected.mapTo(mutableListOf()) { Rejected(it.call, it.reason) }
         var look = currentLook
@@ -28,7 +29,11 @@ class ToolExecutor(private val camera: CameraEngine, private val validator: Tool
                     ToolIds.ZOOM -> camera.aiSetZoom(call.value!!.toFloat())
                     ToolIds.EXPOSURE_EV -> camera.aiSetExposureEv(call.value!!.toFloat())
                     ToolIds.TORCH -> camera.aiSetTorch(call.value!! >= 0.5)
-                    ToolIds.FLASH -> camera.aiSetFlash(checkNotNull(StillFlashMode.fromWire(call.stringValue)))
+                    ToolIds.FLASH -> {
+                        val mode = checkNotNull(StillFlashMode.fromWire(call.stringValue))
+                        if (mode != StillFlashMode.OFF) camera.aiSetTorch(false)
+                        camera.aiSetFlash(mode)
+                    }
                     ToolIds.EXTENSION -> camera.aiSetExtension(checkNotNull(DirectorExtension.fromWire(call.stringValue)))
                     ToolIds.LOOK_NATURAL -> look = LookSpec(Look.NATURAL, call.value?.toFloat() ?: 0f)
                     ToolIds.LOOK_WARM -> look = LookSpec(Look.WARM, call.value?.toFloat() ?: .65f)
@@ -42,7 +47,7 @@ class ToolExecutor(private val camera: CameraEngine, private val validator: Tool
                 }
             }.onSuccess { applied += call }.onFailure { rejected += Rejected(call, it.message ?: "execution_failed") }
         }
-        val requiresRecapture = applied.any { it.id in setOf(ToolIds.FOCUS, ToolIds.ZOOM, ToolIds.EXPOSURE_EV, ToolIds.TORCH, ToolIds.FLASH, ToolIds.EXTENSION) }
+        val requiresRecapture = applied.any { it.id in ToolIds.CAMERA_IDS }
         Result(applied, rejected, look, requiresRecapture)
     }
 
