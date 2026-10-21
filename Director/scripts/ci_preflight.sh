@@ -7,9 +7,12 @@ cd "$ROOT"
 log() { printf '[Director Preflight] %s\n' "$*"; }
 fail() { printf '[Director Preflight] ERROR: %s\n' "$*" >&2; exit 1; }
 
-for cmd in bash java python3 curl unzip tar git awk sed grep find; do
+for cmd in bash java python3 curl unzip tar git awk sed grep find tr df; do
   command -v "$cmd" >/dev/null 2>&1 || fail "Required host command missing: $cmd"
 done
+
+log "Bash runtime: ${BASH_VERSION:-unknown}"
+python3 scripts/check_shell_compat.py || fail "Shell compatibility guard failed"
 
 JAVA_MAJOR="$(java -version 2>&1 | awk -F'[\".]' '/version/ {print $2; exit}')"
 [[ "$JAVA_MAJOR" == "17" ]] || fail "Director requires JDK 17; detected Java major ${JAVA_MAJOR:-unknown}"
@@ -28,16 +31,16 @@ SDK_ROOT="$(cat "$STATE_FILE")"
 NDK_BIN=""
 for candidate in "$SDK_ROOT"/ndk/28.2.13676358/toolchains/llvm/prebuilt/*/bin; do
   [[ -d "$candidate" ]] || continue
-  if [[ -x "$candidate/clang" && -x "$candidate/clang++" ]]; then NDK_BIN="$candidate"; break; fi
+  if [[ -x "$candidate/clang" && -x "$candidate/clang++" && -x "$candidate/llvm-ar" ]]; then NDK_BIN="$candidate"; break; fi
 done
 [[ -n "$NDK_BIN" ]] || fail "NDK LLVM host toolchain not found"
 "$NDK_BIN/clang" --version >/dev/null || fail "NDK clang cannot execute"
+"$NDK_BIN/clang++" --version >/dev/null || fail "NDK clang++ cannot execute"
+"$NDK_BIN/llvm-ar" --version >/dev/null || fail "NDK llvm-ar cannot execute"
 "$SDK_ROOT/cmake/3.22.1/bin/cmake" --version >/dev/null || fail "CMake cannot execute"
 "$SDK_ROOT/build-tools/36.0.0/aapt2" version >/dev/null || fail "aapt2 cannot execute"
 log "Android SDK/NDK/CMake executables verified"
 
-# Director downloads a ~1.6 GB VLM later and native/Gradle builds can consume several GB.
-# CI should fail immediately with a useful diagnostic instead of corrupting archives mid-build.
 CHECK_PATH="${CM_BUILD_DIR:-$ROOT}"
 AVAILABLE_KB="$(df -Pk "$CHECK_PATH" | awk 'NR==2 {print $4}')"
 MIN_KB=$((10 * 1024 * 1024))
