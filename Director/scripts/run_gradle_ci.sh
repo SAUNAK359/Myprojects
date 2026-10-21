@@ -12,20 +12,22 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 mkdir -p "$(dirname "$LOG")"
 
+GRADLE_ARGS=("$@")
+
 run_once() {
   local refresh="$1"
   set +e
   if [[ "$refresh" == "1" ]]; then
-    ./gradlew "$@" --refresh-dependencies --stacktrace --console=plain --no-daemon 2>&1 | tee "$LOG"
+    ./gradlew "${GRADLE_ARGS[@]}" --refresh-dependencies --stacktrace --console=plain --no-daemon 2>&1 | tee "$LOG"
   else
-    ./gradlew "$@" --stacktrace --console=plain --no-daemon 2>&1 | tee "$LOG"
+    ./gradlew "${GRADLE_ARGS[@]}" --stacktrace --console=plain --no-daemon 2>&1 | tee "$LOG"
   fi
   local status=${PIPESTATUS[0]}
   set -e
   return "$status"
 }
 
-if run_once 0 "$@"; then
+if run_once 0; then
   exit 0
 fi
 
@@ -52,4 +54,4 @@ rm -rf \
   "$ROOT/app/.cxx" 2>/dev/null || true
 
 sleep 3
-run_once 1 "$@"
+run_once 1
