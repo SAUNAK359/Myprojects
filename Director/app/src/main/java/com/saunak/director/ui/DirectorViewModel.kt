@@ -90,15 +90,14 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
                 aiPreparationStarted = false
                 _ui.value = _ui.value.copy(stage = DirectorStage.READY, aiAvailable = true, status = "Director ready", modelProgress = null, error = null, camera = runCatching { camera.uiState() }.getOrDefault(_ui.value.camera))
             }.onFailure {
+                modelManager.invalidateVerification()
                 aiPreparationStarted = false
-                _ui.value = _ui.value.copy(stage = DirectorStage.CAMERA_ONLY, aiAvailable = false, status = "Camera ready • AI unavailable", modelProgress = null, error = it.message)
+                _ui.value = _ui.value.copy(stage = DirectorStage.CAMERA_ONLY, aiAvailable = false, status = "Camera ready • AI verification needed", modelProgress = null, error = it.message)
             }
         }
     }
 
-    fun shutterCapture() {
-        viewModelScope.launch { orchestrator.onShutterPressed() }
-    }
+    fun shutterCapture() { viewModelScope.launch { orchestrator.onShutterPressed() } }
 
     fun focus(x: Float, y: Float) {
         orchestrator.cancelForUserAction()
@@ -129,15 +128,17 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun onAppBackgrounded() {
         orchestrator.cancelForUserAction()
-        if (aiPreparationStarted && !runtime.isReady()) { aiJob?.cancel(); aiPreparationStarted = false; _ui.value = _ui.value.copy(stage = DirectorStage.CAMERA_ONLY, status = "Camera ready", modelProgress = null) }
+        if (aiPreparationStarted && !runtime.isReady()) {
+            aiJob?.cancel(); aiPreparationStarted = false
+            _ui.value = _ui.value.copy(stage = DirectorStage.CAMERA_ONLY, status = "Camera ready", modelProgress = null)
+        }
     }
     fun onAppForegrounded() { if (!runtime.isReady() && modelManager.isInstalled()) prepareAi(false) }
 
     override fun onCleared() {
         MemoryPressureBus.remove(memoryListener)
         orchestrator.cancelForUserAction()
-        runtime.close()
-        camera.close()
+        runtime.close(); camera.close()
         super.onCleared()
     }
 }
