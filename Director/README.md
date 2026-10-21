@@ -49,10 +49,21 @@ Files are stored app-private and SHA-256 verified. The APK contains no model wei
 - Kotlin / Compose plugin `2.3.10`
 - JDK `17`
 - compile/target SDK `36`
-- Build Tools `35.0.0`
+- Build Tools `36.0.0`
 - NDK `28.2.13676358`
 - CMake `3.22.1`
 - CameraX `1.5.0`
+
+## Android SDK bootstrap resilience
+
+`scripts/bootstrap_android_sdk.sh` verifies the actual SDK files/binaries instead of trusting package directories. It provisions packages one at a time and performs bounded retries. If Codemagic's shared SDK is incomplete or its downloaded archive is corrupt, Director purges partial package/temp/cache state and retries. If shared-SDK repair still fails, it automatically switches to a clean user-owned SDK under `$HOME/.director/android-sdk` and verifies the complete toolchain there before Gradle is allowed to run.
+
+Required verified components are:
+
+- `platforms;android-36`
+- `build-tools;36.0.0`
+- `ndk;28.2.13676358`
+- `cmake;3.22.1`
 
 ## Local build
 
@@ -70,9 +81,19 @@ printf 'sdk.dir=%s\n' "$SDK_ROOT" > local.properties
 
 ## Codemagic
 
-Use **Director Android Debug V5** from a new build on the latest `main` commit. Do not re-run an older failed job because Codemagic re-runs that job's old revision/configuration.
+Use **Director Android Debug V6** from a **new build** on the latest `main` commit. Do not use Re-run on an older V5/V4 failure because Codemagic re-runs that job's old revision/configuration.
 
-Debug V5 builds the APK first, runs contract/unit/lint checks, and publishes diagnostics. Release V5 remains strict: tests/lint/build must pass and release signing must be configured before distribution.
+Debug V6:
+
+1. identifies the exact commit/workflow;
+2. self-heals or clean-room provisions the Android SDK/toolchain;
+3. verifies Android 36, Build Tools 36.0.0, NDK 28.2 and CMake 3.22.1 binaries;
+4. compiles Skills IR v2 and enforces the shutter product contract;
+5. fetches checksum-pinned llama.cpp;
+6. compiles and verifies a non-empty debug APK;
+7. runs unit tests and diagnostic lint.
+
+Release **Director Android Release V6** remains strict: APK/AAB, tests and lint must pass, and release signing must be configured before distribution.
 
 ## Production status
 
