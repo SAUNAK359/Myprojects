@@ -1,0 +1,4 @@
+-keep class com.saunak.director.ai.NativeVlmBridge { *; }
+-keepclasseswithmembernames class * { native <methods>; }
+-keepattributes *Annotation*
+-dontwarn org.jetbrains.annotations.**

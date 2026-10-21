@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "root": "Identify the primary subject, lighting direction, dynamic range, motion, depth, distractions, composition opportunity and intended mood. Prefer natural, believable photography. Make the smallest set of camera/effect changes that materially improves the shot.",
+  "branches": {
+    "architecture": "Keep verticals and horizon credible, protect window highlights, maintain detail, and avoid excessive wide-angle distortion.",
+    "automotive": "Preserve body lines and paint highlights, control specular reflections, avoid excessive wide-angle distortion, and keep the main vehicle sharp.",
+    "food": "Prioritize appetizing but natural color, highlight texture, avoid cool casts, and use moderate local contrast.",
+    "general": "Preserve highlights, maintain a sharp primary subject, avoid unnecessary digital zoom, avoid extreme color shifts, and let native auto-exposure/focus work unless a measured adjustment is useful.",
+    "landscape": "Prioritize horizon, depth layers, highlight preservation and natural local contrast. Avoid over-saturation. Use modest negative exposure compensation only when bright sky clipping is likely.",
+    "macro": "Prioritize close-subject focus and microcontrast. Avoid digital zoom. Protect saturated flower highlights and keep background color natural.",
+    "night": "Prioritize stability, highlight control and noise management. Avoid long-exposure assumptions for moving subjects. Preserve shadows without blowing practical lights.",
+    "portrait": "Prioritize visible eyes/face for focus, protect skin highlights, preserve natural skin tone, avoid aggressive saturation or smoothing, and keep background treatment subtle and credible."
+  },
+  "evaluation": "Judge technical quality, composition, subject quality and aesthetics against the original objective. Reject severe blur, clipping, missed focus, unnatural color, or distracting composition. If rejected, request only the minimum corrective delta.",
+  "tools": "Prefer exposure compensation while auto exposure is active. Avoid extreme zoom. Torch is allowed only when it materially improves the scene. Unsupported controls must never be requested."
+}

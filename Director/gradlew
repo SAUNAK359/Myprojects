@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+GRADLE_VERSION="8.13"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CACHE="${GRADLE_USER_HOME:-$HOME/.gradle}/director-wrapper/${GRADLE_VERSION}"
+BIN="$CACHE/gradle-${GRADLE_VERSION}/bin/gradle"
+if [[ ! -x "$BIN" ]]; then
+  mkdir -p "$CACHE"
+  ZIP="$CACHE/gradle-${GRADLE_VERSION}-bin.zip"
+  if [[ ! -f "$ZIP" ]]; then
+    curl --fail --location --retry 3 --retry-delay 2 \
+      "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" \
+      --output "$ZIP"
+  fi
+  rm -rf "$CACHE/gradle-${GRADLE_VERSION}"
+  unzip -q "$ZIP" -d "$CACHE"
+fi
+exec "$BIN" "$@"

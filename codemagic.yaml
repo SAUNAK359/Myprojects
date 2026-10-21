@@ -1,0 +1,87 @@
+workflows:
+  director-android-debug:
+    name: Director Android Debug
+    max_build_duration: 120
+    instance_type: mac_mini_m2
+    environment:
+      java: 17
+      vars:
+        PACKAGE_NAME: "com.saunak.director"
+    cache:
+      cache_paths:
+        - $HOME/.gradle/caches
+        - $HOME/.gradle/director-wrapper
+        - $CM_BUILD_DIR/Director/third_party/llama.cpp
+    scripts:
+      - name: Install Android native toolchain
+        script: |
+          set -euo pipefail
+          yes | sdkmanager "platforms;android-36" "build-tools;35.0.0" "ndk;28.2.13676358" "cmake;3.22.1" >/dev/null
+      - name: Configure Director sources
+        script: |
+          set -euo pipefail
+          cd "$CM_BUILD_DIR/Director"
+          chmod +x gradlew scripts/*.sh scripts/*.py
+          python3 scripts/compile_skills.py
+          python3 -m json.tool app/src/main/assets/skills.json >/dev/null
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
+      - name: Fetch pinned llama.cpp
+        script: |
+          set -euo pipefail
+          cd "$CM_BUILD_DIR/Director"
+          ./scripts/fetch_llama_cpp.sh
+      - name: Unit tests and lint
+        script: |
+          set -euo pipefail
+          cd "$CM_BUILD_DIR/Director"
+          ./gradlew testDebugUnitTest lintDebug --stacktrace --no-daemon
+      - name: Build debug APK
+        script: |
+          set -euo pipefail
+          cd "$CM_BUILD_DIR/Director"
+          ./gradlew assembleDebug --stacktrace --no-daemon
+    artifacts:
+      - Director/app/build/outputs/**/*.apk
+      - Director/app/build/reports/lint-results-*.html
+      - Director/app/build/test-results/**/*.xml
+
+  director-android-release:
+    name: Director Android Release
+    max_build_duration: 120
+    instance_type: mac_mini_m2
+    environment:
+      java: 17
+      vars:
+        PACKAGE_NAME: "com.saunak.director"
+    cache:
+      cache_paths:
+        - $HOME/.gradle/caches
+        - $HOME/.gradle/director-wrapper
+        - $CM_BUILD_DIR/Director/third_party/llama.cpp
+    scripts:
+      - name: Install Android native toolchain
+        script: |
+          set -euo pipefail
+          yes | sdkmanager "platforms;android-36" "build-tools;35.0.0" "ndk;28.2.13676358" "cmake;3.22.1" >/dev/null
+      - name: Configure Director sources
+        script: |
+          set -euo pipefail
+          cd "$CM_BUILD_DIR/Director"
+          chmod +x gradlew scripts/*.sh scripts/*.py
+          python3 scripts/compile_skills.py
+          python3 -m json.tool app/src/main/assets/skills.json >/dev/null
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
+      - name: Fetch pinned llama.cpp
+        script: |
+          set -euo pipefail
+          cd "$CM_BUILD_DIR/Director"
+          ./scripts/fetch_llama_cpp.sh
+      - name: Test, lint, and build release
+        script: |
+          set -euo pipefail
+          cd "$CM_BUILD_DIR/Director"
+          ./gradlew testReleaseUnitTest lintRelease assembleRelease bundleRelease -PversionCode=$BUILD_NUMBER -PversionName=1.0.$BUILD_NUMBER --stacktrace --no-daemon
+    artifacts:
+      - Director/app/build/outputs/**/*.apk
+      - Director/app/build/outputs/**/*.aab
+      - Director/app/build/reports/lint-results-*.html
