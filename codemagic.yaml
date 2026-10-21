@@ -1,6 +1,6 @@
 workflows:
-  director-android-debug-v2:
-    name: Director Android Debug V2
+  director-android-debug-v3:
+    name: Director Android Debug V3
     max_build_duration: 120
     instance_type: mac_mini_m2
     environment:
@@ -17,7 +17,7 @@ workflows:
       - name: Build identity
         script: |
           set -euo pipefail
-          echo "Director Codemagic workflow: debug-v2"
+          echo "Director Codemagic workflow: debug-v3"
           echo "Commit: $(git rev-parse HEAD)"
           echo "Branch: $(git branch --show-current || true)"
           echo "Host: $(uname -a)"
@@ -40,6 +40,7 @@ workflows:
           SDK_ROOT="$(cat "$CM_BUILD_DIR/.director-android-sdk-root")"
           printf 'sdk.dir=%s\n' "$SDK_ROOT" > local.properties
           echo "sdk.dir=$SDK_ROOT"
+          mkdir -p "$CM_BUILD_DIR/director-build-logs"
 
       - name: Fetch pinned llama.cpp
         script: |
@@ -48,32 +49,66 @@ workflows:
           ./scripts/fetch_llama_cpp.sh
           test -f third_party/llama.cpp/CMakeLists.txt
 
+      - name: Compile debug APK
+        script: |
+          set -uo pipefail
+          cd "$CM_BUILD_DIR/Director"
+          LOG="$CM_BUILD_DIR/director-build-logs/assemble-debug.log"
+          set +e
+          ./gradlew assembleDebug --stacktrace --console=plain --no-daemon 2>&1 | tee "$LOG"
+          STATUS=$?
+          set -e
+          if [ "$STATUS" -ne 0 ]; then
+            echo ""
+            echo "========== DIRECTOR ROOT CAUSE =========="
+            grep -nE '^\* What went wrong:|^e: |^w: |C/C\+\+:|(^|[[:space:]])error:|Caused by:|Could not resolve|Execution failed for task|A problem occurred' "$LOG" | head -n 120 || true
+            echo "========================================="
+            exit "$STATUS"
+          fi
+          APK="$(find app/build/outputs/apk/debug -name '*.apk' -type f -print -quit)"
+          test -n "$APK"
+          echo "APK ready: $APK"
+
       - name: Unit tests
         script: |
-          set -euo pipefail
+          set -uo pipefail
           cd "$CM_BUILD_DIR/Director"
-          ./gradlew testDebugUnitTest --stacktrace --no-daemon
+          LOG="$CM_BUILD_DIR/director-build-logs/unit-tests.log"
+          set +e
+          ./gradlew testDebugUnitTest --stacktrace --console=plain --no-daemon 2>&1 | tee "$LOG"
+          STATUS=$?
+          set -e
+          if [ "$STATUS" -ne 0 ]; then
+            echo "========== TEST ROOT CAUSE =========="
+            grep -nE '^\* What went wrong:|^e: |error:|Caused by:|Execution failed for task|FAILED' "$LOG" | head -n 120 || true
+            echo "====================================="
+            exit "$STATUS"
+          fi
 
       - name: Android lint
         script: |
-          set -euo pipefail
+          set -uo pipefail
           cd "$CM_BUILD_DIR/Director"
-          ./gradlew lintDebug --stacktrace --no-daemon
-
-      - name: Build debug APK
-        script: |
-          set -euo pipefail
-          cd "$CM_BUILD_DIR/Director"
-          ./gradlew assembleDebug --stacktrace --no-daemon
-          test -n "$(find app/build/outputs/apk/debug -name '*.apk' -type f -print -quit)"
+          LOG="$CM_BUILD_DIR/director-build-logs/lint-debug.log"
+          set +e
+          ./gradlew lintDebug --stacktrace --console=plain --no-daemon 2>&1 | tee "$LOG"
+          STATUS=$?
+          set -e
+          if [ "$STATUS" -ne 0 ]; then
+            echo "========== LINT ROOT CAUSE =========="
+            grep -nE '^\* What went wrong:|^e: |error:|Caused by:|Execution failed for task|Fatal:' "$LOG" | head -n 120 || true
+            echo "====================================="
+            exit "$STATUS"
+          fi
 
     artifacts:
       - Director/app/build/outputs/**/*.apk
       - Director/app/build/reports/lint-results-*.html
       - Director/app/build/test-results/**/*.xml
+      - director-build-logs/**/*.log
 
-  director-android-release-v2:
-    name: Director Android Release V2
+  director-android-release-v3:
+    name: Director Android Release V3
     max_build_duration: 120
     instance_type: mac_mini_m2
     environment:
@@ -90,7 +125,7 @@ workflows:
       - name: Build identity
         script: |
           set -euo pipefail
-          echo "Director Codemagic workflow: release-v2"
+          echo "Director Codemagic workflow: release-v3"
           echo "Commit: $(git rev-parse HEAD)"
           echo "Branch: $(git branch --show-current || true)"
           java -version
@@ -111,6 +146,7 @@ workflows:
           python3 -m json.tool app/src/main/assets/skills.json >/dev/null
           SDK_ROOT="$(cat "$CM_BUILD_DIR/.director-android-sdk-root")"
           printf 'sdk.dir=%s\n' "$SDK_ROOT" > local.properties
+          mkdir -p "$CM_BUILD_DIR/director-build-logs"
 
       - name: Fetch pinned llama.cpp
         script: |
@@ -119,22 +155,27 @@ workflows:
           ./scripts/fetch_llama_cpp.sh
           test -f third_party/llama.cpp/CMakeLists.txt
 
-      - name: Test and lint release
-        script: |
-          set -euo pipefail
-          cd "$CM_BUILD_DIR/Director"
-          ./gradlew testReleaseUnitTest lintRelease --stacktrace --no-daemon
-
       - name: Build release artifacts
         script: |
-          set -euo pipefail
+          set -uo pipefail
           cd "$CM_BUILD_DIR/Director"
-          ./gradlew assembleRelease bundleRelease \
+          LOG="$CM_BUILD_DIR/director-build-logs/release.log"
+          set +e
+          ./gradlew assembleRelease bundleRelease testReleaseUnitTest lintRelease \
             -PversionCode=$BUILD_NUMBER \
             -PversionName=1.0.$BUILD_NUMBER \
-            --stacktrace --no-daemon
+            --stacktrace --console=plain --no-daemon 2>&1 | tee "$LOG"
+          STATUS=$?
+          set -e
+          if [ "$STATUS" -ne 0 ]; then
+            echo "========== RELEASE ROOT CAUSE =========="
+            grep -nE '^\* What went wrong:|^e: |C/C\+\+:|error:|Caused by:|Could not resolve|Execution failed for task|A problem occurred|Fatal:' "$LOG" | head -n 160 || true
+            echo "========================================"
+            exit "$STATUS"
+          fi
 
     artifacts:
       - Director/app/build/outputs/**/*.apk
       - Director/app/build/outputs/**/*.aab
       - Director/app/build/reports/lint-results-*.html
+      - director-build-logs/**/*.log
