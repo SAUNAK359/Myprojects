@@ -31,7 +31,8 @@ data class CapabilityRegistry(
     val opticalStabilizationModes: List<Int> = emptyList(),
     val videoStabilizationModes: List<Int> = emptyList(),
     val extensions: Set<DirectorExtension> = emptySet(),
-    val allowedToolIds: Set<Int>
+    val allowedToolIds: Set<Int>,
+    val activeExtension: DirectorExtension = DirectorExtension.NONE
 ) {
     val minExposureEv: Float get() = exposureMinIndex * exposureStepEv
     val maxExposureEv: Float get() = exposureMaxIndex * exposureStepEv
@@ -43,6 +44,7 @@ data class CapabilityRegistry(
         append(";focus=").append(focusMeteringSupported)
         append(";manualSensor=").append(manualSensorSupported)
         append(";raw=").append(rawSupported)
+        append(";activeExtension=").append(activeExtension.wireName)
         if (focalLengthsMm.isNotEmpty()) append(";focalMm=").append(focalLengthsMm.joinToString(","))
         append(";extensions=").append(extensions.joinToString(",") { it.wireName })
     }

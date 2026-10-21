@@ -15,10 +15,14 @@ class ToolValidator {
         val calls = input.take(8)
         if (input.size > 8) input.drop(8).forEach { rejected += Rejection(it, "too_many_calls") }
         var chosenLook: ToolCall? = null
-        var extension: DirectorExtension? = null
+        var requestedExtension: DirectorExtension? = null
 
         for (call in calls) {
             if (call.id !in caps.allowedToolIds && call.id !in ToolIds.LOOK_IDS) { rejected += Rejection(call, "unsupported_tool"); continue }
+            if (caps.activeExtension != DirectorExtension.NONE && call.id in ToolIds.CAMERA_IDS && call.id != ToolIds.EXTENSION) {
+                rejected += Rejection(call, "extension_active")
+                continue
+            }
             val normalized = when (call.id) {
                 ToolIds.FOCUS -> {
                     val x = call.x; val y = call.y
@@ -28,7 +32,11 @@ class ToolValidator {
                 ToolIds.EXPOSURE_EV -> if (!finite(call.value) || caps.exposureStepEv <= 0f) null else call.copy(value = call.value!!.coerceIn(caps.minExposureEv.toDouble(), caps.maxExposureEv.toDouble()))
                 ToolIds.TORCH -> if (!finite(call.value)) null else call.copy(value = if (call.value!! >= 0.5) 1.0 else 0.0)
                 ToolIds.FLASH -> StillFlashMode.fromWire(call.stringValue)?.let { call.copy(stringValue = it.wireName) }
-                ToolIds.EXTENSION -> DirectorExtension.fromWire(call.stringValue)?.takeIf { it in caps.extensions }?.let { extension = it; call.copy(stringValue = it.wireName) }
+                ToolIds.EXTENSION -> {
+                    val extension = DirectorExtension.fromWire(call.stringValue)
+                    val supported = extension != null && (extension in caps.extensions || (extension == DirectorExtension.NONE && caps.activeExtension != DirectorExtension.NONE))
+                    if (!supported) null else call.copy(stringValue = extension!!.wireName).also { requestedExtension = extension }
+                }
                 in ToolIds.LOOK_IDS -> if (call.value == null || finite(call.value)) call.copy(value = call.value?.coerceIn(0.0, 1.0)) else null
                 else -> null
             }
@@ -40,8 +48,8 @@ class ToolValidator {
         }
         chosenLook?.let { accepted += it }
 
-        if (extension != null && extension != DirectorExtension.NONE) {
-            val conflicting = accepted.filter { it.id == ToolIds.TORCH || it.id == ToolIds.FLASH }
+        if (requestedExtension != null && requestedExtension != DirectorExtension.NONE) {
+            val conflicting = accepted.filter { it.id in ToolIds.CAMERA_IDS && it.id != ToolIds.EXTENSION }
             if (conflicting.isNotEmpty()) {
                 accepted.removeAll(conflicting.toSet())
                 conflicting.forEach { rejected += Rejection(it, "extension_conflict") }

@@ -1,6 +1,7 @@
 package com.saunak.director.tools
 
 import com.saunak.director.camera.CapabilityRegistry
+import com.saunak.director.camera.DirectorExtension
 
 object ToolIds {
     const val FOCUS = 1
@@ -23,12 +24,17 @@ object ToolIds {
 
 object ToolCatalog {
     fun contract(c: CapabilityRegistry): String = buildList {
-        if (ToolIds.FOCUS in c.allowedToolIds) add("1 focus(x:0..1,y:0..1) recapture")
-        if (ToolIds.ZOOM in c.allowedToolIds) add("2 zoom(v:${fmt(c.minZoom)}..${fmt(c.maxZoom)}) recapture")
-        if (ToolIds.EXPOSURE_EV in c.allowedToolIds) add("3 exposure_ev(v:${fmt(c.minExposureEv)}..${fmt(c.maxExposureEv)}) recapture")
-        if (ToolIds.TORCH in c.allowedToolIds) add("4 torch(v:0|1) recapture")
-        if (ToolIds.FLASH in c.allowedToolIds) add("5 still_flash(s:off|auto|on) recapture")
-        if (ToolIds.EXTENSION in c.allowedToolIds) add("6 extension(s:${c.extensions.joinToString("|") { it.wireName }}) recapture")
+        if (c.activeExtension == DirectorExtension.NONE) {
+            if (ToolIds.FOCUS in c.allowedToolIds) add("1 focus(x:0..1,y:0..1) recapture")
+            if (ToolIds.ZOOM in c.allowedToolIds) add("2 zoom(v:${fmt(c.minZoom)}..${fmt(c.maxZoom)}) recapture")
+            if (ToolIds.EXPOSURE_EV in c.allowedToolIds) add("3 exposure_ev(v:${fmt(c.minExposureEv)}..${fmt(c.maxExposureEv)}) recapture")
+            if (ToolIds.TORCH in c.allowedToolIds) add("4 torch(v:0|1) recapture")
+            if (ToolIds.FLASH in c.allowedToolIds) add("5 still_flash(s:off|auto|on) recapture")
+        }
+        if (ToolIds.EXTENSION in c.allowedToolIds) {
+            val modes = buildList { if (c.activeExtension != DirectorExtension.NONE) add("none"); addAll(c.extensions.map { it.wireName }) }.distinct()
+            if (modes.isNotEmpty()) add("6 extension(s:${modes.joinToString("|")}) recapture; exclusive with focus/zoom/exposure/torch/flash")
+        }
         add("30 natural(v:0..1 optional strength)")
         add("31 warm(v:0..1 optional strength)")
         add("32 cool(v:0..1 optional strength)")

@@ -25,16 +25,10 @@ class DirectorOrchestrator(
     private val onState: (DirectorUiState) -> Unit
 ) {
     private val generation = AtomicLong(0L)
-
     private data class Candidate(val file: File, val look: LookSpec, val score: Double, val valid: Boolean, val accepted: Boolean, val captureNumber: Int)
 
     suspend fun recoverPendingReferences(): List<Uri> = storage.recoverPendingToGallery()
-
-    fun cancelForUserAction(): Long {
-        val next = generation.incrementAndGet()
-        vlm.cancel()
-        return next
-    }
+    fun cancelForUserAction(): Long { val next = generation.incrementAndGet(); vlm.cancel(); return next }
 
     suspend fun onShutterPressed(): Uri? {
         val session = cancelForUserAction()
@@ -45,40 +39,33 @@ class DirectorOrchestrator(
             tools.restoreUserState()
             emit(session, DirectorUiState(DirectorStage.CAPTURING, vlm.isReady(), "Capturing reference…", camera = camera.uiState()))
             if (!storage.hasWorkingSpace()) emit(session, DirectorUiState(DirectorStage.CAPTURING, vlm.isReady(), "Low storage • protecting capture", camera = camera.uiState()))
-
-            val ref = storage.newPendingReference(session)
-            reference = ref
-            camera.capturePrivate(ref)
-            assertCurrent(session)
+            val ref = storage.newPendingReference(session); reference = ref
+            camera.capturePrivate(ref); assertCurrent(session)
 
             val thermalPolicy = thermal.policy()
             if (!vlm.isReady() || !thermalPolicy.allowAi) {
-                val uri = storage.saveRawJpeg(ref)
-                storage.markFinalized(ref); finalized = true
+                val uri = storage.saveRawJpeg(ref); storage.markFinalized(ref); finalized = true
                 emit(session, DirectorUiState(DirectorStage.READY, vlm.isReady(), if (thermalPolicy.allowAi) "Saved • AI unavailable" else "Saved • AI paused for temperature", camera = camera.uiState(), lastSavedUri = uri.toString()))
                 return uri
             }
 
             val referenceBitmap = runCatching { storage.decodeOriented(ref) }.getOrElse {
-                val uri = storage.saveRawJpeg(ref)
-                storage.markFinalized(ref); finalized = true
+                val uri = storage.saveRawJpeg(ref); storage.markFinalized(ref); finalized = true
                 emit(session, DirectorUiState(DirectorStage.READY, true, "Saved reference", camera = camera.uiState(), lastSavedUri = uri.toString()))
                 return uri
             }
             try {
                 val referenceQuality = PhotoQuality.analyze(referenceBitmap)
                 if (referenceQuality.catastrophic) {
-                    val uri = storage.saveRawJpeg(ref)
-                    storage.markFinalized(ref); finalized = true
+                    val uri = storage.saveRawJpeg(ref); storage.markFinalized(ref); finalized = true
                     emit(session, DirectorUiState(DirectorStage.READY, true, "Saved reference", camera = camera.uiState(), lastSavedUri = uri.toString()))
                     return uri
                 }
 
                 emit(session, DirectorUiState(DirectorStage.ANALYZING, true, "Analyzing captured photo…", camera = camera.uiState()))
                 vlm.setMaxImageDimension(thermalPolicy.maxAiDimension)
-                val caps = camera.capabilities()
-                val baseline = camera.snapshot()
-                val plan = vlm.plan(referenceBitmap, caps, baseline, skills.planningContext()).getOrElse {
+                var caps = camera.capabilities()
+                val plan = vlm.plan(referenceBitmap, caps, camera.snapshot(), skills.planningContext()).getOrElse {
                     return fallbackReference(session, ref, "Saved • AI analysis unavailable").also { finalized = it != null }
                 }
                 assertCurrent(session)
@@ -86,11 +73,10 @@ class DirectorOrchestrator(
                 val candidates = mutableListOf(Candidate(ref, LookSpec(), CapturePolicy.combinedFallbackScore(plan.referenceScore, referenceQuality.heuristicScore), true, plan.referenceAccept, 1))
                 val physicalBudget = CapturePolicy.physicalBudget(thermal.policy().maxPhysicalCaptures)
 
-                // If a physical retry is not allowed/desired, never mutate camera state merely to discard it.
                 val initialCalls = if (physicalBudget > 1 && plan.recapture) plan.toolCalls else plan.toolCalls.filter { it.id in ToolIds.LOOK_IDS }
                 emit(session, DirectorUiState(DirectorStage.APPLYING, true, "Preparing improvement…", camera = camera.uiState()))
-                val initialExecution = tools.apply(initialCalls, caps)
-                assertCurrent(session)
+                val initialExecution = tools.apply(initialCalls, caps); assertCurrent(session)
+                caps = camera.capabilities()
                 var look = initialExecution.look
                 var issues = initialExecution.rejected.map { "tool_${it.call.id}:${it.reason}" }.take(8)
                 var physicalCaptures = 1
@@ -119,18 +105,16 @@ class DirectorOrchestrator(
                         val score = CapturePolicy.combinedFallbackScore(eval.score, quality.heuristicScore)
                         val accepted = CapturePolicy.accepted(eval, quality.catastrophic)
                         candidates += Candidate(currentFile, look, score, !quality.catastrophic, accepted, physicalCaptures)
-                        if (accepted) {
-                            val uri = finalizeCandidate(session, candidates.last(), ref, attempts); finalized = uri != null; return uri
-                        }
+                        if (accepted) { val uri = finalizeCandidate(session, candidates.last(), ref, attempts); finalized = uri != null; return uri }
 
                         issues = (eval.issues + issues).distinct().take(8)
                         if (evaluationCount >= CapturePolicy.MAX_EVALUATIONS) break
                         val deltaInput = if (physicalCaptures < physicalBudget) eval.deltaCalls else eval.deltaCalls.filter { it.id in ToolIds.LOOK_IDS }
                         if (deltaInput.isEmpty()) break
                         emit(session, DirectorUiState(DirectorStage.CORRECTING, true, "Refining…", attempt = physicalCaptures, lastScore = eval.score, camera = camera.uiState()))
-                        val delta = tools.apply(deltaInput, caps, look)
-                        assertCurrent(session)
+                        val delta = tools.apply(deltaInput, caps, look); assertCurrent(session)
                         if (delta.applied.isEmpty()) break
+                        caps = camera.capabilities()
                         look = delta.look
                         issues = (delta.rejected.map { "tool_${it.call.id}:${it.reason}" } + issues).distinct().take(8)
                         if (delta.requiresRecapture) {
