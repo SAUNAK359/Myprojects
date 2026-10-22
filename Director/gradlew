@@ -11,24 +11,16 @@ BIN="$CACHE/${DIST}/bin/gradle"
 BASE_URL="https://services.gradle.org/distributions"
 
 log() { printf '[Director Gradle] %s\n' "$*" >&2; }
-
-sha256_of() {
-  if command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "$1" | awk '{print $1}'
-  else
-    sha256sum "$1" | awk '{print $1}'
-  fi
-}
-
-lowercase() {
-  printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
-}
+sha256_of() { if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'; else sha256sum "$1" | awk '{print $1}'; fi; }
+lowercase() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 
 download_file() {
-  local url="$1" dest="$2"
-  local tmp="${dest}.tmp.$$"
+  local url="$1" dest="$2" tmp="${dest}.tmp.$$"
   rm -f "$tmp"
-  curl --fail --location --retry 6 --retry-all-errors --retry-delay 3 --connect-timeout 30 \
+  curl --fail --location \
+    --retry 4 --retry-all-errors --retry-delay 2 \
+    --connect-timeout 20 --max-time 600 \
+    --speed-time 45 --speed-limit 1024 \
     "$url" --output "$tmp"
   [[ -s "$tmp" ]] || { rm -f "$tmp"; return 1; }
   mv "$tmp" "$dest"
@@ -36,66 +28,37 @@ download_file() {
 
 verify_zip() {
   [[ -s "$ZIP" && -s "$SHA_FILE" ]] || return 1
-  local expected actual expected_lc actual_lc
+  local expected actual
   expected="$(tr -d '[:space:]' < "$SHA_FILE")"
   [[ "$expected" =~ ^[0-9a-fA-F]{64}$ ]] || return 1
   actual="$(sha256_of "$ZIP")"
-  expected_lc="$(lowercase "$expected")"
-  actual_lc="$(lowercase "$actual")"
-  [[ "$actual_lc" == "$expected_lc" ]] || return 1
+  [[ "$(lowercase "$actual")" == "$(lowercase "$expected")" ]] || return 1
   unzip -tq "$ZIP" >/dev/null 2>&1
 }
 
 install_gradle() {
   mkdir -p "$CACHE"
-
   if ! verify_zip; then
     log "Gradle archive cache missing/corrupt; redownloading verified Gradle $GRADLE_VERSION"
-    rm -f "$ZIP" "$SHA_FILE"
-    rm -rf "$CACHE/$DIST"
+    rm -f "$ZIP" "$SHA_FILE"; rm -rf "$CACHE/$DIST"
     download_file "$BASE_URL/${DIST}-bin.zip.sha256" "$SHA_FILE"
     download_file "$BASE_URL/${DIST}-bin.zip" "$ZIP"
-    if ! verify_zip; then
-      log "Downloaded Gradle archive failed checksum/ZIP validation"
-      rm -f "$ZIP" "$SHA_FILE"
-      return 1
-    fi
+    verify_zip || { log "Downloaded Gradle archive failed checksum/ZIP validation"; rm -f "$ZIP" "$SHA_FILE"; return 1; }
   fi
 
   rm -rf "$CACHE/$DIST"
   local staging="$CACHE/.extract-${DIST}-$$"
   rm -rf "$staging" && mkdir -p "$staging"
-  if ! unzip -q "$ZIP" -d "$staging"; then
-    log "Gradle extraction failed; invalidating archive cache"
-    rm -rf "$staging" "$CACHE/$DIST"
-    rm -f "$ZIP" "$SHA_FILE"
-    return 1
-  fi
-  [[ -x "$staging/$DIST/bin/gradle" ]] || {
-    log "Gradle distribution extracted without executable launcher"
-    rm -rf "$staging" "$CACHE/$DIST"
-    return 1
-  }
-  mv "$staging/$DIST" "$CACHE/$DIST"
-  rm -rf "$staging"
+  unzip -q "$ZIP" -d "$staging" || { log "Gradle extraction failed; invalidating archive cache"; rm -rf "$staging" "$CACHE/$DIST"; rm -f "$ZIP" "$SHA_FILE"; return 1; }
+  [[ -x "$staging/$DIST/bin/gradle" ]] || { log "Gradle distribution extracted without executable launcher"; rm -rf "$staging" "$CACHE/$DIST"; return 1; }
+  mv "$staging/$DIST" "$CACHE/$DIST"; rm -rf "$staging"
 }
 
 if [[ ! -x "$BIN" ]]; then
-  install_gradle || {
-    log "First Gradle provisioning attempt failed; performing one clean retry"
-    rm -rf "$CACHE"
-    mkdir -p "$CACHE"
-    install_gradle
-  }
+  install_gradle || { log "First Gradle provisioning attempt failed; performing one clean retry"; rm -rf "$CACHE"; mkdir -p "$CACHE"; install_gradle; }
 fi
-
-# Verify cached executable itself before delegating. If a partially restored CI cache
-# contains a broken distribution, repair it once instead of failing deep inside Gradle.
 if ! "$BIN" --version >/dev/null 2>&1; then
   log "Cached Gradle runtime is unusable; rebuilding distribution cache"
-  rm -rf "$CACHE/$DIST"
-  install_gradle
-  "$BIN" --version >/dev/null
+  rm -rf "$CACHE/$DIST"; install_gradle; "$BIN" --version >/dev/null
 fi
-
 exec "$BIN" "$@"

@@ -27,6 +27,11 @@ android {
             cmake {
                 cppFlags += listOf("-std=c++17", "-O3")
                 arguments += listOf("-DANDROID_STL=c++_shared")
+
+                val kleidiaiSource = file("${System.getProperty("user.home")}/.director/kleidiai/v1.24.0")
+                if (kleidiaiSource.resolve("CMakeLists.txt").isFile) {
+                    arguments += "-DFETCHCONTENT_SOURCE_DIR_KLEIDIAI=${kleidiaiSource.absolutePath}"
+                }
             }
         }
     }

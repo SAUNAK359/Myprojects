@@ -10,57 +10,32 @@ MARKER="$DEST/.director-llama-commit"
 cache_ok() {
   [[ -f "$MARKER" && "$(cat "$MARKER" 2>/dev/null || true)" == "$COMMIT" ]] || return 1
   local required
-  for required in \
-    CMakeLists.txt \
-    include/llama.h \
-    common/common.h \
-    common/chat.h \
-    ggml/include/ggml.h \
-    tools/mtmd/mtmd.h \
-    tools/mtmd/mtmd-helper.h; do
+  for required in CMakeLists.txt include/llama.h common/common.h common/chat.h ggml/include/ggml.h tools/mtmd/mtmd.h tools/mtmd/mtmd-helper.h; do
     [[ -s "$DEST/$required" ]] || return 1
   done
-  return 0
 }
 
-if cache_ok; then
-  echo "Using verified cached llama.cpp $COMMIT"
-  exit 0
-fi
-
-if [[ -e "$DEST" ]]; then
-  echo "Discarding stale/incomplete llama.cpp cache"
-  rm -rf "$DEST"
-fi
+if cache_ok; then echo "Using verified cached llama.cpp $COMMIT"; exit 0; fi
+if [[ -e "$DEST" ]]; then echo "Discarding stale/incomplete llama.cpp cache"; rm -rf "$DEST"; fi
 
 archive="$(mktemp -t llama-cpp.XXXXXX.tar.gz)"
 staging="$(mktemp -d -t llama-cpp.XXXXXX)"
 trap 'rm -rf "$archive" "$staging"' EXIT
 
-curl --fail --location --retry 6 --retry-all-errors --retry-delay 3 --connect-timeout 30 \
+curl --fail --location \
+  --retry 4 --retry-all-errors --retry-delay 2 \
+  --connect-timeout 20 --max-time 300 \
+  --speed-time 30 --speed-limit 1024 \
   "https://github.com/ggml-org/llama.cpp/archive/${COMMIT}.tar.gz" -o "$archive"
 
-if command -v shasum >/dev/null 2>&1; then
-  actual="$(shasum -a 256 "$archive" | awk '{print $1}')"
-else
-  actual="$(sha256sum "$archive" | awk '{print $1}')"
-fi
+if command -v shasum >/dev/null 2>&1; then actual="$(shasum -a 256 "$archive" | awk '{print $1}')"; else actual="$(sha256sum "$archive" | awk '{print $1}')"; fi
 [[ "$actual" == "$SHA256" ]] || { echo "llama.cpp checksum mismatch" >&2; exit 1; }
 
 tar -tzf "$archive" >/dev/null
 tar -xzf "$archive" --strip-components=1 -C "$staging"
-
-for required in \
-  CMakeLists.txt \
-  include/llama.h \
-  common/common.h \
-  common/chat.h \
-  ggml/include/ggml.h \
-  tools/mtmd/mtmd.h \
-  tools/mtmd/mtmd-helper.h; do
+for required in CMakeLists.txt include/llama.h common/common.h common/chat.h ggml/include/ggml.h tools/mtmd/mtmd.h tools/mtmd/mtmd-helper.h; do
   [[ -s "$staging/$required" ]] || { echo "llama.cpp archive missing required file: $required" >&2; exit 1; }
 done
-
 mkdir -p "$(dirname "$DEST")"
 mv "$staging" "$DEST"
 printf '%s\n' "$COMMIT" > "$MARKER"
