@@ -23,8 +23,11 @@ set(GGML_LLAMAFILE OFF CACHE BOOL "" FORCE)
 set(MTMD_VIDEO OFF CACHE BOOL "" FORCE)
 
 if(ANDROID_ABI STREQUAL "arm64-v8a")
-    # Portable arm64 build; KleidiAI dispatches optimized kernels at runtime.
-    set(GGML_CPU_KLEIDIAI ON CACHE BOOL "" FORCE)
+    # Keep Director portable across arm64 Android devices. KleidiAI is an optional
+    # performance-only microkernel layer; disabling it does not change the model,
+    # quantization, multimodal pipeline, prompts, sampling, tools, or output contract.
+    # llama.cpp's standard ARM/NEON CPU backend remains enabled.
+    set(GGML_CPU_KLEIDIAI OFF CACHE BOOL "" FORCE)
 else()
     message(FATAL_ERROR "Director AI currently supports arm64-v8a only")
 endif()
