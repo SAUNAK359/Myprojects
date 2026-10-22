@@ -15,7 +15,9 @@ sha256_of() { if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | aw
 lowercase() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 
 download_file() {
-  local url="$1" dest="$2" tmp="${dest}.tmp.$$"
+  local url="$1"
+  local dest="$2"
+  local tmp="${dest}.tmp.$$"
   rm -f "$tmp"
   curl --fail --location \
     --retry 4 --retry-all-errors --retry-delay 2 \
