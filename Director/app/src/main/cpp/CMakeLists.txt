@@ -60,4 +60,9 @@ target_include_directories(director-vlm PRIVATE
     "${LLAMA_SRC}/tools/mtmd"
 )
 
+# The NDK already emits function/data sections. Drop only sections that are not
+# reachable from Director's JNI exports. This keeps every reachable llama.cpp,
+# MTMD and Qwen3-VL code path byte-for-byte compiled with the same -O3 settings.
+target_link_options(director-vlm PRIVATE "-Wl,--gc-sections")
+
 target_link_libraries(director-vlm PRIVATE llama mtmd android log)
