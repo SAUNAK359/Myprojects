@@ -8,8 +8,6 @@
 #include <string>
 #include <vector>
 
-#include "chat.h"
-#include "common.h"
 #include "ggml-backend.h"
 #include "llama.h"
 #include "mtmd-helper.h"
@@ -22,10 +20,8 @@ struct Runtime {
     llama_model * model = nullptr;
     llama_context * context = nullptr;
     mtmd_context * vision = nullptr;
-    common_chat_templates_ptr templates;
     int batch = 512;
     ~Runtime() {
-        templates.reset();
         if (vision) mtmd_free(vision);
         if (context) llama_free(context);
         if (model) llama_model_free(model);
@@ -112,6 +108,31 @@ std::string token_piece(const llama_vocab * vocab, llama_token token) {
     if (n < 0) throw std::runtime_error("Failed to decode generated token");
     return std::string(buf.data(), static_cast<size_t>(n));
 }
+
+std::string format_user_prompt(const llama_model * model, const std::string & content) {
+    const char * tmpl = llama_model_chat_template(model, nullptr);
+    if (!tmpl || !*tmpl) throw std::runtime_error("Model chat template unavailable");
+
+    llama_chat_message message{"user", content.c_str()};
+    std::vector<char> buffer(content.size() * 2 + 1024);
+    int32_t n = llama_chat_apply_template(tmpl, &message, 1, true, buffer.data(), static_cast<int32_t>(buffer.size()));
+    if (n < 0) throw std::runtime_error("Failed to apply model chat template");
+    if (static_cast<size_t>(n) >= buffer.size()) {
+        buffer.resize(static_cast<size_t>(n) + 1);
+        n = llama_chat_apply_template(tmpl, &message, 1, true, buffer.data(), static_cast<int32_t>(buffer.size()));
+        if (n < 0 || static_cast<size_t>(n) >= buffer.size()) throw std::runtime_error("Failed to resize model chat template buffer");
+    }
+    return std::string(buffer.data(), static_cast<size_t>(n));
+}
+
+void fill_single_token_batch(llama_batch & batch, llama_token token, llama_pos pos) {
+    batch.n_tokens = 1;
+    batch.token[0] = token;
+    batch.pos[0] = pos;
+    batch.n_seq_id[0] = 1;
+    batch.seq_id[0][0] = 0;
+    batch.logits[0] = 1;
+}
 }
 
 extern "C" JNIEXPORT jlong JNICALL
@@ -127,6 +148,7 @@ Java_com_saunak_director_ai_NativeVlmBridge_loadModel(JNIEnv * env, jobject, jst
         mp.n_gpu_layers = 0;
         next->model = llama_model_load_from_file(model_path.c_str(), mp);
         if (!next->model) throw std::runtime_error("Failed to load Qwen GGUF model");
+        if (!llama_model_chat_template(next->model, nullptr)) throw std::runtime_error("Model chat template unavailable");
 
         llama_context_params cp = llama_context_default_params();
         cp.n_ctx = static_cast<uint32_t>(context_size);
@@ -145,8 +167,6 @@ Java_com_saunak_director_ai_NativeVlmBridge_loadModel(JNIEnv * env, jobject, jst
         next->vision = mtmd_init_from_file(projector_path.c_str(), next->model, vp);
         if (!next->vision || !mtmd_support_vision(next->vision)) throw std::runtime_error("Failed to load compatible multimodal projector");
 
-        next->templates = common_chat_templates_init(next->model, "");
-        if (!next->templates) throw std::runtime_error("Model chat template unavailable");
         runtime = std::move(next);
         cancelled.store(false, std::memory_order_relaxed);
         return 1;
@@ -176,11 +196,7 @@ Java_com_saunak_director_ai_NativeVlmBridge_generate(JNIEnv * env, jobject, jint
         if (!image.ptr) throw std::runtime_error("Failed to create multimodal image input");
 
         const std::string marker = mtmd_default_marker();
-        common_chat_msg message;
-        message.role = "user";
-        message.content = marker + "\n" + prompt;
-        const std::vector<common_chat_msg> empty_history;
-        const std::string formatted = common_chat_format_single(runtime->templates.get(), empty_history, message, true, true);
+        const std::string formatted = format_user_prompt(runtime->model, marker + "\n" + prompt);
         const size_t pos = formatted.find(marker);
         if (pos == std::string::npos) throw std::runtime_error("Chat template removed image marker");
         const std::string before = formatted.substr(0, pos);
@@ -198,7 +214,6 @@ Java_com_saunak_director_ai_NativeVlmBridge_generate(JNIEnv * env, jobject, jint
         check_cancelled();
 
         llama_pos next_pos = 0;
-        check_cancelled();
         if (mtmd_helper_eval_chunks(runtime->vision, runtime->context, chunks.get(), 0, 0, runtime->batch, true, &next_pos) != 0) throw std::runtime_error("Vision/prompt evaluation failed");
         check_cancelled();
 
@@ -225,8 +240,7 @@ Java_com_saunak_director_ai_NativeVlmBridge_generate(JNIEnv * env, jobject, jint
             if (llama_vocab_is_eog(vocab, token)) break;
             output += token_piece(vocab, token);
             generated++;
-            common_batch_clear(batch.value);
-            common_batch_add(batch.value, token, next_pos++, {0}, true);
+            fill_single_token_batch(batch.value, token, next_pos++);
             check_cancelled();
             if (llama_decode(runtime->context, batch.value) != 0) throw std::runtime_error("Decoder step failed");
         }
