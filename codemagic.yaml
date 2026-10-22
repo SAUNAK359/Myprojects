@@ -47,6 +47,7 @@ workflows:
           test -s third_party/llama.cpp/CMakeLists.txt
           test -s third_party/llama.cpp/include/llama.h
           test -s third_party/llama.cpp/tools/mtmd/mtmd.h
+          test -s third_party/llama.cpp/.director-qwen3vl-pruned-v2
 
       - name: Compile debug APK
         script: |
@@ -64,7 +65,27 @@ workflows:
           fi
           APK="$(find app/build/outputs/apk/debug -name '*.apk' -type f -print -quit)"
           test -n "$APK" && test -s "$APK"
-          echo "APK ready: $APK"
+
+          SDK_ROOT="$(cat "$CM_BUILD_DIR/.director-android-sdk-root")"
+          BUILD_TOOLS="$SDK_ROOT/build-tools/36.0.0"
+          test -x "$BUILD_TOOLS/zipalign"
+          test -f "$BUILD_TOOLS/apksigner"
+          test -x "$BUILD_TOOLS/aapt2"
+
+          echo "========== DIRECTOR APK VALIDATION =========="
+          "$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$APK"
+          "$BUILD_TOOLS/zipalign" -c -P 16 -v 4 "$APK"
+          "$BUILD_TOOLS/aapt2" dump badging "$APK" | head -n 12
+          unzip -l "$APK" | grep -qE '(^|[[:space:]])classes\.dex$'
+          unzip -l "$APK" | grep -qE 'lib/arm64-v8a/libdirector-vlm\.so$'
+          unzip -l "$APK" | grep -qE 'lib/arm64-v8a/libc\+\+_shared\.so$'
+          if unzip -l "$APK" | grep -qE 'lib/(armeabi-v7a|x86|x86_64)/'; then
+            echo "Unexpected non-arm64 native ABI packaged in Director debug APK" >&2
+            exit 12
+          fi
+          du -h "$APK"
+          echo "============================================="
+          echo "APK ready and structurally verified: $APK"
 
       - name: Unit tests
         script: |
@@ -96,7 +117,7 @@ workflows:
             echo "==========================================="
           fi
           if [ "$STATUS" -ne 0 ]; then
-            echo "DEBUG APK remains publishable for device validation; Release V8 remains strict."
+            echo "DEBUG APK remains available for device validation; Release V8 remains strict."
             grep -nE '^\* What went wrong:|^e: |error:|Caused by:|Execution failed for task|Fatal:|Director timeout|Hard timeout' "$LOG" | head -n 300 || true
           fi
           exit 0
@@ -145,6 +166,7 @@ workflows:
           test -s third_party/llama.cpp/CMakeLists.txt
           test -s third_party/llama.cpp/include/llama.h
           test -s third_party/llama.cpp/tools/mtmd/mtmd.h
+          test -s third_party/llama.cpp/.director-qwen3vl-pruned-v2
 
       - name: Build and verify release
         script: |
@@ -169,6 +191,19 @@ workflows:
           AAB="$(find app/build/outputs/bundle/release -name '*.aab' -type f -print -quit)"
           test -n "$APK" && test -s "$APK"
           test -n "$AAB" && test -s "$AAB"
+
+          SDK_ROOT="$(cat "$CM_BUILD_DIR/.director-android-sdk-root")"
+          BUILD_TOOLS="$SDK_ROOT/build-tools/36.0.0"
+          "$BUILD_TOOLS/zipalign" -c -P 16 -v 4 "$APK"
+          unzip -l "$APK" | grep -qE '(^|[[:space:]])classes\.dex$'
+          unzip -l "$APK" | grep -qE 'lib/arm64-v8a/libdirector-vlm\.so$'
+          unzip -l "$APK" | grep -qE 'lib/arm64-v8a/libc\+\+_shared\.so$'
+          "$BUILD_TOOLS/aapt2" dump badging "$APK" | head -n 12
+          if [ -n "${CM_KEYSTORE_PATH:-}" ]; then
+            "$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$APK"
+          else
+            echo "Release APK is unsigned because no Codemagic keystore was supplied; release install validation requires signing."
+          fi
           echo "Release APK: $APK"
           echo "Release AAB: $AAB"
 
