@@ -7,6 +7,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEST="$ROOT/third_party/llama.cpp"
 MARKER="$DEST/.director-llama-commit"
 PRUNER="$ROOT/scripts/prune_llama_for_director.py"
+PRUNE_MARKER="$DEST/.director-qwen3vl-pruned-v2"
 
 cache_ok() {
   [[ -f "$MARKER" && "$(cat "$MARKER" 2>/dev/null || true)" == "$COMMIT" ]] || return 1
@@ -18,12 +19,12 @@ cache_ok() {
 
 activate_director_profile() {
   python3 "$PRUNER" "$DEST"
-  [[ -s "$DEST/.director-qwen3vl-pruned-v1" ]] || { echo "Director llama.cpp pruning marker missing" >&2; return 1; }
+  [[ -s "$PRUNE_MARKER" ]] || { echo "Director llama.cpp pruning v2 marker missing" >&2; return 1; }
 }
 
 if cache_ok; then
   activate_director_profile
-  echo "Using verified cached llama.cpp $COMMIT (Director Qwen3-VL profile)"
+  echo "Using verified cached llama.cpp $COMMIT (Director Qwen3-VL profile v2)"
   exit 0
 fi
 if [[ -e "$DEST" ]]; then echo "Discarding stale/incomplete llama.cpp cache"; rm -rf "$DEST"; fi
@@ -51,4 +52,4 @@ mv "$staging" "$DEST"
 printf '%s\n' "$COMMIT" > "$MARKER"
 activate_director_profile
 cache_ok || { echo "Activated llama.cpp cache failed integrity verification" >&2; rm -rf "$DEST"; exit 1; }
-echo "Pinned llama.cpp $COMMIT ready with Director Qwen3-VL build profile"
+echo "Pinned llama.cpp $COMMIT ready with Director Qwen3-VL build profile v2"
