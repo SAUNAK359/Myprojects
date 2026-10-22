@@ -13,7 +13,6 @@ workflows:
         - $HOME/.gradle/director-wrapper
         - $CM_BUILD_DIR/Director/third_party/llama.cpp
         - $CM_BUILD_DIR/Director/app/.cxx
-        - $HOME/.director/kleidiai
     scripts:
       - name: Build identity
         script: |
@@ -45,11 +44,9 @@ workflows:
           set -euo pipefail
           cd "$CM_BUILD_DIR/Director"
           ./scripts/fetch_llama_cpp.sh
-          ./scripts/fetch_kleidiai.sh
           test -s third_party/llama.cpp/CMakeLists.txt
           test -s third_party/llama.cpp/include/llama.h
           test -s third_party/llama.cpp/tools/mtmd/mtmd.h
-          test -s "$HOME/.director/kleidiai/v1.24.0/CMakeLists.txt"
 
       - name: Compile debug APK
         script: |
@@ -126,7 +123,6 @@ workflows:
         - $HOME/.gradle/director-wrapper
         - $CM_BUILD_DIR/Director/third_party/llama.cpp
         - $CM_BUILD_DIR/Director/app/.cxx
-        - $HOME/.director/kleidiai
     scripts:
       - name: Build identity
         script: |
@@ -146,11 +142,9 @@ workflows:
           ./scripts/ci_preflight.sh
           mkdir -p "$CM_BUILD_DIR/director-build-logs"
           ./scripts/fetch_llama_cpp.sh
-          ./scripts/fetch_kleidiai.sh
           test -s third_party/llama.cpp/CMakeLists.txt
           test -s third_party/llama.cpp/include/llama.h
           test -s third_party/llama.cpp/tools/mtmd/mtmd.h
-          test -s "$HOME/.director/kleidiai/v1.24.0/CMakeLists.txt"
 
       - name: Build and verify release
         script: |
