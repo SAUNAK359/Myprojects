@@ -6,6 +6,18 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+# Codemagic builds the Android debug variant with CMAKE_BUILD_TYPE=Debug. The
+# default Debug flags add large DWARF sections to the statically-linked
+# llama.cpp/MTMD library, after which AGP spends a long time stripping them.
+# Director's CI debug APK does not need native source-level debugging, so remove
+# debug metadata only. This does not change generated code, optimization level,
+# model behavior, sampling, camera behavior, or image quality.
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set(CMAKE_C_FLAGS_DEBUG "-g0" CACHE STRING "" FORCE)
+    set(CMAKE_CXX_FLAGS_DEBUG "-g0" CACHE STRING "" FORCE)
+    set(CMAKE_ASM_FLAGS_DEBUG "-g0" CACHE STRING "" FORCE)
+endif()
+
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_COMMON OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_MTMD ON CACHE BOOL "" FORCE)
