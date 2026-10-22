@@ -12,7 +12,8 @@ workflows:
         - $HOME/.gradle/caches
         - $HOME/.gradle/director-wrapper
         - $CM_BUILD_DIR/Director/third_party/llama.cpp
-        - $HOME/.director/android-sdk
+        - $CM_BUILD_DIR/Director/app/.cxx
+        - $HOME/.director/kleidiai
     scripts:
       - name: Build identity
         script: |
@@ -44,21 +45,23 @@ workflows:
           set -euo pipefail
           cd "$CM_BUILD_DIR/Director"
           ./scripts/fetch_llama_cpp.sh
+          ./scripts/fetch_kleidiai.sh
           test -s third_party/llama.cpp/CMakeLists.txt
           test -s third_party/llama.cpp/include/llama.h
           test -s third_party/llama.cpp/tools/mtmd/mtmd.h
+          test -s "$HOME/.director/kleidiai/v1.24.0/CMakeLists.txt"
 
       - name: Compile debug APK
         script: |
           set +e
           cd "$CM_BUILD_DIR/Director"
           LOG="$CM_BUILD_DIR/director-build-logs/assemble-debug.log"
-          ./scripts/run_gradle_ci.sh "$LOG" assembleDebug
+          DIRECTOR_GRADLE_TIMEOUT_SEC=4500 ./scripts/run_gradle_ci.sh "$LOG" assembleDebug
           STATUS=$?
           set -e
           if [ "$STATUS" -ne 0 ]; then
             echo "========== DIRECTOR ROOT CAUSE =========="
-            grep -nE '^\* What went wrong:|^e: |^w: |C/C\+\+:|(^|[[:space:]])error:|fatal error:|Caused by:|Could not resolve|Execution failed for task|A problem occurred|FAILED' "$LOG" | head -n 300 || true
+            grep -nE '^\* What went wrong:|^e: |^w: |C/C\+\+:|(^|[[:space:]])error:|fatal error:|Caused by:|Could not resolve|Execution failed for task|A problem occurred|FAILED|Director timeout|Hard timeout' "$LOG" | head -n 300 || true
             echo "========================================="
             exit "$STATUS"
           fi
@@ -71,12 +74,12 @@ workflows:
           set +e
           cd "$CM_BUILD_DIR/Director"
           LOG="$CM_BUILD_DIR/director-build-logs/unit-tests.log"
-          ./scripts/run_gradle_ci.sh "$LOG" testDebugUnitTest
+          DIRECTOR_GRADLE_TIMEOUT_SEC=900 ./scripts/run_gradle_ci.sh "$LOG" testDebugUnitTest
           STATUS=$?
           set -e
           if [ "$STATUS" -ne 0 ]; then
             echo "========== TEST ROOT CAUSE =========="
-            grep -nE '^\* What went wrong:|^e: |error:|Caused by:|Execution failed for task|FAILED|AssertionError' "$LOG" | head -n 300 || true
+            grep -nE '^\* What went wrong:|^e: |error:|Caused by:|Execution failed for task|FAILED|AssertionError|Director timeout|Hard timeout' "$LOG" | head -n 300 || true
             echo "====================================="
             exit "$STATUS"
           fi
@@ -86,7 +89,7 @@ workflows:
           set +e
           cd "$CM_BUILD_DIR/Director"
           LOG="$CM_BUILD_DIR/director-build-logs/lint-debug.log"
-          ./scripts/run_gradle_ci.sh "$LOG" lintDebug
+          DIRECTOR_GRADLE_TIMEOUT_SEC=900 ./scripts/run_gradle_ci.sh "$LOG" lintDebug
           STATUS=$?
           set -e
           TXT="app/build/reports/lint-results-debug.txt"
@@ -97,7 +100,7 @@ workflows:
           fi
           if [ "$STATUS" -ne 0 ]; then
             echo "DEBUG APK remains publishable for device validation; Release V8 remains strict."
-            grep -nE '^\* What went wrong:|^e: |error:|Caused by:|Execution failed for task|Fatal:' "$LOG" | head -n 300 || true
+            grep -nE '^\* What went wrong:|^e: |error:|Caused by:|Execution failed for task|Fatal:|Director timeout|Hard timeout' "$LOG" | head -n 300 || true
           fi
           exit 0
 
@@ -122,7 +125,8 @@ workflows:
         - $HOME/.gradle/caches
         - $HOME/.gradle/director-wrapper
         - $CM_BUILD_DIR/Director/third_party/llama.cpp
-        - $HOME/.director/android-sdk
+        - $CM_BUILD_DIR/Director/app/.cxx
+        - $HOME/.director/kleidiai
     scripts:
       - name: Build identity
         script: |
@@ -142,16 +146,18 @@ workflows:
           ./scripts/ci_preflight.sh
           mkdir -p "$CM_BUILD_DIR/director-build-logs"
           ./scripts/fetch_llama_cpp.sh
+          ./scripts/fetch_kleidiai.sh
           test -s third_party/llama.cpp/CMakeLists.txt
           test -s third_party/llama.cpp/include/llama.h
           test -s third_party/llama.cpp/tools/mtmd/mtmd.h
+          test -s "$HOME/.director/kleidiai/v1.24.0/CMakeLists.txt"
 
       - name: Build and verify release
         script: |
           set +e
           cd "$CM_BUILD_DIR/Director"
           LOG="$CM_BUILD_DIR/director-build-logs/release.log"
-          ./scripts/run_gradle_ci.sh "$LOG" \
+          DIRECTOR_GRADLE_TIMEOUT_SEC=5100 ./scripts/run_gradle_ci.sh "$LOG" \
             assembleRelease bundleRelease testReleaseUnitTest lintRelease \
             -PversionCode=$BUILD_NUMBER \
             -PversionName=1.0.$BUILD_NUMBER
@@ -161,7 +167,7 @@ workflows:
             TXT="app/build/reports/lint-results-release.txt"
             if [ -f "$TXT" ]; then cat "$TXT"; fi
             echo "========== RELEASE ROOT CAUSE =========="
-            grep -nE '^\* What went wrong:|^e: |C/C\+\+:|error:|fatal error:|Caused by:|Could not resolve|Execution failed for task|A problem occurred|Fatal:|FAILED' "$LOG" | head -n 360 || true
+            grep -nE '^\* What went wrong:|^e: |C/C\+\+:|error:|fatal error:|Caused by:|Could not resolve|Execution failed for task|A problem occurred|Fatal:|FAILED|Director timeout|Hard timeout' "$LOG" | head -n 360 || true
             echo "========================================"
             exit "$STATUS"
           fi
