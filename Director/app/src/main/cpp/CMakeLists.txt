@@ -35,7 +35,7 @@ set(LLAMA_SRC "${CMAKE_CURRENT_LIST_DIR}/../../../../third_party/llama.cpp")
 if(NOT EXISTS "${LLAMA_SRC}/CMakeLists.txt")
     message(FATAL_ERROR "llama.cpp is missing. Run scripts/fetch_llama_cpp.sh first.")
 endif()
-if(NOT EXISTS "${LLAMA_SRC}/.director-qwen3vl-pruned-v1")
+if(NOT EXISTS "${LLAMA_SRC}/.director-qwen3vl-pruned-v2")
     message(FATAL_ERROR "llama.cpp is not prepared for Director. Run scripts/fetch_llama_cpp.sh first.")
 endif()
 
