@@ -25,6 +25,7 @@ def profile_ok() -> bool:
         and "models/qwen3vl.cpp" in cmake
         and "models/gemma4v.cpp" not in cmake
         and "models/qwen3tts-gen.cpp" not in cmake
+        and "mtmd-helper-gen.cpp" not in cmake
         and "list_c2w_state_slots(hparams, model)" not in clip
         and "list_pockettts_state_slots(hparams, model)" not in clip
     )
@@ -41,6 +42,9 @@ end = cmake.find(end_token, start)
 if start < 0 or end < 0:
     raise SystemExit("Pinned mtmd CMake layout changed; refusing unsafe pruning")
 
+# Director consumes only still-image Qwen3-VL inference. Keep the generic MTMD
+# image/runtime core plus Qwen2/2.5-VL (Qwen3-VL inherits its temporal input
+# helper) and Qwen3-VL. Audio generation helpers are not reachable from Director.
 lean_mtmd = '''add_library(mtmd
             mtmd.cpp
             mtmd-audio.cpp
@@ -48,7 +52,6 @@ lean_mtmd = '''add_library(mtmd
             mtmd.h
             mtmd-internal.h
             mtmd-helper.cpp
-            mtmd-helper-gen.cpp
             mtmd-helper-common.h
             mtmd-helper.h
             clip.cpp
@@ -133,12 +136,20 @@ clip = clip[:audio_pos] + lean_audio + clip[audio_end:]
 clip_path.write_text(clip, encoding="utf-8")
 
 verification = cmake_path.read_text(encoding="utf-8")
-for required in ("models/qwen2vl.cpp", "models/qwen3vl.cpp"):
+for required in ("models/qwen2vl.cpp", "models/qwen3vl.cpp", "mtmd-helper.cpp"):
     if required not in verification:
         raise SystemExit(f"Director mtmd pruning lost required source: {required}")
-for forbidden in ("models/gemma4v.cpp", "models/llava.cpp", "models/deepseekocr.cpp", "models/whisper-enc.cpp", "models/qwen3tts-gen.cpp", "models/pockettts-gen.cpp"):
+for forbidden in (
+    "models/gemma4v.cpp",
+    "models/llava.cpp",
+    "models/deepseekocr.cpp",
+    "models/whisper-enc.cpp",
+    "models/qwen3tts-gen.cpp",
+    "models/pockettts-gen.cpp",
+    "mtmd-helper-gen.cpp",
+):
     if forbidden in verification:
-        raise SystemExit(f"Director mtmd pruning left forbidden model source: {forbidden}")
+        raise SystemExit(f"Director mtmd pruning left forbidden/unreachable source: {forbidden}")
 
 clip_verification = clip_path.read_text(encoding="utf-8")
 for forbidden_ref in ("list_c2w_state_slots(hparams, model)", "list_pockettts_state_slots(hparams, model)"):
@@ -148,4 +159,4 @@ for forbidden_ref in ("list_c2w_state_slots(hparams, model)", "list_pockettts_st
 if not profile_ok():
     raise SystemExit("Director Qwen3-VL pruning verification failed")
 marker.write_text("qwen3vl-only-v2\n", encoding="utf-8")
-print("Pruned llama.cpp mtmd to Qwen2/2.5-VL base + Qwen3-VL (v2, audio hooks removed)")
+print("Pruned llama.cpp mtmd to the Director Qwen3-VL still-image profile")
