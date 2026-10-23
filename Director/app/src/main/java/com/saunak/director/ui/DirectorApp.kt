@@ -109,7 +109,7 @@ private fun PermissionScreen(request: () -> Unit) {
             ) { Text("D", color = DirectorYellow, fontSize = 34.sp, fontWeight = FontWeight.Light) }
             Text("Director", color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.SemiBold)
             Text(
-                "Give Director camera access. Your Gemini key stays encrypted on this device and final photos save directly to Gallery.",
+                "Give Director camera access. Your NVIDIA API key stays encrypted on this device and final photos save directly to Gallery.",
                 color = Muted,
                 textAlign = TextAlign.Center,
                 lineHeight = 21.sp
@@ -228,7 +228,7 @@ private fun TopChrome(ui: com.saunak.director.director.DirectorUiState, onSettin
                 Text("DIRECTOR", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold, letterSpacing = 3.sp)
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     Box(Modifier.size(6.dp).background(if (ui.hasApiKey) ReadyGreen else Color(0xFFFF8A80), CircleShape))
-                    Text(if (ui.hasApiKey) "Gemini connected" else "Gemini key required", color = Color.White.copy(alpha = .72f), fontSize = 10.sp)
+                    Text(if (ui.hasApiKey) "Nemotron configured" else "NVIDIA key required", color = Color.White.copy(alpha = .72f), fontSize = 10.sp)
                 }
             }
             GlassButton("⚙", onSettings)
@@ -382,8 +382,8 @@ private fun SettingsSheet(hasKey: Boolean, recipeCount: Int, save: (String) -> S
                 Surface(color = Color.White.copy(alpha = .06f), shape = RoundedCornerShape(18.dp)) {
                     Row(Modifier.fillMaxWidth().padding(15.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
                         Column {
-                            Text("Gemini", color = Color.White, fontWeight = FontWeight.Medium)
-                            Text(if (hasKey) "API key encrypted with Android Keystore" else "Add your Gemini API key", color = Muted, fontSize = 11.sp)
+                            Text("NVIDIA Nemotron", color = Color.White, fontWeight = FontWeight.Medium)
+                            Text(if (hasKey) "API key encrypted with Android Keystore" else "Add your NVIDIA API key", color = Muted, fontSize = 11.sp)
                         }
                         Box(Modifier.size(9.dp).background(if (hasKey) ReadyGreen else Color(0xFFFF8A80), CircleShape))
                     }
@@ -392,8 +392,8 @@ private fun SettingsSheet(hasKey: Boolean, recipeCount: Int, save: (String) -> S
                 OutlinedTextField(
                     value = value,
                     onValueChange = { value = it; error = null },
-                    label = { Text(if (hasKey) "Replace Gemini API key" else "Gemini API key") },
-                    placeholder = { Text("AIza…") },
+                    label = { Text(if (hasKey) "Replace NVIDIA API key" else "NVIDIA API key") },
+                    placeholder = { Text("nvapi-…") },
                     visualTransformation = PasswordVisualTransformation(),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                     singleLine = true,
@@ -405,17 +405,17 @@ private fun SettingsSheet(hasKey: Boolean, recipeCount: Int, save: (String) -> S
                     enabled = value.isNotBlank(),
                     modifier = Modifier.fillMaxWidth(),
                     colors = ButtonDefaults.buttonColors(containerColor = DirectorYellow, contentColor = Color.Black)
-                ) { Text(if (hasKey) "Update Gemini key" else "Connect Gemini", fontWeight = FontWeight.Bold) }
+                ) { Text(if (hasKey) "Update NVIDIA key" else "Connect NVIDIA", fontWeight = FontWeight.Bold) }
                 if (hasKey) TextButton(onClick = clear, modifier = Modifier.fillMaxWidth()) { Text("Remove key", color = Color(0xFFFFA6A0)) }
 
                 HorizontalDivider(color = Color.White.copy(alpha = .08f))
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     InfoMetric("Recipe memory", recipeCount.toString())
-                    InfoMetric("AI model", "3.8 Flash")
+                    InfoMetric("AI model", "Nemotron 3.5 VL")
                     InfoMetric("Retries", "≤ 3")
                 }
                 Text(
-                    "Director sends the selected analysis/intermediate frames and current camera configuration to Gemini only when you press the white shutter. Your stock camera app and firmware are never modified.",
+                    "Director sends selected analysis/intermediate frames and current camera configuration to NVIDIA NIM only when you press the white shutter. Your stock camera app and firmware are never modified.",
                     color = Muted,
                     fontSize = 10.sp,
                     lineHeight = 15.sp
