@@ -3,9 +3,11 @@ package com.saunak.director.storage
 import android.content.Context
 import com.saunak.director.director.PlanOutput
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.File
+import java.util.Locale
 
 @Serializable
 data class SavedRecipe(
@@ -24,7 +26,11 @@ class RecipeMemory(context: Context) {
     @Synchronized
     fun remember(plan: PlanOutput, score: Double) {
         val current = load().toMutableList()
-        current.removeAll { it.skillBranch == plan.skillBranch && it.scene.equals(plan.scene, true) && it.objective.equals(plan.objective, true) }
+        current.removeAll {
+            it.skillBranch == plan.skillBranch &&
+                it.scene.equals(plan.scene, true) &&
+                it.objective.equals(plan.objective, true)
+        }
         current.add(0, SavedRecipe(plan.scene, plan.objective, plan.skillBranch, score.coerceIn(0.0, 1.0), plan))
         save(current.sortedByDescending { it.score }.take(MAX_RECIPES))
     }
@@ -35,7 +41,9 @@ class RecipeMemory(context: Context) {
         return buildString {
             appendLine("Previously successful Director recipes. Reuse only when relevant and adapt to the current scene:")
             items.forEachIndexed { index, recipe ->
-                appendLine("${index + 1}. branch=${recipe.skillBranch}; scene=${recipe.scene}; score=${"%.3f".format(recipe.score)}; objective=${recipe.objective}; calls=${recipe.plan.toolCalls}")
+                appendLine(
+                    "${index + 1}. branch=${recipe.skillBranch}; scene=${recipe.scene}; score=${String.format(Locale.US, "%.3f", recipe.score)}; objective=${recipe.objective}; calls=${recipe.plan.toolCalls}"
+                )
             }
         }
     }
