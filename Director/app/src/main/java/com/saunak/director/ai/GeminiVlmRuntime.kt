@@ -36,11 +36,16 @@ class GeminiVlmRuntime(
     private val recipeMemory: RecipeMemory = RecipeMemory(context)
 ) : VlmRuntime {
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
+
+    /*
+     * Image reasoning can take longer than a simple text completion, especially on the free tier.
+     * The original 6 s total timeout caused valid requests to be cancelled before Gemini answered.
+     */
     private val client = OkHttpClient.Builder()
-        .connectTimeout(2, TimeUnit.SECONDS)
-        .readTimeout(5, TimeUnit.SECONDS)
-        .writeTimeout(4, TimeUnit.SECONDS)
-        .callTimeout(6, TimeUnit.SECONDS)
+        .connectTimeout(5, TimeUnit.SECONDS)
+        .readTimeout(18, TimeUnit.SECONDS)
+        .writeTimeout(10, TimeUnit.SECONDS)
+        .callTimeout(20, TimeUnit.SECONDS)
         .build()
 
     @Volatile private var activeCall: Call? = null
@@ -75,7 +80,8 @@ class GeminiVlmRuntime(
             {"scene":"short scene description","objective":"professional target look","branch":"general|portrait|landscape|low_light|motion|group|food|architecture|macro|selfie","reference_score":0.0,"reference_accept":false,"calls":[{"id":1,"v":null,"x":0.5,"y":0.5,"s":null}],"recapture":true}
             calls max 8. IDs and parameter ranges MUST come from config.md. If the current image is already excellent, use minimal or no calls.
         """.trimIndent()
-        VlmContractValidator.plan(json.decodeFromString(generate(prompt, image)))
+        val raw = generate(prompt, image)
+        VlmContractValidator.plan(json.decodeFromString(raw))
     }
 
     override suspend fun evaluate(
@@ -89,7 +95,7 @@ class GeminiVlmRuntime(
     ): Result<EvaluationOutput> = preservingCancellation {
         val config = deviceSkill.readOrGenerate(capabilities, camera)
         val prompt = """
-            You are now Director's strict photography critic. Compare this intermediate result with the target objective. Judge technical quality, subject rendering, composition, lighting, color, mood and aesthetic quality. Approve when the photograph is genuinely professional and no material camera correction is needed. Otherwise return only small corrective deltas that are legal under config.md. This is attempt $attempt of maximum 3.
+            You are now Director's strict photography critic. Compare this intermediate result with the target objective. Judge technical quality, subject rendering, composition, lighting, color, mood and aesthetic quality. Approve when the photograph is genuinely professional and no material camera correction is needed. Otherwise return corrected absolute target values that are legal under config.md. This is attempt $attempt of maximum 3.
 
             TARGET: $objective
             PREVIOUS ISSUES: ${previousIssues.joinToString()}
@@ -103,7 +109,38 @@ class GeminiVlmRuntime(
             {"score":0.0,"technical":0.0,"composition":0.0,"subject":0.0,"aesthetic":0.0,"accept":false,"issues":["short issue"],"delta":[{"id":3,"v":0.17,"x":null,"y":null,"s":null}]}
             Scores must be 0..1, issues max 8, delta max 8. If approved, set accept=true and delta=[].
         """.trimIndent()
-        VlmContractValidator.evaluation(json.decodeFromString(generate(prompt, image)))
+        val raw = generate(prompt, image)
+        VlmContractValidator.evaluation(json.decodeFromString(raw))
+    }
+
+    /**
+     * Lightweight connectivity check used after saving a key. It does not upload a camera frame.
+     * This distinguishes an invalid/restricted key from an image-analysis failure.
+     */
+    suspend fun validateConnection(): Result<Unit> = preservingCancellation {
+        val key = keyStore.read() ?: error("Gemini API key is not configured")
+        val parts = JSONArray().put(JSONObject().put("text", "Reply with exactly OK"))
+        val content = JSONObject().put("role", "user").put("parts", parts)
+        val config = baseGenerationConfig(maxTokens = 64, jsonOutput = false)
+        val root = JSONObject()
+            .put("contents", JSONArray().put(content))
+            .put("generationConfig", config)
+
+        val request = buildRequest(key, root)
+        val call = client.newCall(request)
+        activeCall = call
+        try {
+            await(call).use { response ->
+                val body = response.body?.string().orEmpty()
+                if (!response.isSuccessful) throw GeminiApiException.from(response.code, body)
+                val parsed = JSONObject(body)
+                val candidates = parsed.optJSONArray("candidates")
+                    ?: error("Gemini connection test returned no candidate")
+                if (candidates.length() == 0) error("Gemini connection test returned no candidate")
+            }
+        } finally {
+            if (activeCall === call) activeCall = null
+        }
     }
 
     private suspend fun <T> preservingCancellation(block: suspend () -> T): Result<T> = try {
@@ -130,57 +167,85 @@ class GeminiVlmRuntime(
             .put("role", "user")
             .put("parts", parts)
 
-        val generationConfig = JSONObject()
-            .put("temperature", 0.25)
-            .put("topP", 0.9)
-            .put("maxOutputTokens", 900)
-            .put("responseMimeType", "application/json")
-
         val root = JSONObject()
             .put("contents", JSONArray().put(content))
-            .put("generationConfig", generationConfig)
+            .put("generationConfig", baseGenerationConfig(maxTokens = 4096, jsonOutput = true))
 
-        val request = Request.Builder()
-            .url("https://generativelanguage.googleapis.com/v1beta/models/$MODEL:generateContent")
-            .header("x-goog-api-key", key)
-            .header("Content-Type", "application/json")
-            .post(root.toString().toRequestBody(JSON_MEDIA))
-            .build()
-
+        val request = buildRequest(key, root)
         val call = client.newCall(request)
         activeCall = call
         try {
             await(call).use { response ->
                 val body = response.body?.string().orEmpty()
-                if (!response.isSuccessful) error("Gemini request failed (${response.code})")
-                val parsed = JSONObject(body)
-                val candidates = parsed.optJSONArray("candidates") ?: error("Gemini returned no candidate")
-                val partsArray = candidates
-                    .getJSONObject(0)
-                    .getJSONObject("content")
-                    .getJSONArray("parts")
-
-                return buildString {
-                    for (i in 0 until partsArray.length()) {
-                        append(partsArray.getJSONObject(i).optString("text"))
-                    }
-                }
-                    .trim()
-                    .removePrefix("```json")
-                    .removePrefix("```")
-                    .removeSuffix("```")
-                    .trim()
+                if (!response.isSuccessful) throw GeminiApiException.from(response.code, body)
+                return extractText(body)
             }
         } finally {
             if (activeCall === call) activeCall = null
         }
     }
 
+    private fun baseGenerationConfig(maxTokens: Int, jsonOutput: Boolean): JSONObject = JSONObject().apply {
+        // Gemini 3.8 Flash defaults to medium thinking. Low is better for Director's latency-critical loop.
+        put("thinkingConfig", JSONObject().put("thinkingLevel", "low"))
+        put("maxOutputTokens", maxTokens)
+        if (jsonOutput) put("responseMimeType", "application/json")
+    }
+
+    private fun buildRequest(key: String, root: JSONObject): Request = Request.Builder()
+        .url("https://generativelanguage.googleapis.com/v1beta/models/$MODEL:generateContent")
+        .header("x-goog-api-key", key)
+        .header("Content-Type", "application/json")
+        .post(root.toString().toRequestBody(JSON_MEDIA))
+        .build()
+
+    private fun extractText(body: String): String {
+        val parsed = runCatching { JSONObject(body) }
+            .getOrElse { error("Gemini returned an unreadable response") }
+        val candidates = parsed.optJSONArray("candidates")
+            ?: error(blockReason(parsed) ?: "Gemini returned no candidate")
+        if (candidates.length() == 0) error(blockReason(parsed) ?: "Gemini returned no candidate")
+
+        val candidate = candidates.optJSONObject(0) ?: error("Gemini returned an invalid candidate")
+        val finishReason = candidate.optString("finishReason").ifBlank { "unknown" }
+        val content = candidate.optJSONObject("content")
+            ?: error("Gemini returned no content (finishReason=$finishReason)")
+        val partsArray = content.optJSONArray("parts")
+            ?: error("Gemini returned no output parts (finishReason=$finishReason)")
+
+        val text = buildString {
+            for (i in 0 until partsArray.length()) {
+                val part = partsArray.optJSONObject(i) ?: continue
+                if (part.has("text")) append(part.optString("text"))
+            }
+        }
+            .trim()
+            .removePrefix("```json")
+            .removePrefix("```")
+            .removeSuffix("```")
+            .trim()
+
+        if (text.isBlank()) {
+            error("Gemini returned empty output (finishReason=$finishReason)")
+        }
+        return text
+    }
+
+    private fun blockReason(parsed: JSONObject): String? {
+        val feedback = parsed.optJSONObject("promptFeedback") ?: return null
+        val reason = feedback.optString("blockReason").ifBlank { return null }
+        return "Gemini blocked the request ($reason)"
+    }
+
     private suspend fun await(call: Call): Response = suspendCancellableCoroutine { continuation ->
         continuation.invokeOnCancellation { call.cancel() }
         call.enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
-                if (continuation.isActive) continuation.resumeWithException(e)
+                if (continuation.isActive) continuation.resumeWithException(
+                    if (e.message?.contains("timeout", ignoreCase = true) == true) {
+                        IOException("Gemini request timed out", e)
+                    } else e
+                )
             }
 
             override fun onResponse(call: Call, response: Response) {
@@ -227,6 +292,34 @@ class GeminiVlmRuntime(
     override fun close() {
         activeCall?.cancel()
         client.dispatcher.executorService.shutdown()
+    }
+
+    private class GeminiApiException private constructor(message: String) : IOException(message) {
+        companion object {
+            fun from(code: Int, body: String): GeminiApiException {
+                val provider = runCatching {
+                    JSONObject(body)
+                        .optJSONObject("error")
+                        ?.optString("message")
+                        ?.replace(Regex("\\s+"), " ")
+                        ?.trim()
+                        ?.take(220)
+                        ?.takeIf { it.isNotBlank() }
+                }.getOrNull()
+
+                val base = when (code) {
+                    400 -> "Gemini rejected the request (400)"
+                    401 -> "Gemini API key is invalid or expired (401)"
+                    403 -> "Gemini API access is blocked for this key/project (403)"
+                    404 -> "Gemini model is unavailable for this key/project (404)"
+                    408 -> "Gemini request timed out (408)"
+                    429 -> "Gemini quota or rate limit reached (429)"
+                    in 500..599 -> "Gemini service is temporarily unavailable ($code)"
+                    else -> "Gemini request failed ($code)"
+                }
+                return GeminiApiException(if (provider == null) base else "$base: $provider")
+            }
+        }
     }
 
     companion object {
