@@ -4,12 +4,14 @@ import android.content.Context
 import android.os.Build
 import com.saunak.director.BuildConfig
 import java.io.IOException
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import okhttp3.MediaType.Companion.toMediaType
@@ -17,7 +19,6 @@ import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-import java.util.concurrent.TimeUnit
 
 @Serializable
 data class SierraSignupPayload(
@@ -129,7 +130,7 @@ class SierraServerClient(context: Context) {
     }
 
     suspend fun syncDevice(profile: SierraDeviceProfile): Result<Unit> = runCatching {
-        authenticatedJson("PUT", "/v1/me/devices/current", json.encodeToString(profile))
+        authenticatedJson<UnitResponse>("PUT", "/v1/me/devices/current", json.encodeToString(profile))
         Unit
     }
 
@@ -263,6 +264,9 @@ class SierraServerClient(context: Context) {
     }
 
     private fun userAgent(): String = "SierraVision/${BuildConfig.VERSION_NAME} Android/${Build.VERSION.SDK_INT}"
+
+    @Serializable
+    private data class UnitResponse(val id: String? = null)
 
     companion object {
         private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
