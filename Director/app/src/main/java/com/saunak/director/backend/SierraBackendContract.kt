@@ -1,93 +1,104 @@
 package com.saunak.director.backend
 
+import com.saunak.director.director.PlanOutput
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
-/**
- * Network-neutral contracts for the future Sierra laptop control plane.
- *
- * This module intentionally contains no URL, token, demo user, credit balance, or implementation.
- * The laptop backend will remain authoritative for identity, credits, job lifecycle and cloud
- * inference. Sierra Vision can therefore ship Sierra β now without pretending local state is
- * payment/auth authority.
- */
 interface SierraBackendGateway {
     val configured: Boolean
+    val authenticated: Boolean
 
-    suspend fun session(): Result<SierraUserSession>
-    suspend fun startPhotoJob(request: StartPhotoJobRequest): Result<PhotoJobLease>
-    suspend fun submitAnalysis(request: AnalysisRequest): Result<AnalysisResponse>
-    suspend fun completePhotoJob(request: CompletePhotoJobRequest): Result<PhotoJobReceipt>
-    suspend fun cancelPhotoJob(jobId: String, reason: String): Result<Unit>
+    suspend fun signUp(request: SierraSignUpRequest): Result<SierraTokenPair>
+    suspend fun signIn(request: SierraSignInRequest): Result<SierraTokenPair>
+    suspend fun session(): Result<SierraUserView>
+    suspend fun credits(): Result<SierraCredits>
+    suspend fun createAnalysisJob(request: SierraAnalysisJobRequest): Result<SierraJobView>
+    suspend fun job(jobId: String): Result<SierraJobView>
+    suspend fun complete(jobId: String, captureId: String): Result<SierraJobView>
+    suspend fun cancel(jobId: String): Result<SierraJobView>
+    suspend fun signOut(): Result<Unit>
 }
 
 @Serializable
-data class SierraUserSession(
-    @SerialName("user_id") val userId: String,
-    @SerialName("display_name") val displayName: String? = null,
-    @SerialName("credits_available") val creditsAvailable: Int,
-    @SerialName("account_status") val accountStatus: String,
-    @SerialName("access_token_expires_at_ms") val accessTokenExpiresAtMs: Long
+data class SierraSignUpRequest(
+    @SerialName("display_name") val displayName: String,
+    val email: String,
+    val phone: String,
+    val dob: String,
+    val password: String
 )
 
 @Serializable
-data class StartPhotoJobRequest(
-    @SerialName("device_id") val deviceId: String,
-    @SerialName("app_version") val appVersion: String,
-    @SerialName("requested_mode") val requestedMode: String = "sierra_ai"
+data class SierraSignInRequest(
+    val email: String,
+    val password: String
 )
 
 @Serializable
-data class PhotoJobLease(
-    @SerialName("job_id") val jobId: String,
-    @SerialName("reservation_id") val reservationId: String,
-    @SerialName("state") val state: PhotoJobState,
-    @SerialName("expires_at_ms") val expiresAtMs: Long,
-    @SerialName("credits_reserved") val creditsReserved: Int = 1
+data class SierraUserView(
+    val id: String,
+    @SerialName("display_name") val displayName: String,
+    val email: String,
+    val phone: String,
+    val role: String,
+    @SerialName("credit_balance") val creditBalance: Int,
+    @SerialName("credit_reserved") val creditReserved: Int,
+    @SerialName("available_credits") val availableCredits: Int,
+    @SerialName("created_at") val createdAt: String
 )
 
 @Serializable
-data class AnalysisRequest(
-    @SerialName("job_id") val jobId: String,
-    @SerialName("image_jpeg") val imageJpeg: ByteArray,
-    @SerialName("camera_context_json") val cameraContextJson: String,
-    @SerialName("device_capabilities_json") val deviceCapabilitiesJson: String,
-    @SerialName("local_quality_json") val localQualityJson: String
+data class SierraTokenPair(
+    @SerialName("access_token") val accessToken: String,
+    @SerialName("refresh_token") val refreshToken: String,
+    @SerialName("token_type") val tokenType: String = "bearer",
+    @SerialName("access_expires_in_seconds") val accessExpiresInSeconds: Int,
+    val user: SierraUserView
 )
 
 @Serializable
-data class AnalysisResponse(
-    @SerialName("job_id") val jobId: String,
-    @SerialName("state") val state: PhotoJobState,
-    @SerialName("plan_json") val planJson: String,
-    @SerialName("provider_route_id") val providerRouteId: String? = null,
-    @SerialName("latency_ms") val latencyMs: Long? = null
+data class SierraRefreshRequest(
+    @SerialName("refresh_token") val refreshToken: String
 )
 
 @Serializable
-data class CompletePhotoJobRequest(
-    @SerialName("job_id") val jobId: String,
-    @SerialName("reservation_id") val reservationId: String,
-    @SerialName("final_capture_succeeded") val finalCaptureSucceeded: Boolean,
-    @SerialName("capture_timestamp_ms") val captureTimestampMs: Long
+data class SierraCredits(
+    val balance: Int,
+    val reserved: Int,
+    val available: Int
+)
+
+data class SierraAnalysisJobRequest(
+    val imageJpeg: ByteArray,
+    val idempotencyKey: String,
+    val cameraContextJson: String,
+    val deviceCapabilitiesJson: String,
+    val localQualityJson: String,
+    val skillContext: String
 )
 
 @Serializable
-data class PhotoJobReceipt(
-    @SerialName("job_id") val jobId: String,
-    @SerialName("state") val state: PhotoJobState,
-    @SerialName("credits_consumed") val creditsConsumed: Int,
-    @SerialName("credits_remaining") val creditsRemaining: Int
+data class SierraJobView(
+    val id: String,
+    val state: SierraJobState,
+    val plan: PlanOutput? = null,
+    @SerialName("error_code") val errorCode: String? = null,
+    @SerialName("error_message") val errorMessage: String? = null,
+    @SerialName("created_at") val createdAt: String,
+    @SerialName("ready_expires_at") val readyExpiresAt: String? = null,
+    val credits: SierraCredits
 )
 
 @Serializable
-enum class PhotoJobState {
-    @SerialName("created") CREATED,
-    @SerialName("credit_reserved") CREDIT_RESERVED,
-    @SerialName("image_received") IMAGE_RECEIVED,
-    @SerialName("analyzing") ANALYZING,
+data class SierraCompleteRequest(
+    @SerialName("capture_id") val captureId: String
+)
+
+@Serializable
+enum class SierraJobState {
+    @SerialName("queued") QUEUED,
+    @SerialName("processing") PROCESSING,
     @SerialName("ready") READY,
-    @SerialName("capture_confirmed") CAPTURE_CONFIRMED,
     @SerialName("completed") COMPLETED,
     @SerialName("cancelled") CANCELLED,
     @SerialName("expired") EXPIRED,
@@ -95,6 +106,7 @@ enum class PhotoJobState {
 }
 
 object SierraCreditPolicy {
+    const val TRIAL_CREDITS = 5
     const val CREDITS_PER_SUCCESSFUL_AI_PICTURE = 1
 
     fun shouldConsumeCredit(finalCaptureSucceeded: Boolean, cloudJobReachedReady: Boolean): Boolean =
