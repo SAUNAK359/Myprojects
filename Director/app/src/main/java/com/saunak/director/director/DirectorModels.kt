@@ -72,6 +72,8 @@ data class DirectorUiState(
     val recipeCount: Int = 0,
     val showSettings: Boolean = false,
     val showTools: Boolean = false,
+    val showGallery: Boolean = false,
+    val galleryItems: List<String> = emptyList(),
     val gridEnabled: Boolean = false,
     val levelEnabled: Boolean = false,
     val sierraMode: SierraMode = SierraMode.BETA,
