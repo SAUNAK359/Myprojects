@@ -8,6 +8,13 @@ plugins {
     id("org.jetbrains.kotlin.plugin.serialization")
 }
 
+val sierraServerBaseUrl = ((project.findProperty("sierraServerBaseUrl") as String?)
+    ?: System.getenv("SIERRA_SERVER_BASE_URL")
+    ?: "").trim().removeSuffix("/")
+require(sierraServerBaseUrl.isBlank() || sierraServerBaseUrl.startsWith("https://")) {
+    "Sierra server URL must be blank or HTTPS"
+}
+
 android {
     namespace = "com.saunak.director"
     compileSdk = 36
@@ -21,6 +28,7 @@ android {
         versionName = (project.findProperty("versionName") as String?) ?: "1.0.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
+        buildConfigField("String", "SIERRA_SERVER_BASE_URL", "\"${sierraServerBaseUrl.replace("\"", "\\\"")}\"")
     }
 
     buildTypes {
