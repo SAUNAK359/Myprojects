@@ -78,13 +78,13 @@ class MultiProviderVlmRuntime(
             CURRENT CAMERA STATE:
             ${camera.compactDescription()}
 
-            Return ONE compact JSON object only, no markdown and no explanation:
-            {"scene":"short scene description","objective":"professional target look","branch":"general|portrait|landscape|low_light|motion|group|food|architecture|macro|selfie","reference_score":0.0,"reference_accept":false,"calls":[{"id":1,"v":null,"x":0.5,"y":0.5,"s":null}],"recapture":true}
+            Return exactly the requested Director plan object. All top-level fields must be present.
             Rules: scores 0..1; calls max 8; IDs and parameter ranges MUST come from config; use minimal calls when the current image is already strong.
         """.trimIndent()
-        val raw = generate(prompt, image)
+        val raw = generate(prompt, image, OutputKind.PLAN)
         withContext(Dispatchers.Default) {
-            VlmContractValidator.plan(json.decodeFromString(raw))
+            val normalized = normalizePlanJson(raw)
+            VlmContractValidator.plan(json.decodeFromString(normalized))
         }
     }
 
@@ -112,13 +112,13 @@ class MultiProviderVlmRuntime(
             EVALUATION SKILL:
             $evaluationContext
 
-            Return ONE compact JSON object only, no markdown and no explanation:
-            {"score":0.0,"technical":0.0,"composition":0.0,"subject":0.0,"aesthetic":0.0,"accept":false,"issues":["short issue"],"delta":[{"id":3,"v":0.17,"x":null,"y":null,"s":null}]}
+            Return exactly the requested Director evaluation object. All top-level fields must be present.
             Rules: scores 0..1; issues max 8; delta max 8; if approved set accept=true and delta=[].
         """.trimIndent()
-        val raw = generate(prompt, image)
+        val raw = generate(prompt, image, OutputKind.EVALUATION)
         withContext(Dispatchers.Default) {
-            VlmContractValidator.evaluation(json.decodeFromString(raw))
+            val normalized = normalizeEvaluationJson(raw)
+            VlmContractValidator.evaluation(json.decodeFromString(normalized))
         }
     }
 
@@ -128,7 +128,7 @@ class MultiProviderVlmRuntime(
         var last: Throwable? = null
         for (route in routes) {
             try {
-                request(route, "Reply with exactly OK", imageDataUrl = null, maxTokens = 32, expectJson = false)
+                request(route, "Reply with exactly OK", imageDataUrl = null, maxTokens = 32, outputKind = null)
                 lastSuccessfulRoute = route
                 return@preservingCancellation route.preset.label
             } catch (t: Throwable) {
@@ -155,9 +155,7 @@ class MultiProviderVlmRuntime(
     fun customModel(): String = settings.customModel()
     fun activeRouteLabel(): String = lastSuccessfulRoute?.preset?.label ?: settings.selected().label
 
-    private suspend fun generate(prompt: String, bitmap: Bitmap): String {
-        // Image preparation used to run on the UI coroutine and was repeated for every failover.
-        // Encode once on a worker thread, keep the payload deliberately small, then reuse it.
+    private suspend fun generate(prompt: String, bitmap: Bitmap, outputKind: OutputKind): String {
         val imageDataUrl = withContext(Dispatchers.Default) {
             val jpeg = encodeForAi(bitmap)
             "data:image/jpeg;base64," + Base64.encodeToString(jpeg, Base64.NO_WRAP)
@@ -168,7 +166,7 @@ class MultiProviderVlmRuntime(
         var last: Throwable? = null
         for (route in routes) {
             try {
-                val result = request(route, prompt, imageDataUrl, maxTokens = 1400, expectJson = true)
+                val result = request(route, prompt, imageDataUrl, maxTokens = 1400, outputKind = outputKind)
                 lastSuccessfulRoute = route
                 return cleanJson(result)
             } catch (t: Throwable) {
@@ -185,7 +183,7 @@ class MultiProviderVlmRuntime(
         prompt: String,
         imageDataUrl: String?,
         maxTokens: Int,
-        expectJson: Boolean
+        outputKind: OutputKind?
     ): String {
         val request = withContext(Dispatchers.Default) {
             val content = JSONArray().put(JSONObject().put("type", "text").put("text", prompt))
@@ -199,7 +197,7 @@ class MultiProviderVlmRuntime(
             val body = JSONObject()
                 .put("model", route.model)
                 .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", content)))
-                .put("temperature", 0.6)
+                .put("temperature", if (outputKind == null) 0.2 else 0.35)
                 .put("top_p", 0.95)
                 .put("max_tokens", maxTokens)
                 .put("stream", false)
@@ -209,8 +207,9 @@ class MultiProviderVlmRuntime(
                 AiProviderPreset.GEMINI_38_FLASH -> body.put("reasoning_effort", "low")
                 else -> Unit
             }
-            if (expectJson && route.preset != AiProviderPreset.CUSTOM_OPENAI) {
-                body.put("response_format", JSONObject().put("type", "json_object"))
+
+            if (outputKind != null && route.preset != AiProviderPreset.CUSTOM_OPENAI) {
+                body.put("response_format", responseFormat(route, outputKind))
             }
 
             Request.Builder()
@@ -237,6 +236,132 @@ class MultiProviderVlmRuntime(
             if (activeCall === call) activeCall = null
         }
     }
+
+    private fun responseFormat(route: ResolvedAiRoute, kind: OutputKind): JSONObject {
+        val strictSchemaSupported = route.preset == AiProviderPreset.NVIDIA_NEMOTRON ||
+            route.preset == AiProviderPreset.OPENROUTER_NEMOTRON_FREE ||
+            route.preset == AiProviderPreset.OPENROUTER_NEMOTRON ||
+            route.preset == AiProviderPreset.GEMINI_38_FLASH
+
+        if (!strictSchemaSupported) return JSONObject().put("type", "json_object")
+        return JSONObject()
+            .put("type", "json_schema")
+            .put(
+                "json_schema",
+                JSONObject()
+                    .put("name", if (kind == OutputKind.PLAN) "director_plan" else "director_evaluation")
+                    .put("strict", true)
+                    .put("schema", if (kind == OutputKind.PLAN) planSchema() else evaluationSchema())
+            )
+    }
+
+    private fun planSchema(): JSONObject {
+        val tool = toolCallSchema()
+        return JSONObject()
+            .put("type", "object")
+            .put("additionalProperties", false)
+            .put(
+                "properties",
+                JSONObject()
+                    .put("scene", JSONObject().put("type", "string"))
+                    .put("objective", JSONObject().put("type", "string"))
+                    .put(
+                        "branch",
+                        JSONObject().put("type", "string").put(
+                            "enum",
+                            JSONArray(listOf("general", "portrait", "landscape", "low_light", "motion", "group", "food", "architecture", "macro", "selfie"))
+                        )
+                    )
+                    .put("reference_score", JSONObject().put("type", "number"))
+                    .put("reference_accept", JSONObject().put("type", "boolean"))
+                    .put("calls", JSONObject().put("type", "array").put("maxItems", 8).put("items", tool))
+                    .put("recapture", JSONObject().put("type", "boolean"))
+            )
+            .put("required", JSONArray(listOf("scene", "objective", "branch", "reference_score", "reference_accept", "calls", "recapture")))
+    }
+
+    private fun evaluationSchema(): JSONObject {
+        return JSONObject()
+            .put("type", "object")
+            .put("additionalProperties", false)
+            .put(
+                "properties",
+                JSONObject()
+                    .put("score", JSONObject().put("type", "number"))
+                    .put("technical", JSONObject().put("type", "number"))
+                    .put("composition", JSONObject().put("type", "number"))
+                    .put("subject", JSONObject().put("type", "number"))
+                    .put("aesthetic", JSONObject().put("type", "number"))
+                    .put("accept", JSONObject().put("type", "boolean"))
+                    .put("issues", JSONObject().put("type", "array").put("maxItems", 8).put("items", JSONObject().put("type", "string")))
+                    .put("delta", JSONObject().put("type", "array").put("maxItems", 8).put("items", toolCallSchema()))
+            )
+            .put("required", JSONArray(listOf("score", "technical", "composition", "subject", "aesthetic", "accept", "issues", "delta")))
+    }
+
+    private fun toolCallSchema(): JSONObject = JSONObject()
+        .put("type", "object")
+        .put("additionalProperties", false)
+        .put(
+            "properties",
+            JSONObject()
+                .put("id", JSONObject().put("type", "integer"))
+                .put("v", nullableSchema("number"))
+                .put("x", nullableSchema("number"))
+                .put("y", nullableSchema("number"))
+                .put("s", nullableSchema("string"))
+        )
+        .put("required", JSONArray(listOf("id", "v", "x", "y", "s")))
+
+    private fun nullableSchema(type: String): JSONObject = JSONObject().put(
+        "anyOf",
+        JSONArray().put(JSONObject().put("type", type)).put(JSONObject().put("type", "null"))
+    )
+
+    private fun normalizePlanJson(raw: String): String {
+        val obj = parseObject(raw)
+        val scene = obj.optString("scene").trim()
+        val objective = obj.optString("objective").trim()
+        require(scene.isNotBlank()) { "Invalid scene" }
+        require(objective.isNotBlank()) { "Invalid objective" }
+
+        if (obj.optString("branch").isBlank()) obj.put("branch", "general")
+        if (!obj.has("reference_score") || obj.isNull("reference_score")) obj.put("reference_score", 0.5)
+        if (!obj.has("reference_accept") || obj.isNull("reference_accept")) obj.put("reference_accept", false)
+        if (!obj.has("calls") || obj.optJSONArray("calls") == null) obj.put("calls", JSONArray())
+        if (!obj.has("recapture") || obj.isNull("recapture")) obj.put("recapture", true)
+        normalizeToolArray(obj.optJSONArray("calls"))
+        return obj.toString()
+    }
+
+    private fun normalizeEvaluationJson(raw: String): String {
+        val obj = parseObject(raw)
+        val score = obj.optDouble("score", Double.NaN)
+        require(score.isFinite()) { "Invalid evaluation score" }
+        if (!obj.has("technical") || obj.isNull("technical")) obj.put("technical", score)
+        if (!obj.has("composition") || obj.isNull("composition")) obj.put("composition", score)
+        if (!obj.has("subject") || obj.isNull("subject")) obj.put("subject", score)
+        if (!obj.has("aesthetic") || obj.isNull("aesthetic")) obj.put("aesthetic", score)
+        if (!obj.has("accept") || obj.isNull("accept")) obj.put("accept", false)
+        if (!obj.has("issues") || obj.optJSONArray("issues") == null) obj.put("issues", JSONArray())
+        if (!obj.has("delta") || obj.optJSONArray("delta") == null) obj.put("delta", JSONArray())
+        normalizeToolArray(obj.optJSONArray("delta"))
+        return obj.toString()
+    }
+
+    private fun normalizeToolArray(array: JSONArray?) {
+        if (array == null) return
+        for (i in 0 until array.length()) {
+            val call = array.optJSONObject(i) ?: continue
+            if (!call.has("v")) call.put("v", JSONObject.NULL)
+            if (!call.has("x")) call.put("x", JSONObject.NULL)
+            if (!call.has("y")) call.put("y", JSONObject.NULL)
+            if (!call.has("s")) call.put("s", JSONObject.NULL)
+        }
+    }
+
+    private fun parseObject(raw: String): JSONObject = runCatching { JSONObject(cleanJson(raw)) }
+        .getOrElse { throw IllegalArgumentException("AI returned an invalid analysis response", it) }
 
     private fun routesFor(preset: AiProviderPreset): List<ResolvedAiRoute> {
         val candidates = if (preset == AiProviderPreset.AUTO) AiProviderPreset.autoPriority else listOf(preset)
@@ -371,6 +496,8 @@ class MultiProviderVlmRuntime(
             }
         }
     }
+
+    private enum class OutputKind { PLAN, EVALUATION }
 
     companion object {
         private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
