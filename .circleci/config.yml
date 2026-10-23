@@ -222,6 +222,9 @@ jobs:
 
     steps:
       - checkout
+      - setup_remote_docker:
+          version: default
+          docker_layer_caching: false
       - restore_cache:
           keys:
             - sierra-server-pip-v1-{{ checksum "SierraServer/pyproject.toml" }}
@@ -245,6 +248,7 @@ jobs:
           command: |
             set -euo pipefail
             cd SierraServer
+            mkdir -p /tmp/sierra-test-results
             pytest -q --junitxml=/tmp/sierra-test-results/results.xml
       - run:
           name: Docker build
