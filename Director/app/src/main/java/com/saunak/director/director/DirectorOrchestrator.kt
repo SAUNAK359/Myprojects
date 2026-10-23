@@ -13,6 +13,7 @@ import com.saunak.director.storage.RecipeMemory
 import com.saunak.director.tools.ToolExecutor
 import com.saunak.director.tools.ToolIds
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.util.concurrent.atomic.AtomicLong
 
@@ -40,7 +41,29 @@ class DirectorOrchestrator(
         return next
     }
 
-    suspend fun onPrimaryPressed(): Uri? = if (approved != null) captureFinal() else prepareShot()
+    suspend fun onPrimaryPressed(): Uri? {
+        if (approved != null) return captureFinal()
+        val completed = withTimeoutOrNull(HARD_PREPARE_DEADLINE_MS) {
+            prepareShot()
+            true
+        } ?: false
+        if (!completed && approved == null) {
+            vlm.cancel()
+            runCatching { tools.restoreUserState() }
+            val session = generation.incrementAndGet()
+            emit(
+                session,
+                DirectorUiState(
+                    stage = DirectorStage.READY,
+                    aiAvailable = vlm.isReady(),
+                    status = "Director timed out • try again",
+                    camera = camera.uiState(),
+                    recipeCount = recipeMemory.count()
+                )
+            )
+        }
+        return null
+    }
 
     private suspend fun prepareShot(): Uri? {
         val session = cancelForUserAction()
@@ -165,8 +188,8 @@ class DirectorOrchestrator(
             }
         } catch (_: StaleSession) {
             return null
-        } catch (_: CancellationException) {
-            return null
+        } catch (t: CancellationException) {
+            throw t
         } catch (t: Throwable) {
             runCatching { tools.restoreUserState() }
             emit(session, DirectorUiState(DirectorStage.ERROR, vlm.isReady(), "Director preparation failed", error = t.message, camera = camera.uiState()))
@@ -218,4 +241,8 @@ class DirectorOrchestrator(
     private fun isCurrent(session: Long): Boolean = generation.get() == session
     private fun assertCurrent(session: Long) { if (!isCurrent(session)) throw StaleSession() }
     private class StaleSession : RuntimeException()
+
+    companion object {
+        private const val HARD_PREPARE_DEADLINE_MS = 7_000L
+    }
 }
