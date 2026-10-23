@@ -1,7 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -30,28 +30,6 @@ class Settings(BaseSettings):
     domain: str = ""
     runtime_dir: Path = Path("runtime")
 
-    @field_validator("jwt_secret")
-    @classmethod
-    def strong_jwt_secret(cls, value: SecretStr) -> SecretStr:
-        if len(value.get_secret_value()) < 32:
-            raise ValueError("SIERRA_JWT_SECRET must be at least 32 characters")
-        return value
-
-    @model_validator(mode="after")
-    def production_safety(self) -> "Settings":
-        if self.is_production:
-            jwt_value = self.jwt_secret.get_secret_value()
-            provider_key = self.provider_master_key.get_secret_value().strip()
-            if "development-only" in jwt_value.lower() or "change_me" in jwt_value.lower():
-                raise ValueError("production requires a generated SIERRA_JWT_SECRET")
-            if not provider_key:
-                raise ValueError("production requires SIERRA_PROVIDER_MASTER_KEY")
-            if "sierra_change_me" in self.database_url:
-                raise ValueError("production database password must be changed")
-            if not self.public_base_url.startswith("https://"):
-                raise ValueError("production requires an HTTPS SIERRA_PUBLIC_BASE_URL")
-        return self
-
     @property
     def cors_origins(self) -> list[str]:
         return [item.strip() for item in self.allowed_origins.split(",") if item.strip()]
@@ -61,12 +39,31 @@ class Settings(BaseSettings):
         return self.env.lower() == "production"
 
 
-@lru_cache
-def get_settings() -> Settings:
-    value = Settings()
+def validate_runtime_config(value: Settings) -> None:
+    jwt_value = value.jwt_secret.get_secret_value()
+    if len(jwt_value) < 32:
+        raise RuntimeError("SIERRA_JWT_SECRET must be at least 32 characters")
+
+    if value.is_production:
+        provider_key = value.provider_master_key.get_secret_value().strip()
+        if "development-only" in jwt_value.lower() or "change_me" in jwt_value.lower():
+            raise RuntimeError("production requires a generated SIERRA_JWT_SECRET")
+        if not provider_key:
+            raise RuntimeError("production requires SIERRA_PROVIDER_MASTER_KEY")
+        if "sierra_change_me" in value.database_url:
+            raise RuntimeError("production database password must be changed")
+        if not value.public_base_url.startswith("https://"):
+            raise RuntimeError("production requires an HTTPS SIERRA_PUBLIC_BASE_URL")
+
+
+def prepare_runtime_directories(value: Settings) -> None:
     value.runtime_dir.mkdir(parents=True, exist_ok=True)
     (value.runtime_dir / "analysis").mkdir(parents=True, exist_ok=True)
-    return value
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
 
 
 settings = get_settings()
