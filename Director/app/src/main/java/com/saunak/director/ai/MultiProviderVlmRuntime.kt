@@ -2,6 +2,7 @@ package com.saunak.director.ai
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.os.SystemClock
 import android.util.Base64
 import com.saunak.director.camera.CameraSnapshot
 import com.saunak.director.camera.CapabilityRegistry
@@ -10,8 +11,10 @@ import com.saunak.director.director.PlanOutput
 import com.saunak.director.storage.RecipeMemory
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
 import okhttp3.Call
@@ -30,7 +33,7 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlin.math.max
 
-/** OpenAI-compatible multimodal runtime with selectable providers and automatic failover. */
+/** OpenAI-compatible multimodal runtime with selectable providers and adaptive failover. */
 class MultiProviderVlmRuntime(
     context: Context,
     private val keyStore: SecureApiKeyStore = SecureApiKeyStore(context),
@@ -39,11 +42,13 @@ class MultiProviderVlmRuntime(
     private val recipeMemory: RecipeMemory = RecipeMemory(context)
 ) : VlmRuntime {
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
+    private val health = context.getSharedPreferences("director_provider_health_v1", Context.MODE_PRIVATE)
     private val client = OkHttpClient.Builder()
-        .connectTimeout(4, TimeUnit.SECONDS)
-        .readTimeout(18, TimeUnit.SECONDS)
-        .writeTimeout(8, TimeUnit.SECONDS)
-        .callTimeout(20, TimeUnit.SECONDS)
+        .connectTimeout(3, TimeUnit.SECONDS)
+        .readTimeout(10, TimeUnit.SECONDS)
+        .writeTimeout(6, TimeUnit.SECONDS)
+        .callTimeout(11, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
         .build()
 
     @Volatile private var activeCall: Call? = null
@@ -79,6 +84,8 @@ class MultiProviderVlmRuntime(
             ${camera.compactDescription()}
 
             Return exactly the requested Director plan object. All top-level fields must be present.
+            Optimize for an immediately post-ready result: strong subject separation, clean highlights,
+            flattering skin when people are present, intentional composition, and a tasteful finish.
             Rules: scores 0..1; calls max 8; IDs and parameter ranges MUST come from config; use minimal calls when the current image is already strong.
         """.trimIndent()
         val raw = generate(prompt, image, OutputKind.PLAN)
@@ -127,13 +134,19 @@ class MultiProviderVlmRuntime(
         if (routes.isEmpty()) error("${preset.label} is not configured")
         var last: Throwable? = null
         for (route in routes) {
+            val started = SystemClock.elapsedRealtime()
             try {
-                request(route, "Reply with exactly OK", imageDataUrl = null, maxTokens = 32, outputKind = null)
+                withTimeout(routeTimeoutMs(route, validation = true)) {
+                    request(route, "Reply with exactly OK", imageDataUrl = null, maxTokens = 32, outputKind = null)
+                }
+                recordSuccess(route.preset, SystemClock.elapsedRealtime() - started)
                 lastSuccessfulRoute = route
                 return@preservingCancellation route.preset.label
             } catch (t: Throwable) {
-                if (t is CancellationException) throw t
-                last = t
+                if (t is CancellationException && t !is TimeoutCancellationException) throw t
+                val failure = timeoutAsIo(route, t)
+                recordFailure(route.preset)
+                last = failure
             }
         }
         throw last ?: IOException("AI provider connection failed")
@@ -160,23 +173,44 @@ class MultiProviderVlmRuntime(
             val jpeg = encodeForAi(bitmap)
             "data:image/jpeg;base64," + Base64.encodeToString(jpeg, Base64.NO_WRAP)
         }
-        val routes = withContext(Dispatchers.IO) { routesFor(settings.selected()) }
-        if (routes.isEmpty()) error("No configured AI provider for ${settings.selected().label}")
+        val selected = settings.selected()
+        val routes = withContext(Dispatchers.IO) { routesFor(selected) }
+        if (routes.isEmpty()) error("No configured AI provider for ${selected.label}")
 
         var last: Throwable? = null
         for (route in routes) {
+            val started = SystemClock.elapsedRealtime()
             try {
-                val result = request(route, prompt, imageDataUrl, maxTokens = 1400, outputKind = outputKind)
+                val result = withTimeout(routeTimeoutMs(route, validation = false)) {
+                    request(route, prompt, imageDataUrl, maxTokens = 1050, outputKind = outputKind)
+                }
+                recordSuccess(route.preset, SystemClock.elapsedRealtime() - started)
                 lastSuccessfulRoute = route
                 return cleanJson(result)
             } catch (t: Throwable) {
-                if (t is CancellationException) throw t
-                last = t
-                if (settings.selected() != AiProviderPreset.AUTO) break
+                if (t is CancellationException && t !is TimeoutCancellationException) throw t
+                val failure = timeoutAsIo(route, t)
+                recordFailure(route.preset)
+                last = failure
+                if (selected != AiProviderPreset.AUTO) break
             }
         }
         throw last ?: IOException("All configured AI providers failed")
     }
+
+    private fun routeTimeoutMs(route: ResolvedAiRoute, validation: Boolean): Long {
+        if (validation) return 4_500L
+        return when (route.preset) {
+            AiProviderPreset.GROQ_QWEN38 -> 5_000L
+            AiProviderPreset.OPENROUTER_NEMOTRON_FREE, AiProviderPreset.OPENROUTER_NEMOTRON -> 5_500L
+            AiProviderPreset.NVIDIA_NEMOTRON -> 6_500L
+            AiProviderPreset.GEMINI_38_FLASH -> 6_500L
+            else -> 6_500L
+        }
+    }
+
+    private fun timeoutAsIo(route: ResolvedAiRoute, t: Throwable): Throwable =
+        if (t is TimeoutCancellationException) IOException("${route.preset.label} timed out", t) else t
 
     private suspend fun request(
         route: ResolvedAiRoute,
@@ -197,8 +231,8 @@ class MultiProviderVlmRuntime(
             val body = JSONObject()
                 .put("model", route.model)
                 .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", content)))
-                .put("temperature", if (outputKind == null) 0.2 else 0.35)
-                .put("top_p", 0.95)
+                .put("temperature", if (outputKind == null) 0.2 else 0.28)
+                .put("top_p", 0.92)
                 .put("max_tokens", maxTokens)
                 .put("stream", false)
 
@@ -364,8 +398,40 @@ class MultiProviderVlmRuntime(
         .getOrElse { throw IllegalArgumentException("AI returned an invalid analysis response", it) }
 
     private fun routesFor(preset: AiProviderPreset): List<ResolvedAiRoute> {
-        val candidates = if (preset == AiProviderPreset.AUTO) AiProviderPreset.autoPriority else listOf(preset)
+        val candidates = if (preset == AiProviderPreset.AUTO) {
+            AiProviderPreset.autoPriority.sortedByDescending(::routeHealthScore)
+        } else {
+            listOf(preset)
+        }
         return candidates.mapNotNull(::resolve)
+    }
+
+    private fun routeHealthScore(preset: AiProviderPreset): Double {
+        val success = health.getInt("${preset.id}_success", 0)
+        val failure = health.getInt("${preset.id}_failure", 0)
+        val avgMs = health.getLong("${preset.id}_avg_ms", 0L)
+        val reliability = (success + 1.0) / (success + failure + 2.0)
+        val speed = if (avgMs <= 0L) 0.55 else (1.0 - (avgMs.coerceAtMost(10_000L) / 10_000.0)).coerceIn(0.0, 1.0)
+        val baseIndex = AiProviderPreset.autoPriority.indexOf(preset).coerceAtLeast(0)
+        val baseBias = (AiProviderPreset.autoPriority.size - baseIndex) * 0.012
+        return reliability * 0.68 + speed * 0.32 + baseBias
+    }
+
+    private fun recordSuccess(preset: AiProviderPreset, latencyMs: Long) {
+        val successKey = "${preset.id}_success"
+        val avgKey = "${preset.id}_avg_ms"
+        val oldSuccess = health.getInt(successKey, 0)
+        val oldAvg = health.getLong(avgKey, 0L)
+        val newAvg = if (oldAvg <= 0L) latencyMs else ((oldAvg * 3L) + latencyMs) / 4L
+        health.edit()
+            .putInt(successKey, (oldSuccess + 1).coerceAtMost(10_000))
+            .putLong(avgKey, newAvg.coerceAtLeast(1L))
+            .apply()
+    }
+
+    private fun recordFailure(preset: AiProviderPreset) {
+        val key = "${preset.id}_failure"
+        health.edit().putInt(key, (health.getInt(key, 0) + 1).coerceAtMost(10_000)).apply()
     }
 
     private fun resolve(preset: AiProviderPreset): ResolvedAiRoute? {
@@ -448,8 +514,8 @@ class MultiProviderVlmRuntime(
             )
         } else source
         return try {
-            ByteArrayOutputStream(192 * 1024).use { out ->
-                check(prepared.compress(Bitmap.CompressFormat.JPEG, 72, out)) { "Could not encode analysis frame" }
+            ByteArrayOutputStream(160 * 1024).use { out ->
+                check(prepared.compress(Bitmap.CompressFormat.JPEG, 74, out)) { "Could not encode analysis frame" }
                 out.toByteArray()
             }
         } finally {
