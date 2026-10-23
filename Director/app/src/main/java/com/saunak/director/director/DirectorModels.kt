@@ -76,7 +76,9 @@ data class DirectorUiState(
     val levelEnabled: Boolean = false,
     val sierraMode: SierraMode = SierraMode.BETA,
     val aspectRatio: String = "4:3",
+    val aspectRatioOverride: String? = null,
     val sceneLabel: String? = null,
     val objective: String? = null,
-    val privateMode: Boolean = false
+    val privateMode: Boolean = false,
+    val keepOriginal: Boolean = false
 )
