@@ -11,8 +11,11 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 /**
- * Stores the user-supplied Gemini key encrypted with an app-local Android Keystore key.
+ * Stores the user-supplied NVIDIA API key encrypted with an app-local Android Keystore key.
  * The API key is never committed to source, logs, crash messages, or Director recipes.
+ *
+ * v2 intentionally uses new preference keys so an old Gemini key is never accidentally sent
+ * to NVIDIA after upgrading the app. The user must enter an NVIDIA NIM API key once.
  */
 class SecureApiKeyStore(context: Context) {
     private val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -68,9 +71,9 @@ class SecureApiKeyStore(context: Context) {
 
     companion object {
         private const val PREFS = "director_secure_settings"
-        private const val ALIAS = "director_gemini_key_v1"
-        private const val KEY_CIPHERTEXT = "gemini_ciphertext"
-        private const val KEY_IV = "gemini_iv"
+        private const val ALIAS = "director_nvidia_key_v2"
+        private const val KEY_CIPHERTEXT = "nvidia_ciphertext_v2"
+        private const val KEY_IV = "nvidia_iv_v2"
         private const val TRANSFORMATION = "AES/GCM/NoPadding"
     }
 }
