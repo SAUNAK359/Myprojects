@@ -15,8 +15,8 @@ jobs:
 
       - restore_cache:
           keys:
-            - director-gradle-v5-{{ checksum "Director/gradle.properties" }}
-            - director-gradle-v5-
+            - director-gradle-v6-{{ checksum "Director/gradle.properties" }}
+            - director-gradle-v6-
 
       - run:
           name: Prepare Java 17 and Android SDK 36
@@ -119,7 +119,18 @@ jobs:
             RC=${PIPESTATUS[0]}
             set -e
 
+            if [ -f app/build/intermediates/lint_intermediate_text_report/debug/lintReportDebug/lint-results-debug.txt ]; then
+              cp app/build/intermediates/lint_intermediate_text_report/debug/lintReportDebug/lint-results-debug.txt \
+                /tmp/director-diagnostics/lint-results-debug.txt
+            fi
+
             if [ "$RC" -ne 0 ]; then
+              if [ -s /tmp/director-diagnostics/lint-results-debug.txt ]; then
+                echo
+                echo '================ FULL ANDROID LINT REPORT ============'
+                cat /tmp/director-diagnostics/lint-results-debug.txt
+                echo '======================================================'
+              fi
               echo
               echo '================ EXACT GRADLE FAILURE ================'
               grep -nE '^e: |error:|Lint found|Unresolved reference|Syntax error|Compilation error|OutOfMemory|daemon disappeared|DaemonDisappearedException|Caused by:|Execution failed|FAILED' \
@@ -136,19 +147,23 @@ jobs:
             set -euo pipefail
             source "$BASH_ENV"
             cd Director
+            mkdir -p /tmp/director-diagnostics /tmp/director-artifacts
 
             APK="$(find app/build/outputs/apk/debug -type f -name '*.apk' -print -quit)"
             test -n "$APK"
             test -s "$APK"
 
             BUILD_TOOLS="$ANDROID_HOME/build-tools/36.0.0"
-            "$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$APK"
-            "$BUILD_TOOLS/zipalign" -c -P 16 -v 4 "$APK" >/dev/null
-            unzip -t "$APK" >/dev/null
-            unzip -l "$APK" | grep -qE '(^|[[:space:]])classes\.dex$'
-            "$BUILD_TOOLS/aapt2" dump badging "$APK" | head -n 25
+            "$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$APK" \
+              | tee /tmp/director-diagnostics/apksigner.txt
+            "$BUILD_TOOLS/zipalign" -c -P 16 -v 4 "$APK" \
+              > /tmp/director-diagnostics/zipalign.txt
+            unzip -t "$APK" > /tmp/director-diagnostics/unzip-test.txt
+            unzip -l "$APK" > /tmp/director-diagnostics/apk-file-list.txt
+            grep -qE '(^|[[:space:]])classes\.dex$' /tmp/director-diagnostics/apk-file-list.txt
+            "$BUILD_TOOLS/aapt2" dump badging "$APK" > /tmp/director-diagnostics/aapt-badging.txt
+            head -n 25 /tmp/director-diagnostics/aapt-badging.txt
 
-            mkdir -p /tmp/director-artifacts
             cp "$APK" /tmp/director-artifacts/Director-debug.apk
             sha256sum /tmp/director-artifacts/Director-debug.apk \
               | tee /tmp/director-artifacts/Director-debug.apk.sha256
@@ -168,7 +183,7 @@ jobs:
             fi
 
       - save_cache:
-          key: director-gradle-v5-{{ checksum "Director/gradle.properties" }}
+          key: director-gradle-v6-{{ checksum "Director/gradle.properties" }}
           paths:
             - ~/.gradle/caches
             - ~/.gradle/wrapper
