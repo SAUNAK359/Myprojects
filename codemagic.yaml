@@ -47,7 +47,7 @@ workflows:
           test -s third_party/llama.cpp/CMakeLists.txt
           test -s third_party/llama.cpp/include/llama.h
           test -s third_party/llama.cpp/tools/mtmd/mtmd.h
-          test -s third_party/llama.cpp/.director-qwen3vl-pruned-v2
+          test -s third_party/llama.cpp/.director-qwen3vl-pruned-v3
 
       - name: Compile debug APK
         script: |
@@ -166,7 +166,7 @@ workflows:
           test -s third_party/llama.cpp/CMakeLists.txt
           test -s third_party/llama.cpp/include/llama.h
           test -s third_party/llama.cpp/tools/mtmd/mtmd.h
-          test -s third_party/llama.cpp/.director-qwen3vl-pruned-v2
+          test -s third_party/llama.cpp/.director-qwen3vl-pruned-v3
 
       - name: Build and verify release
         script: |
