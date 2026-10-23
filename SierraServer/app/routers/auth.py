@@ -10,7 +10,16 @@ from app.credits import grant
 from app.db import get_db
 from app.models import RefreshToken, User
 from app.schemas import LoginRequest, LogoutRequest, RefreshRequest, SignupRequest, TokenPair, UserView
-from app.security import create_access_token, hash_password, hash_token, new_refresh_token, normalize_email, normalize_phone, refresh_expiry, verify_password
+from app.security import (
+    create_access_token,
+    hash_password,
+    hash_token,
+    new_refresh_token,
+    normalize_email,
+    normalize_phone,
+    refresh_expiry,
+    verify_password,
+)
 
 router = APIRouter(prefix="/v1/auth", tags=["auth"])
 
@@ -36,13 +45,15 @@ def _age(dob: date) -> int:
 
 async def _issue_pair(db: AsyncSession, user: User, request: Request) -> TokenPair:
     raw_refresh, token_hash = new_refresh_token()
-    db.add(RefreshToken(
-        user_id=user.id,
-        token_hash=token_hash,
-        expires_at=refresh_expiry(),
-        user_agent=request.headers.get("user-agent", "")[:300],
-        ip=(request.client.host if request.client else None),
-    ))
+    db.add(
+        RefreshToken(
+            user_id=user.id,
+            token_hash=token_hash,
+            expires_at=refresh_expiry(),
+            user_agent=request.headers.get("user-agent", "")[:300],
+            ip=(request.client.host if request.client else None),
+        )
+    )
     await db.commit()
     return TokenPair(
         access_token=create_access_token(user.id, user.role),
@@ -53,9 +64,14 @@ async def _issue_pair(db: AsyncSession, user: User, request: Request) -> TokenPa
 
 
 @router.post("/signup", response_model=TokenPair, status_code=201)
-async def signup(payload: SignupRequest, request: Request, db: AsyncSession = Depends(get_db)) -> TokenPair:
-    if _age(payload.dob) < settings.min_user_age:
-        raise HTTPException(status_code=422, detail=f"Sierra Vision accounts currently require age {settings.min_user_age}+")
+async def signup(
+    payload: SignupRequest, request: Request, db: AsyncSession = Depends(get_db)
+) -> TokenPair:
+    if settings.min_user_age > 0 and _age(payload.dob) < settings.min_user_age:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Sierra Vision accounts currently require age {settings.min_user_age}+",
+        )
     email = normalize_email(str(payload.email))
     try:
         phone = normalize_phone(payload.phone)
@@ -87,7 +103,9 @@ async def signup(payload: SignupRequest, request: Request, db: AsyncSession = De
 
 
 @router.post("/login", response_model=TokenPair)
-async def login(payload: LoginRequest, request: Request, db: AsyncSession = Depends(get_db)) -> TokenPair:
+async def login(
+    payload: LoginRequest, request: Request, db: AsyncSession = Depends(get_db)
+) -> TokenPair:
     email = normalize_email(str(payload.email))
     user = await db.scalar(select(User).where(User.email == email))
     now = datetime.now(timezone.utc)
@@ -101,7 +119,9 @@ async def login(payload: LoginRequest, request: Request, db: AsyncSession = Depe
                 user.locked_until = now + timedelta(minutes=15)
                 user.failed_login_count = 0
             await db.commit()
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid email or password")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid email or password"
+        )
     user.failed_login_count = 0
     user.locked_until = None
     user.last_login_at = now
@@ -110,8 +130,14 @@ async def login(payload: LoginRequest, request: Request, db: AsyncSession = Depe
 
 
 @router.post("/refresh", response_model=TokenPair)
-async def refresh(payload: RefreshRequest, request: Request, db: AsyncSession = Depends(get_db)) -> TokenPair:
-    token = await db.scalar(select(RefreshToken).where(RefreshToken.token_hash == hash_token(payload.refresh_token)).with_for_update())
+async def refresh(
+    payload: RefreshRequest, request: Request, db: AsyncSession = Depends(get_db)
+) -> TokenPair:
+    token = await db.scalar(
+        select(RefreshToken)
+        .where(RefreshToken.token_hash == hash_token(payload.refresh_token))
+        .with_for_update()
+    )
     now = datetime.now(timezone.utc)
     if token is None or token.revoked_at is not None or token.expires_at <= now:
         raise HTTPException(status_code=401, detail="invalid or expired refresh token")
@@ -125,7 +151,9 @@ async def refresh(payload: RefreshRequest, request: Request, db: AsyncSession = 
 
 @router.post("/logout", status_code=204)
 async def logout(payload: LogoutRequest, db: AsyncSession = Depends(get_db)) -> None:
-    token = await db.scalar(select(RefreshToken).where(RefreshToken.token_hash == hash_token(payload.refresh_token)))
+    token = await db.scalar(
+        select(RefreshToken).where(RefreshToken.token_hash == hash_token(payload.refresh_token))
+    )
     if token and token.revoked_at is None:
         token.revoked_at = datetime.now(timezone.utc)
         await db.commit()
