@@ -13,6 +13,20 @@ jobs:
     steps:
       - checkout
 
+      - run:
+          name: Enforce Sierra Server cloud boundary
+          command: |
+            set -euo pipefail
+            SOURCE='Director/app/src/main/java'
+            FORBIDDEN='api\.groq\.com|openrouter\.ai|integrate\.api\.nvidia\.com|generativelanguage\.googleapis\.com|SecureApiKeyStore|AiProviderPreset|MultiProviderVlmRuntime|GeminiVlmRuntime|NvidiaNemotronVlmRuntime'
+            if grep -RniE "$FORBIDDEN" "$SOURCE"; then
+              echo 'ERROR: direct VLM provider configuration/credentials are forbidden in the Sierra Vision APK.'
+              echo 'All cloud AI must route through SierraServerClient.'
+              exit 1
+            fi
+            grep -Rni 'SIERRA_SERVER_BASE_URL' "$SOURCE" Director/app/build.gradle.kts
+            echo 'Sierra Server boundary verified.'
+
       - restore_cache:
           keys:
             - director-gradle-v7-{{ checksum "Director/gradle.properties" }}
