@@ -22,16 +22,24 @@ async def bootstrap_admin() -> None:
         return
     if len(password) < 16:
         raise RuntimeError("bootstrap admin password must be at least 16 characters")
+
+    normalized_email = normalize_email(email)
     async with SessionLocal() as db:
-        existing = await db.scalar(select(User).where(User.email == normalize_email(email)))
+        existing = await db.scalar(select(User).where(User.email == normalized_email))
         if existing:
             if existing.role != "admin":
-                existing.role = "admin"
-                await db.commit()
+                raise RuntimeError(
+                    "SIERRA_ADMIN_BOOTSTRAP_EMAIL belongs to an existing non-admin account; "
+                    "refusing automatic privilege escalation"
+                )
             return
+
         phone = normalize_phone(settings.admin_bootstrap_phone)
+        if await db.scalar(select(User).where(User.phone == phone)):
+            raise RuntimeError("SIERRA_ADMIN_BOOTSTRAP_PHONE already belongs to another account")
+
         admin_user = User(
-            email=normalize_email(email),
+            email=normalized_email,
             phone=phone,
             display_name="Sierra Administrator",
             dob=date.fromisoformat(settings.admin_bootstrap_dob),
@@ -81,4 +89,10 @@ app.include_router(admin.router)
 
 @app.get("/")
 async def root() -> dict:
-    return {"service": "Sierra Vision Server", "version": "0.1.0", "docs": "/docs", "health": "/health/ready"}
+    return {
+        "service": "Sierra Vision Server",
+        "version": "0.1.0",
+        "docs": "/docs",
+        "health": "/health/ready",
+        "admin": "/admin/login",
+    }
