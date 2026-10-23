@@ -73,6 +73,7 @@ data class DirectorUiState(
     val showSettings: Boolean = false,
     val showTools: Boolean = false,
     val showGallery: Boolean = false,
+    val showAccount: Boolean = false,
     val galleryItems: List<String> = emptyList(),
     val gridEnabled: Boolean = false,
     val levelEnabled: Boolean = false,
@@ -82,5 +83,13 @@ data class DirectorUiState(
     val sceneLabel: String? = null,
     val objective: String? = null,
     val privateMode: Boolean = false,
-    val keepOriginal: Boolean = false
+    val keepOriginal: Boolean = false,
+    val serverConfigured: Boolean = false,
+    val signedIn: Boolean = false,
+    val accountBusy: Boolean = false,
+    val accountError: String? = null,
+    val userDisplayName: String? = null,
+    val userEmail: String? = null,
+    val creditsAvailable: Int? = null,
+    val creditsReserved: Int = 0
 )
