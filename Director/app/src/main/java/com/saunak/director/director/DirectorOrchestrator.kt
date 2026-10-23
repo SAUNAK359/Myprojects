@@ -27,9 +27,7 @@ class DirectorOrchestrator(
     private val onState: (DirectorUiState) -> Unit
 ) {
     private val generation = AtomicLong(0L)
-    private data class Candidate(val file: File, val look: LookSpec, val score: Double, val valid: Boolean, val accepted: Boolean, val captureNumber: Int)
     private data class ApprovedState(val look: LookSpec, val plan: PlanOutput, val score: Double)
-
     @Volatile private var approved: ApprovedState? = null
 
     fun isPrepared(): Boolean = approved != null
@@ -80,9 +78,6 @@ class DirectorOrchestrator(
                 }
                 assertCurrent(session)
                 val branch = skills.resolveBranch(plan.skillBranch)
-                val candidates = mutableListOf(
-                    Candidate(reference, LookSpec(), CapturePolicy.combinedFallbackScore(plan.referenceScore, referenceQuality.heuristicScore), true, plan.referenceAccept, 1)
-                )
                 val physicalBudget = CapturePolicy.physicalBudget(thermalPolicy.maxPhysicalCaptures)
 
                 emit(session, DirectorUiState(DirectorStage.APPLYING, true, "Composing the shot…", camera = camera.uiState()))
@@ -90,9 +85,11 @@ class DirectorOrchestrator(
                 assertCurrent(session)
                 caps = camera.capabilities()
                 var look = initialExecution.look
+                val finalCalls = initialExecution.applied.toMutableList()
                 var issues = initialExecution.rejected.map { "tool_${it.call.id}:${it.reason}" }.take(8)
                 var physicalCaptures = 1
                 var currentFile = reference
+                var lastScore = CapturePolicy.combinedFallbackScore(plan.referenceScore, referenceQuality.heuristicScore)
 
                 if (initialExecution.requiresRecapture && physicalCaptures < physicalBudget) {
                     camera.awaitSettledState()
@@ -122,12 +119,9 @@ class DirectorOrchestrator(
                             caps
                         ).getOrElse { break }
                         assertCurrent(session)
-                        val score = CapturePolicy.combinedFallbackScore(eval.score, quality.heuristicScore)
-                        val accepted = CapturePolicy.accepted(eval, quality.catastrophic)
-                        candidates += Candidate(currentFile, look, score, !quality.catastrophic, accepted, physicalCaptures)
-
-                        if (accepted) {
-                            approve(session, plan, look, score)
+                        lastScore = CapturePolicy.combinedFallbackScore(eval.score, quality.heuristicScore)
+                        if (CapturePolicy.accepted(eval, quality.catastrophic)) {
+                            approve(session, plan.copy(toolCalls = finalCalls.toList()), look, lastScore)
                             return null
                         }
 
@@ -136,10 +130,11 @@ class DirectorOrchestrator(
                         val deltaInput = if (physicalCaptures < physicalBudget) eval.deltaCalls else eval.deltaCalls.filter { it.id in ToolIds.LOOK_IDS }
                         if (deltaInput.isEmpty()) break
 
-                        emit(session, DirectorUiState(DirectorStage.CORRECTING, true, "Refining camera…", attempt = physicalCaptures, lastScore = score, camera = camera.uiState()))
+                        emit(session, DirectorUiState(DirectorStage.CORRECTING, true, "Refining camera…", attempt = physicalCaptures, lastScore = lastScore, camera = camera.uiState()))
                         val delta = tools.apply(deltaInput, caps, look)
                         assertCurrent(session)
                         if (delta.applied.isEmpty()) break
+                        mergeCalls(finalCalls, delta.applied)
                         caps = camera.capabilities()
                         look = delta.look
                         issues = (delta.rejected.map { "tool_${it.call.id}:${it.reason}" } + issues).distinct().take(8)
@@ -158,12 +153,11 @@ class DirectorOrchestrator(
                     }
                 }
 
-                val best = candidates.filter { it.valid }.maxByOrNull { it.score }
-                if (best != null && best.score >= 0.82) {
-                    approve(session, plan, best.look, best.score, "Best achievable setup ready")
+                if (lastScore >= 0.82) {
+                    approve(session, plan.copy(toolCalls = finalCalls.toList()), look, lastScore, "Best achievable setup ready")
                 } else {
                     tools.restoreUserState()
-                    emit(session, DirectorUiState(DirectorStage.READY, true, "Couldn’t improve enough — try reframing", lastScore = best?.score, camera = camera.uiState()))
+                    emit(session, DirectorUiState(DirectorStage.READY, true, "Couldn’t improve enough — try reframing", lastScore = lastScore, camera = camera.uiState()))
                 }
                 return null
             } finally {
@@ -179,6 +173,13 @@ class DirectorOrchestrator(
             return null
         } finally {
             storage.cleanup(created)
+        }
+    }
+
+    private fun mergeCalls(target: MutableList<ToolCall>, updates: List<ToolCall>) {
+        updates.forEach { call ->
+            target.removeAll { it.id == call.id }
+            target += call
         }
     }
 
