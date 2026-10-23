@@ -10,6 +10,7 @@ object ToolIds {
     const val TORCH = 4
     const val FLASH = 5
     const val EXTENSION = 6
+    const val COMPOSITION = 7
 
     const val LOOK_NATURAL = 30
     const val LOOK_WARM = 31
@@ -61,6 +62,11 @@ object ToolCatalog {
             }.distinct()
             if (modes.isNotEmpty()) add("6 extension(s:${modes.joinToString("|")}) recapture; exclusive with focus/zoom/exposure/torch/flash")
         }
+
+        // Semantic composition intent. Sierra AI may request one of these ratios and an optional
+        // normalized crop center. Sierra β consumes this before hardware execution, validates it,
+        // and applies the crop locally after the full-quality capture. It never reaches Camera2.
+        add("7 composition(s:4:3|3:2|4:5|1:1|16:9|9:16|2.39:1,x:0..1 optional crop center,y:0..1 optional crop center) no recapture")
 
         add("30 natural(v:0..1 optional strength)")
         add("31 warm(v:0..1 optional strength)")
