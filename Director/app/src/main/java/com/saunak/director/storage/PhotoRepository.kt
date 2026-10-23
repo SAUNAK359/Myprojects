@@ -88,6 +88,13 @@ class PhotoRepository(private val context: Context) {
         }
     }
 
+    /** Preserve the untouched CameraX JPEG in a separate Originals album only when requested. */
+    suspend fun saveOriginal(file: File): Uri = saveRawJpeg(
+        file = file,
+        relativePath = "Pictures/Sierra Vision/Originals",
+        prefix = "SIERRA_ORIGINAL"
+    )
+
     private fun cropToRatio(
         source: Bitmap,
         ratioWidth: Int,
@@ -118,9 +125,13 @@ class PhotoRepository(private val context: Context) {
         return Bitmap.createBitmap(source, left, top, cropWidth, cropHeight)
     }
 
-    suspend fun saveRawJpeg(file: File): Uri = withContext(Dispatchers.IO) {
+    suspend fun saveRawJpeg(
+        file: File,
+        relativePath: String = "Pictures/Sierra Vision",
+        prefix: String = "SIERRA"
+    ): Uri = withContext(Dispatchers.IO) {
         require(file.isFile && file.length() > 0) { "Reference JPEG missing" }
-        val uri = createPendingMediaUri(file.nameWithoutExtension)
+        val uri = createPendingMediaUri(file.nameWithoutExtension, relativePath, prefix)
         try {
             context.contentResolver.openOutputStream(uri, "w")!!.use { out -> file.inputStream().use { it.copyTo(out) } }
             commitMediaUri(uri)
@@ -132,7 +143,7 @@ class PhotoRepository(private val context: Context) {
     }
 
     suspend fun saveProcessed(bitmap: Bitmap, sourceFile: File): Uri = withContext(Dispatchers.IO) {
-        val uri = createPendingMediaUri(sourceFile.nameWithoutExtension)
+        val uri = createPendingMediaUri(sourceFile.nameWithoutExtension, "Pictures/Sierra Vision", "SIERRA")
         try {
             context.contentResolver.openOutputStream(uri, "w")!!.use { out -> check(bitmap.compress(Bitmap.CompressFormat.JPEG, 96, out)) }
             copySafeExif(sourceFile, uri)
@@ -144,12 +155,12 @@ class PhotoRepository(private val context: Context) {
         }
     }
 
-    private fun createPendingMediaUri(stem: String): Uri {
+    private fun createPendingMediaUri(stem: String, relativePath: String, prefix: String): Uri {
         val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(System.currentTimeMillis())
         val values = ContentValues().apply {
-            put(MediaStore.Images.Media.DISPLAY_NAME, "SIERRA_${timestamp}_${stem.takeLast(10)}.jpg")
+            put(MediaStore.Images.Media.DISPLAY_NAME, "${prefix}_${timestamp}_${stem.takeLast(10)}.jpg")
             put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-            put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/Sierra Vision")
+            put(MediaStore.Images.Media.RELATIVE_PATH, relativePath)
             put(MediaStore.Images.Media.IS_PENDING, 1)
         }
         return context.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: error("Could not create gallery image")
@@ -177,7 +188,7 @@ class PhotoRepository(private val context: Context) {
                     ExifInterface.TAG_FLASH,
                     ExifInterface.TAG_WHITE_BALANCE
                 )
-                tags.forEach { tag -> src.getAttribute(tag)?.let { dst.setAttribute(tag, it) }
+                tags.forEach { tag -> src.getAttribute(tag)?.let { dst.setAttribute(tag, it) } }
                 dst.setAttribute(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL.toString())
                 dst.saveAttributes()
             }
@@ -212,6 +223,7 @@ object SierraCropPolicy {
         "2.39:1" to (239 to 100)
     )
 
+    val supported: List<String> = ratios.keys.toList()
     fun ratioOrNull(value: String): Pair<Int, Int>? = ratios[value.trim()]
     fun isSupported(value: String): Boolean = ratioOrNull(value) != null
 }
