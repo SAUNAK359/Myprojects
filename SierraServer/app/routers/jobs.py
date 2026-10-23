@@ -30,8 +30,6 @@ def _view(job: Job, user: User) -> JobView:
         plan=SierraPlan.model_validate(job.plan) if job.plan else None,
         error_code=job.error_code,
         error_message=job.error_message,
-        provider_name=job.provider_name,
-        provider_model=job.provider_model,
         created_at=job.created_at,
         ready_expires_at=job.ready_expires_at,
         credits=CreditView(
@@ -107,8 +105,6 @@ async def create_job(
     try:
         await db.flush()
     except IntegrityError:
-        # A concurrent retry with the same key won the unique-key race. Return that exact job
-        # rather than creating a second reservation or charging twice.
         await db.rollback()
         winner = await _existing_job(db, user.id, idempotency_key)
         if winner is None:
@@ -151,13 +147,14 @@ async def complete_job(
     user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
 ) -> JobView:
-    del payload  # final photo remains on-device; request confirms final capture completed
     job = await db.scalar(
         select(Job).where(Job.id == job_id, Job.user_id == user.id).with_for_update()
     )
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
     if job.state == "completed":
+        if job.capture_id and job.capture_id != payload.capture_id:
+            raise HTTPException(status_code=409, detail="job was completed by a different capture")
         await db.refresh(user)
         return _view(job, user)
     if job.state != "ready":
@@ -169,6 +166,7 @@ async def complete_job(
         raise HTTPException(status_code=409, detail="job expired before final capture confirmation")
 
     user = await commit_job_credit(db, job)
+    job.capture_id = payload.capture_id
     job.state = "completed"
     job.completed_at = datetime.now(timezone.utc)
     job.error_code = None
