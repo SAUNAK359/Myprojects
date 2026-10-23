@@ -36,16 +36,16 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Set up Java 17
+      - name: Set up Java 17 + Gradle cache
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-
-      - name: Set up Gradle cache
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          cache-read-only: ${{ github.event_name == 'pull_request' }}
+          cache: gradle
+          cache-dependency-path: |
+            Director/**/*.gradle*
+            Director/gradle.properties
+            Director/settings.gradle.kts
 
       - name: Install Android SDK 36
         shell: bash
