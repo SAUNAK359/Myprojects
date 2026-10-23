@@ -94,6 +94,7 @@ class Job(Base):
     error_code: Mapped[str | None] = mapped_column(String(80))
     error_message: Mapped[str | None] = mapped_column(String(300))
     attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    capture_id: Mapped[str | None] = mapped_column(String(120))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
     ready_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
