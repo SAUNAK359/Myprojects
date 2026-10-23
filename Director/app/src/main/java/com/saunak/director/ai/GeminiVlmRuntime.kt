@@ -8,19 +8,23 @@ import com.saunak.director.camera.CapabilityRegistry
 import com.saunak.director.director.EvaluationOutput
 import com.saunak.director.director.PlanOutput
 import com.saunak.director.storage.RecipeMemory
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
 import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 import kotlin.math.max
 
 /** Gemini cloud runtime used by Director when the user supplies an API key in Settings. */
@@ -37,6 +41,7 @@ class GeminiVlmRuntime(
         .writeTimeout(4, TimeUnit.SECONDS)
         .callTimeout(6, TimeUnit.SECONDS)
         .build()
+
     @Volatile private var activeCall: Call? = null
     @Volatile private var maxImageDimension = 896
 
@@ -100,7 +105,7 @@ class GeminiVlmRuntime(
         VlmContractValidator.evaluation(json.decodeFromString(generate(prompt, image)))
     }
 
-    private suspend fun generate(prompt: String, bitmap: Bitmap): String = withContext(Dispatchers.IO) {
+    private suspend fun generate(prompt: String, bitmap: Bitmap): String {
         val key = keyStore.read() ?: error("Gemini API key is not configured")
         val imageBytes = encodeForAi(bitmap)
         val root = JSONObject().apply {
@@ -127,19 +132,32 @@ class GeminiVlmRuntime(
         val call = client.newCall(request)
         activeCall = call
         try {
-            call.execute().use { response ->
+            await(call).use { response ->
                 val body = response.body?.string().orEmpty()
                 if (!response.isSuccessful) error("Gemini request failed (${response.code})")
                 val parsed = JSONObject(body)
                 val candidates = parsed.optJSONArray("candidates") ?: error("Gemini returned no candidate")
                 val parts = candidates.getJSONObject(0).getJSONObject("content").getJSONArray("parts")
-                buildString {
+                return buildString {
                     for (i in 0 until parts.length()) append(parts.getJSONObject(i).optString("text"))
                 }.trim().removePrefix("```json").removePrefix("```").removeSuffix("```").trim()
             }
         } finally {
             if (activeCall === call) activeCall = null
         }
+    }
+
+    private suspend fun await(call: Call): Response = suspendCancellableCoroutine { continuation ->
+        continuation.invokeOnCancellation { call.cancel() }
+        call.enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                if (continuation.isActive) continuation.resumeWithException(e)
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                if (continuation.isActive) continuation.resume(response) else response.close()
+            }
+        })
     }
 
     private fun encodeForAi(source: Bitmap): ByteArray {
@@ -162,7 +180,10 @@ class GeminiVlmRuntime(
     override fun cancel() { activeCall?.cancel() }
     override fun isReady(): Boolean = keyStore.hasKey()
     override fun unload() = Unit
-    override fun close() { activeCall?.cancel(); client.dispatcher.executorService.shutdown() }
+    override fun close() {
+        activeCall?.cancel()
+        client.dispatcher.executorService.shutdown()
+    }
 
     companion object {
         private const val MODEL = "gemini-3.8-flash"
