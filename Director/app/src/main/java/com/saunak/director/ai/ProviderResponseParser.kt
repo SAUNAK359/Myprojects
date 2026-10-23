@@ -1,54 +1,58 @@
 package com.saunak.director.ai
 
-import org.json.JSONArray
-import org.json.JSONObject
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 /**
  * Normalizes OpenAI-compatible chat responses across NVIDIA NIM, OpenRouter, Groq,
  * Gemini's OpenAI facade, and custom providers.
  *
- * Providers are allowed to return message.content as a string, object, or content-part array.
- * Models may also prepend reasoning/prose/fences. This parser extracts only a balanced JSON
- * object that matches Director's expected semantic contract; camera safety is still enforced
- * later by VlmContractValidator + ToolValidator.
+ * Uses kotlinx.serialization rather than Android org.json so the exact same parser can be
+ * exercised by local JVM tests and used on-device.
  */
 object ProviderResponseParser {
     enum class Kind { PLAN, EVALUATION }
 
-    fun messageText(raw: String, providerLabel: String): String {
-        val root = runCatching { JSONObject(raw) }
-            .getOrElse { error("$providerLabel returned unreadable API JSON") }
-        val choices = root.optJSONArray("choices") ?: error("$providerLabel returned no choices")
-        require(choices.length() > 0) { "$providerLabel returned no choices" }
-        val choice = choices.optJSONObject(0) ?: error("$providerLabel returned an invalid choice")
-        val message = choice.optJSONObject("message")
+    private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
-        // Some structured-output implementations expose a parsed object directly.
+    fun messageText(raw: String, providerLabel: String): String {
+        val root = runCatching { json.parseToJsonElement(raw).jsonObject }
+            .getOrElse { error("$providerLabel returned unreadable API JSON") }
+        val choices = root["choices"] as? JsonArray ?: error("$providerLabel returned no choices")
+        require(choices.isNotEmpty()) { "$providerLabel returned no choices" }
+        val choice = choices.firstOrNull() as? JsonObject ?: error("$providerLabel returned an invalid choice")
+        val message = choice["message"] as? JsonObject
+
         if (message != null) {
-            val parsed = message.opt("parsed")
+            val parsed = message["parsed"]
             when (parsed) {
-                is JSONObject -> return parsed.toString()
-                is JSONArray -> if (parsed.length() > 0) return parsed.toString()
+                is JsonObject -> return parsed.toString()
+                is JsonArray -> if (parsed.isNotEmpty()) return parsed.toString()
+                else -> Unit
             }
 
-            val content = message.opt("content")
+            val content = message["content"]
             val text = contentToText(content)
             if (text.isNotBlank()) return text
         }
 
-        // Legacy/OpenAI-compatible completion fallback.
-        val choiceText = choice.optString("text").trim()
+        val choiceText = (choice["text"] as? JsonPrimitive)?.contentOrNull?.trim().orEmpty()
         if (choiceText.isNotBlank()) return choiceText
         error("$providerLabel returned empty output")
     }
 
     fun directorJson(text: String, kind: Kind): String {
         val trimmed = text.trim()
-
-        // Fast path: response is already a JSON object.
         parseCandidate(trimmed, kind)?.let { return it.toString() }
 
-        // Common markdown wrappers.
         val unfenced = trimmed
             .removePrefix("```json")
             .removePrefix("```JSON")
@@ -57,9 +61,6 @@ object ProviderResponseParser {
             .trim()
         parseCandidate(unfenced, kind)?.let { return it.toString() }
 
-        // Models can prepend reasoning or prose. Do not use first-{ / last-}; scan balanced
-        // objects while respecting quoted strings and escapes, then select the object matching
-        // the Director contract.
         for (candidate in balancedObjects(trimmed)) {
             parseCandidate(candidate, kind)?.let { return it.toString() }
         }
@@ -67,50 +68,51 @@ object ProviderResponseParser {
         throw IllegalArgumentException("AI provider returned non-JSON output")
     }
 
-    private fun contentToText(content: Any?): String = when (content) {
-        null, JSONObject.NULL -> ""
-        is String -> content.trim()
-        is JSONObject -> content.toString()
-        is JSONArray -> buildString {
-            for (i in 0 until content.length()) {
-                when (val part = content.opt(i)) {
-                    is String -> appendLine(part)
-                    is JSONObject -> {
-                        val type = part.optString("type")
-                        val text = when {
-                            part.has("text") -> part.optString("text")
-                            part.has("content") -> part.optString("content")
-                            type == "output_text" && part.has("value") -> part.optString("value")
-                            else -> ""
-                        }
+    private fun contentToText(content: JsonElement?): String = when (content) {
+        null, JsonNull -> ""
+        is JsonPrimitive -> content.contentOrNull?.trim().orEmpty()
+        is JsonObject -> content.toString()
+        is JsonArray -> buildString {
+            for (part in content) {
+                when (part) {
+                    is JsonPrimitive -> part.contentOrNull?.takeIf { it.isNotBlank() }?.let { appendLine(it) }
+                    is JsonObject -> {
+                        val type = (part["type"] as? JsonPrimitive)?.contentOrNull.orEmpty()
+                        val text = sequenceOf("text", "content")
+                            .mapNotNull { key -> (part[key] as? JsonPrimitive)?.contentOrNull }
+                            .firstOrNull { it.isNotBlank() }
+                            ?: if (type == "output_text") (part["value"] as? JsonPrimitive)?.contentOrNull.orEmpty() else ""
                         if (text.isNotBlank()) appendLine(text)
                     }
+                    else -> Unit
                 }
             }
         }.trim()
-        else -> content.toString().trim()
     }
 
-    private fun parseCandidate(candidate: String, kind: Kind): JSONObject? {
-        val obj = runCatching { JSONObject(candidate) }.getOrNull() ?: return null
-        findMatchingObject(obj, kind)?.let { return it }
-        return null
+    private fun parseCandidate(candidate: String, kind: Kind): JsonObject? {
+        val obj = runCatching { json.parseToJsonElement(candidate).jsonObject }.getOrNull() ?: return null
+        return findMatchingObject(obj, kind)
     }
 
-    private fun findMatchingObject(obj: JSONObject, kind: Kind, depth: Int = 0): JSONObject? {
+    private fun findMatchingObject(obj: JsonObject, kind: Kind, depth: Int = 0): JsonObject? {
         if (matches(obj, kind)) return obj
-        if (depth >= 2) return null
+        if (depth >= 3) return null
         val wrapperKeys = arrayOf("result", "output", "response", "data", "analysis", "plan", "evaluation")
         for (key in wrapperKeys) {
-            val child = obj.optJSONObject(key) ?: continue
+            val child = obj[key] as? JsonObject ?: continue
             findMatchingObject(child, kind, depth + 1)?.let { return it }
         }
         return null
     }
 
-    private fun matches(obj: JSONObject, kind: Kind): Boolean = when (kind) {
-        Kind.PLAN -> obj.optString("scene").isNotBlank() && obj.optString("objective").isNotBlank()
-        Kind.EVALUATION -> obj.has("score") && !obj.isNull("score")
+    private fun matches(obj: JsonObject, kind: Kind): Boolean = when (kind) {
+        Kind.PLAN -> {
+            val scene = (obj["scene"] as? JsonPrimitive)?.contentOrNull.orEmpty()
+            val objective = (obj["objective"] as? JsonPrimitive)?.contentOrNull.orEmpty()
+            scene.isNotBlank() && objective.isNotBlank()
+        }
+        Kind.EVALUATION -> obj["score"] != null && obj["score"] !is JsonNull
     }
 
     internal fun balancedObjects(text: String): List<String> {
