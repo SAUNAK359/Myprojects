@@ -9,14 +9,14 @@ commands:
           command: |
             cat >> "$BASH_ENV" <<'EOF'
             export SIERRA_ENV=test
-            export SIERRA_JWT_SECRET=0123456789012345678901234567890123456789
-            export SIERRA_PROVIDER_MASTER_KEY=j9fYzPzGZRXnZN4oWg_2-ZE6fAKh4CrJz8X3rOMbTgI=
             export SIERRA_DATABASE_URL=postgresql+asyncpg://sierra:test@127.0.0.1:5432/sierra_test
             EOF
+            printf 'export SIERRA_JWT_SECRET=%s\n' "$(python -c "print('test-' + 'x' * 40)")" >> "$BASH_ENV"
       - run:
           name: Install Sierra server
           command: |
             set -euo pipefail
+            source "$BASH_ENV"
             cd SierraServer
             python -m pip install --upgrade pip
             pip install '.[dev]'
@@ -32,6 +32,7 @@ jobs:
       - run:
           name: Import config database models schemas
           command: |
+            source "$BASH_ENV"
             cd SierraServer
             python -c 'import app.config; import app.db; import app.models; import app.schemas; print("core OK")'
 
@@ -45,6 +46,7 @@ jobs:
       - run:
           name: Import security and credits
           command: |
+            source "$BASH_ENV"
             cd SierraServer
             python -c 'import app.security; import app.credits; import app.provider_crypto; print("security OK")'
 
@@ -58,6 +60,7 @@ jobs:
       - run:
           name: Import provider and worker stack
           command: |
+            source "$BASH_ENV"
             cd SierraServer
             python -c 'import app.provider_client; import app.provider_router; import app.job_worker; print("provider OK")'
 
@@ -71,6 +74,7 @@ jobs:
       - run:
           name: Import FastAPI application
           command: |
+            source "$BASH_ENV"
             cd SierraServer
             python -c 'import app.main; print("app OK")'
 
@@ -84,6 +88,7 @@ jobs:
       - run:
           name: Static correctness
           command: |
+            source "$BASH_ENV"
             cd SierraServer
             python -m compileall -q app tests scripts
             ruff check app tests scripts
@@ -98,11 +103,55 @@ jobs:
       - run:
           name: Unit tests
           command: |
+            source "$BASH_ENV"
             cd SierraServer
             mkdir -p /tmp/sierra-test-results
             pytest -q --junitxml=/tmp/sierra-test-results/results.xml
       - store_test_results:
           path: /tmp/sierra-test-results
+
+  sierra-android-integration:
+    docker:
+      - image: cimg/android:2026.08
+    resource_class: medium+
+    working_directory: ~/project
+    environment:
+      GRADLE_USER_HOME: /home/circleci/.gradle
+      TERM: dumb
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - sierra-android-gradle-v1-{{ checksum "Director/gradle.properties" }}
+            - sierra-android-gradle-v1-
+      - run:
+          name: Prepare Android SDK 36
+          command: |
+            set -euo pipefail
+            yes | sdkmanager --licenses >/dev/null || true
+            sdkmanager 'platform-tools' 'platforms;android-36' 'build-tools;36.0.0'
+            cd Director
+            printf 'sdk.dir=%s\n' "$ANDROID_HOME" > local.properties
+            chmod +x gradlew
+      - run:
+          name: Compile test and assemble integrated Sierra APK
+          command: |
+            set -euo pipefail
+            cd Director
+            ./gradlew \
+              --no-daemon \
+              --no-parallel \
+              --stacktrace \
+              --max-workers=2 \
+              -Dorg.gradle.jvmargs='-Xmx2560m -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8' \
+              -Pkotlin.compiler.execution.strategy=in-process \
+              -PSIERRA_SERVER_BASE_URL=https://sierra.example.invalid \
+              compileDebugKotlin testDebugUnitTest assembleDebug
+      - save_cache:
+          key: sierra-android-gradle-v1-{{ checksum "Director/gradle.properties" }}
+          paths:
+            - ~/.gradle/caches
+            - ~/.gradle/wrapper
 
 workflows:
   sierra-server-build:
@@ -121,4 +170,6 @@ workflows:
       - sierra-static:
           filters: *server_filter
       - sierra-tests:
+          filters: *server_filter
+      - sierra-android-integration:
           filters: *server_filter
