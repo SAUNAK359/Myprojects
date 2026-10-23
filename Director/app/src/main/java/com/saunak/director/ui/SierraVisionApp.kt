@@ -3,33 +3,75 @@ package com.saunak.director.ui
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.net.Uri
-import android.provider.MediaStore
+import android.util.Size
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.view.PreviewView
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -43,11 +85,13 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.saunak.director.camera.StillFlashMode
 import com.saunak.director.director.DirectorStage
 import com.saunak.director.director.DirectorUiState
 import com.saunak.director.director.SierraMode
+import com.saunak.director.storage.SierraCropPolicy
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import kotlin.math.min
 
 private val SierraInk = Color(0xFF090A0C)
@@ -128,13 +172,20 @@ private fun SierraPermissionDenied(request: () -> Unit) {
 
 @Composable
 private fun SierraCameraScreen(vm: DirectorViewModel) {
-    val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val haptics = LocalHapticFeedback.current
     val ui by vm.ui.collectAsStateWithLifecycle()
     var focusPoint by remember { mutableStateOf<Offset?>(null) }
     var requestedZoom by remember { mutableFloatStateOf(1f) }
     var showStatus by remember { mutableStateOf(false) }
+
+    BackHandler(ui.showGallery || ui.showTools || showStatus) {
+        when {
+            ui.showGallery -> vm.closeGallery()
+            ui.showTools -> vm.dismissTools()
+            showStatus -> showStatus = false
+        }
+    }
 
     LaunchedEffect(ui.camera.zoom) { requestedZoom = ui.camera.zoom }
     LaunchedEffect(focusPoint) { if (focusPoint != null) { delay(850); focusPoint = null } }
@@ -178,15 +229,7 @@ private fun SierraCameraScreen(vm: DirectorViewModel) {
             ui = ui,
             zoom = requestedZoom,
             onZoom = { requestedZoom = it; vm.zoom(it) },
-            onGallery = {
-                val intent = ui.lastSavedUri?.let { value ->
-                    Intent(Intent.ACTION_VIEW).apply {
-                        setDataAndType(Uri.parse(value), "image/jpeg")
-                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                    }
-                } ?: Intent(Intent.ACTION_VIEW, MediaStore.Images.Media.EXTERNAL_CONTENT_URI)
-                runCatching { context.startActivity(intent) }
-            },
+            onGallery = vm::openGallery,
             onCapture = {
                 haptics.performHapticFeedback(if (ui.stage == DirectorStage.PREPARED) HapticFeedbackType.LongPress else HapticFeedbackType.TextHandleMove)
                 vm.primaryCapture()
@@ -199,6 +242,7 @@ private fun SierraCameraScreen(vm: DirectorViewModel) {
             SierraToolsSheet(ui, vm, onClose = vm::dismissTools)
         }
         if (showStatus) SierraStatusSheet(ui, vm, onClose = { showStatus = false })
+        if (ui.showGallery) SierraGallery(ui, vm)
     }
 }
 
@@ -301,7 +345,7 @@ private fun SierraShutter(ui: DirectorUiState, onClick: () -> Unit) {
 @Composable
 private fun SierraToolsSheet(ui: DirectorUiState, vm: DirectorViewModel, onClose: () -> Unit) {
     Surface(color = SierraGraphite, shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp), modifier = Modifier.fillMaxWidth()) {
-        Column(Modifier.navigationBarsPadding().padding(20.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
+        Column(Modifier.navigationBarsPadding().padding(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Text("Camera Tools", color = SierraIvory, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
                 Text("✕", color = SierraIvory, modifier = Modifier.clickable { onClose() }.padding(8.dp))
@@ -310,18 +354,59 @@ private fun SierraToolsSheet(ui: DirectorUiState, vm: DirectorViewModel, onClose
                 SierraTool("Flash", ui.camera.flashMode.wireName.replaceFirstChar { it.uppercase() }) { vm.cycleFlash() }
                 SierraTool("Grid", if (ui.gridEnabled) "On" else "Off") { vm.toggleGrid() }
                 SierraTool("Level", if (ui.levelEnabled) "On" else "Off") { vm.toggleLevel() }
-                SierraTool("Ratio", ui.aspectRatio) { }
             }
+
             HorizontalDivider(color = Color.White.copy(alpha = .08f))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Column {
-                    Text("Private Photography", color = SierraIvory, fontWeight = FontWeight.SemiBold)
-                    Text("Sierra β only · no image leaves device", color = SierraSilver, fontSize = 11.sp)
-                }
-                Switch(checked = ui.privateMode, onCheckedChange = { vm.togglePrivateMode() }, colors = SwitchDefaults.colors(checkedThumbColor = Color.Black, checkedTrackColor = SierraGold))
+            Text("Aspect ratio", color = SierraIvory, fontWeight = FontWeight.SemiBold)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                SierraRatioChip("Sierra", ui.aspectRatioOverride == null) { vm.setAspectRatioOverride(null) }
+                SierraCropPolicy.supported.take(3).forEach { ratio -> SierraRatioChip(ratio, ui.aspectRatioOverride == ratio) { vm.setAspectRatioOverride(ratio) } }
             }
-            Text("Final photos save to Pictures/Sierra Vision. Sierra β remains available even when Sierra AI is unavailable.", color = SierraSilver, fontSize = 11.sp, lineHeight = 16.sp)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                SierraCropPolicy.supported.drop(3).forEach { ratio -> SierraRatioChip(ratio, ui.aspectRatioOverride == ratio) { vm.setAspectRatioOverride(ratio) } }
+            }
+
+            HorizontalDivider(color = Color.White.copy(alpha = .08f))
+            SierraToggleRow(
+                title = "Private Photography",
+                subtitle = "Sierra β only · no analysis frame leaves device",
+                checked = ui.privateMode,
+                onChange = { vm.togglePrivateMode() }
+            )
+            SierraToggleRow(
+                title = "Keep Original",
+                subtitle = "Also save the untouched full-quality CameraX JPEG",
+                checked = ui.keepOriginal,
+                onChange = { vm.toggleKeepOriginal() }
+            )
+            Text("Sierra finals save to Pictures/Sierra Vision. Originals, when enabled, save separately under Originals.", color = SierraSilver, fontSize = 11.sp, lineHeight = 16.sp)
         }
+    }
+}
+
+@Composable
+private fun SierraRatioChip(label: String, selected: Boolean, onClick: () -> Unit) {
+    FilterChip(
+        selected = selected,
+        onClick = onClick,
+        label = { Text(label, fontSize = 10.sp) },
+        colors = FilterChipDefaults.filterChipColors(
+            selectedContainerColor = SierraGold,
+            selectedLabelColor = Color.Black,
+            containerColor = Color.White.copy(alpha = .04f),
+            labelColor = SierraIvory
+        )
+    )
+}
+
+@Composable
+private fun SierraToggleRow(title: String, subtitle: String, checked: Boolean, onChange: () -> Unit) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(title, color = SierraIvory, fontWeight = FontWeight.SemiBold)
+            Text(subtitle, color = SierraSilver, fontSize = 11.sp, lineHeight = 15.sp)
+        }
+        Switch(checked = checked, onCheckedChange = { onChange() }, colors = SwitchDefaults.colors(checkedThumbColor = Color.Black, checkedTrackColor = SierraGold))
     }
 }
 
@@ -337,14 +422,116 @@ private fun SierraStatusSheet(ui: DirectorUiState, vm: DirectorViewModel, onClos
                 SierraStatusRow("Sierra AI", if (ui.aiAvailable && !ui.privateMode) "Available" else if (ui.privateMode) "Disabled by Private Photography" else "Unavailable")
                 SierraStatusRow("Sierra β", "Active")
                 SierraStatusRow("Current intelligence", if (ui.sierraMode == SierraMode.AI) "Sierra AI + Sierra β" else "Sierra β")
-                SierraStatusRow("Composition", ui.aspectRatio)
+                SierraStatusRow("Composition", ui.aspectRatioOverride?.let { "$it locked" } ?: "Sierra Auto")
+                SierraStatusRow("Saving", if (ui.keepOriginal) "Final + Original" else "Sierra Final")
                 HorizontalDivider(color = Color.White.copy(alpha = .08f))
-                Text("Sierra AI directs the photograph when available. Sierra β always validates and executes camera controls locally, and takes over planning automatically when cloud intelligence is unavailable.", color = SierraSilver, fontSize = 12.sp, lineHeight = 18.sp)
+                Text("Sierra AI directs the photograph when available. Sierra β always validates and executes camera controls locally, and takes over planning automatically when cloud intelligence is unavailable or too slow.", color = SierraSilver, fontSize = 12.sp, lineHeight = 18.sp)
                 if (ui.privateMode) Text("Private Photography is active. No cloud analysis will be attempted.", color = SierraSoftGold, fontSize = 12.sp)
                 TextButton(onClick = { vm.togglePrivateMode() }) { Text(if (ui.privateMode) "Disable Private Photography" else "Use Sierra β privately", color = SierraGold) }
             }
         }
     }
+}
+
+@Composable
+private fun SierraGallery(ui: DirectorUiState, vm: DirectorViewModel) {
+    val context = LocalContext.current
+    var selected by remember { mutableStateOf<String?>(null) }
+
+    Box(Modifier.fillMaxSize().background(SierraInk)) {
+        Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Column {
+                    Text("SIERRA VISION", color = SierraIvory, letterSpacing = 3.sp, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                    Text("Gallery", color = SierraSilver, fontSize = 12.sp)
+                }
+                Text("✕", color = SierraIvory, modifier = Modifier.clickable { vm.closeGallery() }.padding(12.dp), fontSize = 20.sp)
+            }
+            if (ui.galleryItems.isEmpty()) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        SierraMark(62.dp)
+                        Text("No Sierra photos yet", color = SierraIvory, fontWeight = FontWeight.SemiBold)
+                        Text("Your finished photographs will appear here.", color = SierraSilver, fontSize = 12.sp)
+                    }
+                }
+            } else {
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(3),
+                    modifier = Modifier.fillMaxSize().padding(horizontal = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(3.dp),
+                    verticalArrangement = Arrangement.spacedBy(3.dp)
+                ) {
+                    items(ui.galleryItems, key = { it }) { value ->
+                        SierraGalleryThumbnail(value) { selected = value }
+                    }
+                }
+            }
+        }
+
+        selected?.let { value ->
+            SierraPhotoViewer(
+                uriString = value,
+                onClose = { selected = null },
+                onOpen = {
+                    runCatching {
+                        context.startActivity(Intent(Intent.ACTION_VIEW).apply {
+                            setDataAndType(Uri.parse(value), "image/jpeg")
+                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        })
+                    }
+                },
+                onShare = {
+                    runCatching {
+                        context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
+                            type = "image/jpeg"
+                            putExtra(Intent.EXTRA_STREAM, Uri.parse(value))
+                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        }, "Share Sierra photo"))
+                    }
+                }
+            )
+        }
+    }
+}
+
+@Composable
+private fun SierraGalleryThumbnail(uriString: String, onClick: () -> Unit) {
+    val bitmap = rememberMediaThumbnail(uriString, 480)
+    Surface(onClick = onClick, color = Color(0xFF17191F), shape = RoundedCornerShape(3.dp), modifier = Modifier.fillMaxWidth().height(150.dp)) {
+        if (bitmap != null) Image(bitmap.asImageBitmap(), contentDescription = "Sierra photo", modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+        else Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 1.5.dp, color = SierraGold) }
+    }
+}
+
+@Composable
+private fun SierraPhotoViewer(uriString: String, onClose: () -> Unit, onOpen: () -> Unit, onShare: () -> Unit) {
+    val bitmap = rememberMediaThumbnail(uriString, 1600)
+    Box(Modifier.fillMaxSize().background(Color.Black)) {
+        if (bitmap != null) {
+            Image(bitmap.asImageBitmap(), contentDescription = "Sierra photograph", modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
+        } else {
+            CircularProgressIndicator(Modifier.align(Alignment.Center), color = SierraGold)
+        }
+        Row(Modifier.fillMaxWidth().statusBarsPadding().padding(16.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+            SierraRoundAction("‹", onClose)
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Surface(onClick = onShare, color = SierraGraphite.copy(alpha = .86f), shape = RoundedCornerShape(18.dp)) { Text("Share", Modifier.padding(horizontal = 14.dp, vertical = 10.dp), color = SierraIvory) }
+                Surface(onClick = onOpen, color = SierraGraphite.copy(alpha = .86f), shape = RoundedCornerShape(18.dp)) { Text("Open", Modifier.padding(horizontal = 14.dp, vertical = 10.dp), color = SierraIvory) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun rememberMediaThumbnail(uriString: String, px: Int): Bitmap? {
+    val context = LocalContext.current
+    val bitmap by produceState<Bitmap?>(initialValue = null, uriString, px) {
+        value = withContext(Dispatchers.IO) {
+            runCatching { context.contentResolver.loadThumbnail(Uri.parse(uriString), Size(px, px), null) }.getOrNull()
+        }
+    }
+    return bitmap
 }
 
 @Composable
@@ -357,7 +544,7 @@ private fun SierraStatusRow(label: String, value: String) {
 
 @Composable
 private fun SierraTool(label: String, value: String, onClick: () -> Unit) {
-    Surface(onClick = onClick, color = Color.White.copy(alpha = .05f), shape = RoundedCornerShape(16.dp), modifier = Modifier.width(76.dp)) {
+    Surface(onClick = onClick, color = Color.White.copy(alpha = .05f), shape = RoundedCornerShape(16.dp), modifier = Modifier.width(100.dp)) {
         Column(Modifier.padding(vertical = 12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
             Text(label, color = SierraIvory, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
             Text(value, color = SierraSilver, fontSize = 9.sp, maxLines = 1)
@@ -395,8 +582,13 @@ private fun SierraCompositionFrame(ui: DirectorUiState) {
 }
 
 private fun parseRatio(value: String): Pair<Float, Float>? = when (value) {
-    "4:3" -> 4f to 3f; "3:2" -> 3f to 2f; "4:5" -> 4f to 5f; "1:1" -> 1f to 1f
-    "16:9" -> 16f to 9f; "9:16" -> 9f to 16f; "2.39:1" -> 2.39f to 1f
+    "4:3" -> 4f to 3f
+    "3:2" -> 3f to 2f
+    "4:5" -> 4f to 5f
+    "1:1" -> 1f to 1f
+    "16:9" -> 16f to 9f
+    "9:16" -> 9f to 16f
+    "2.39:1" -> 2.39f to 1f
     else -> null
 }
 
