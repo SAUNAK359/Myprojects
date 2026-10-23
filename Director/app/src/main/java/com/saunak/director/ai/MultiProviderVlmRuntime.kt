@@ -9,7 +9,9 @@ import com.saunak.director.director.EvaluationOutput
 import com.saunak.director.director.PlanOutput
 import com.saunak.director.storage.RecipeMemory
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
 import okhttp3.Call
@@ -45,7 +47,7 @@ class MultiProviderVlmRuntime(
         .build()
 
     @Volatile private var activeCall: Call? = null
-    @Volatile private var maxImageDimension = 768
+    @Volatile private var maxImageDimension = 640
     @Volatile private var lastSuccessfulRoute: ResolvedAiRoute? = null
 
     override suspend fun load(modelPath: String, projectorPath: String): Result<Unit> =
@@ -57,7 +59,7 @@ class MultiProviderVlmRuntime(
         camera: CameraSnapshot,
         skillContext: String
     ): Result<PlanOutput> = preservingCancellation {
-        val config = deviceSkill.readOrGenerate(capabilities, camera)
+        val config = withContext(Dispatchers.IO) { deviceSkill.readOrGenerate(capabilities, camera) }
         val prompt = """
             You are Director, an elite computational-photography agent controlling a real Android camera.
             Analyze this frame for scene, subject, lighting, motion, depth, composition, mood and probable user intent.
@@ -80,7 +82,10 @@ class MultiProviderVlmRuntime(
             {"scene":"short scene description","objective":"professional target look","branch":"general|portrait|landscape|low_light|motion|group|food|architecture|macro|selfie","reference_score":0.0,"reference_accept":false,"calls":[{"id":1,"v":null,"x":0.5,"y":0.5,"s":null}],"recapture":true}
             Rules: scores 0..1; calls max 8; IDs and parameter ranges MUST come from config; use minimal calls when the current image is already strong.
         """.trimIndent()
-        VlmContractValidator.plan(json.decodeFromString(generate(prompt, image)))
+        val raw = generate(prompt, image)
+        withContext(Dispatchers.Default) {
+            VlmContractValidator.plan(json.decodeFromString(raw))
+        }
     }
 
     override suspend fun evaluate(
@@ -92,7 +97,7 @@ class MultiProviderVlmRuntime(
         evaluationContext: String,
         capabilities: CapabilityRegistry
     ): Result<EvaluationOutput> = preservingCancellation {
-        val config = deviceSkill.readOrGenerate(capabilities, camera)
+        val config = withContext(Dispatchers.IO) { deviceSkill.readOrGenerate(capabilities, camera) }
         val prompt = """
             You are Director's strict photography critic. Evaluate this intermediate capture against the objective.
             Judge technical quality, subject rendering, composition, lighting, color, mood and aesthetics.
@@ -111,16 +116,19 @@ class MultiProviderVlmRuntime(
             {"score":0.0,"technical":0.0,"composition":0.0,"subject":0.0,"aesthetic":0.0,"accept":false,"issues":["short issue"],"delta":[{"id":3,"v":0.17,"x":null,"y":null,"s":null}]}
             Rules: scores 0..1; issues max 8; delta max 8; if approved set accept=true and delta=[].
         """.trimIndent()
-        VlmContractValidator.evaluation(json.decodeFromString(generate(prompt, image)))
+        val raw = generate(prompt, image)
+        withContext(Dispatchers.Default) {
+            VlmContractValidator.evaluation(json.decodeFromString(raw))
+        }
     }
 
     suspend fun validateConnection(preset: AiProviderPreset = settings.selected()): Result<String> = preservingCancellation {
-        val routes = routesFor(preset)
+        val routes = withContext(Dispatchers.IO) { routesFor(preset) }
         if (routes.isEmpty()) error("${preset.label} is not configured")
         var last: Throwable? = null
         for (route in routes) {
             try {
-                request(route, "Reply with exactly OK", image = null, maxTokens = 32)
+                request(route, "Reply with exactly OK", imageDataUrl = null, maxTokens = 32, expectJson = false)
                 lastSuccessfulRoute = route
                 return@preservingCancellation route.preset.label
             } catch (t: Throwable) {
@@ -148,12 +156,19 @@ class MultiProviderVlmRuntime(
     fun activeRouteLabel(): String = lastSuccessfulRoute?.preset?.label ?: settings.selected().label
 
     private suspend fun generate(prompt: String, bitmap: Bitmap): String {
-        val routes = routesFor(settings.selected())
+        // Image preparation used to run on the UI coroutine and was repeated for every failover.
+        // Encode once on a worker thread, keep the payload deliberately small, then reuse it.
+        val imageDataUrl = withContext(Dispatchers.Default) {
+            val jpeg = encodeForAi(bitmap)
+            "data:image/jpeg;base64," + Base64.encodeToString(jpeg, Base64.NO_WRAP)
+        }
+        val routes = withContext(Dispatchers.IO) { routesFor(settings.selected()) }
         if (routes.isEmpty()) error("No configured AI provider for ${settings.selected().label}")
+
         var last: Throwable? = null
         for (route in routes) {
             try {
-                val result = request(route, prompt, bitmap, maxTokens = 1400)
+                val result = request(route, prompt, imageDataUrl, maxTokens = 1400, expectJson = true)
                 lastSuccessfulRoute = route
                 return cleanJson(result)
             } catch (t: Throwable) {
@@ -165,36 +180,52 @@ class MultiProviderVlmRuntime(
         throw last ?: IOException("All configured AI providers failed")
     }
 
-    private suspend fun request(route: ResolvedAiRoute, prompt: String, image: Bitmap?, maxTokens: Int): String {
-        val content = JSONArray().put(JSONObject().put("type", "text").put("text", prompt))
-        if (image != null) {
-            val dataUrl = "data:image/jpeg;base64," + Base64.encodeToString(encodeForAi(image), Base64.NO_WRAP)
-            content.put(JSONObject().put("type", "image_url").put("image_url", JSONObject().put("url", dataUrl)))
-        }
-        val body = JSONObject()
-            .put("model", route.model)
-            .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", content)))
-            .put("temperature", 0.6)
-            .put("top_p", 0.95)
-            .put("max_tokens", maxTokens)
-            .put("stream", false)
+    private suspend fun request(
+        route: ResolvedAiRoute,
+        prompt: String,
+        imageDataUrl: String?,
+        maxTokens: Int,
+        expectJson: Boolean
+    ): String {
+        val request = withContext(Dispatchers.Default) {
+            val content = JSONArray().put(JSONObject().put("type", "text").put("text", prompt))
+            if (imageDataUrl != null) {
+                content.put(
+                    JSONObject()
+                        .put("type", "image_url")
+                        .put("image_url", JSONObject().put("url", imageDataUrl))
+                )
+            }
+            val body = JSONObject()
+                .put("model", route.model)
+                .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", content)))
+                .put("temperature", 0.6)
+                .put("top_p", 0.95)
+                .put("max_tokens", maxTokens)
+                .put("stream", false)
 
-        when (route.preset) {
-            AiProviderPreset.NVIDIA_NEMOTRON -> body.put("chat_template_kwargs", JSONObject().put("enable_thinking", false))
-            AiProviderPreset.GEMINI_38_FLASH -> body.put("reasoning_effort", "low")
-            else -> Unit
-        }
-        if (route.preset != AiProviderPreset.CUSTOM_OPENAI) {
-            body.put("response_format", JSONObject().put("type", "json_object"))
+            when (route.preset) {
+                AiProviderPreset.NVIDIA_NEMOTRON -> body.put("chat_template_kwargs", JSONObject().put("enable_thinking", false))
+                AiProviderPreset.GEMINI_38_FLASH -> body.put("reasoning_effort", "low")
+                else -> Unit
+            }
+            if (expectJson && route.preset != AiProviderPreset.CUSTOM_OPENAI) {
+                body.put("response_format", JSONObject().put("type", "json_object"))
+            }
+
+            Request.Builder()
+                .url(route.endpoint)
+                .header("Authorization", "Bearer ${route.apiKey}")
+                .header("Accept", "application/json")
+                .header("Content-Type", "application/json")
+                .apply {
+                    if (route.preset.name.startsWith("OPENROUTER")) header("X-Title", "Director Camera")
+                }
+                .post(body.toString().toRequestBody(JSON_MEDIA))
+                .build()
         }
 
-        val builder = Request.Builder()
-            .url(route.endpoint)
-            .header("Authorization", "Bearer ${route.apiKey}")
-            .header("Accept", "application/json")
-            .header("Content-Type", "application/json")
-        if (route.preset.name.startsWith("OPENROUTER")) builder.header("X-Title", "Director Camera")
-        val call = client.newCall(builder.post(body.toString().toRequestBody(JSON_MEDIA)).build())
+        val call = client.newCall(request)
         activeCall = call
         try {
             await(call).use { response ->
@@ -227,6 +258,22 @@ class MultiProviderVlmRuntime(
         }
         if (!endpoint.startsWith("https://") || model.isBlank()) return null
         return ResolvedAiRoute(preset, endpoint, model, key)
+    }
+
+    private fun isConfigured(preset: AiProviderPreset): Boolean {
+        if (preset == AiProviderPreset.AUTO) return AiProviderPreset.autoPriority.any(::isConfigured)
+        val id = preset.credentialId ?: return false
+        if (!keyStore.hasKey(id)) return false
+        val endpoint = when (preset) {
+            AiProviderPreset.CUSTOM_OPENAI -> settings.customEndpoint()
+            else -> preset.endpoint.orEmpty()
+        }
+        val model = when (preset) {
+            AiProviderPreset.CUSTOM_OPENAI -> settings.customModel()
+            AiProviderPreset.OPENROUTER_CUSTOM -> settings.openRouterCustomModel()
+            else -> preset.model.orEmpty()
+        }
+        return endpoint.startsWith("https://") && model.isNotBlank()
     }
 
     private fun extractText(route: ResolvedAiRoute, raw: String): String {
@@ -263,14 +310,21 @@ class MultiProviderVlmRuntime(
     }
 
     private fun encodeForAi(source: Bitmap): ByteArray {
+        require(!source.isRecycled) { "Analysis frame is no longer available" }
         val longest = max(source.width, source.height)
+        require(longest > 0) { "Analysis frame is invalid" }
         val prepared = if (longest > maxImageDimension) {
             val scale = maxImageDimension.toFloat() / longest.toFloat()
-            Bitmap.createScaledBitmap(source, maxOf(1, (source.width * scale).toInt()), maxOf(1, (source.height * scale).toInt()), true)
+            Bitmap.createScaledBitmap(
+                source,
+                maxOf(1, (source.width * scale).toInt()),
+                maxOf(1, (source.height * scale).toInt()),
+                true
+            )
         } else source
         return try {
-            ByteArrayOutputStream().use { out ->
-                check(prepared.compress(Bitmap.CompressFormat.JPEG, 80, out))
+            ByteArrayOutputStream(192 * 1024).use { out ->
+                check(prepared.compress(Bitmap.CompressFormat.JPEG, 72, out)) { "Could not encode analysis frame" }
                 out.toByteArray()
             }
         } finally {
@@ -282,13 +336,15 @@ class MultiProviderVlmRuntime(
         Result.success(block())
     } catch (t: CancellationException) {
         throw t
+    } catch (oom: OutOfMemoryError) {
+        Result.failure(IOException("Director ran out of memory preparing the AI frame", oom))
     } catch (t: Throwable) {
         Result.failure(t)
     }
 
-    override fun setMaxImageDimension(pixels: Int) { maxImageDimension = pixels.coerceIn(512, 896) }
+    override fun setMaxImageDimension(pixels: Int) { maxImageDimension = pixels.coerceIn(512, 704) }
     override fun cancel() { activeCall?.cancel() }
-    override fun isReady(): Boolean = routesFor(settings.selected()).isNotEmpty()
+    override fun isReady(): Boolean = isConfigured(settings.selected())
     override fun unload() = Unit
     override fun close() { activeCall?.cancel(); client.dispatcher.executorService.shutdown() }
 
