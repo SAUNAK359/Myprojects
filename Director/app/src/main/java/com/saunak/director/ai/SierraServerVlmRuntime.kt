@@ -15,7 +15,6 @@ import java.util.UUID
 import kotlin.math.max
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -58,23 +57,23 @@ class SierraServerVlmRuntime(
         val quality = PhotoQuality.analyze(image)
         val localQuality = JSONObject().apply {
             put("mean_luma", quality.meanLuma)
-            put("highlight_clip", quality.highlightClip)
-            put("shadow_clip", quality.shadowClip)
-            put("detail", quality.detail)
+            put("luma_std_dev", quality.lumaStdDev)
+            put("highlight_clip", quality.brightClipFraction)
+            put("shadow_clip", quality.darkClipFraction)
+            put("edge_energy", quality.edgeEnergy)
             put("heuristic_score", quality.heuristicScore)
             put("catastrophic", quality.catastrophic)
         }.toString()
         val cameraContext = JSONObject().apply {
             put("snapshot", camera.compactDescription())
             put("lens_facing", capabilities.lensFacing)
-            put("zoom", camera.zoom)
-            put("exposure_index", camera.exposureIndex)
+            put("zoom", camera.zoomRatio)
+            put("exposure_index", camera.exposureCompensationIndex)
             put("extension", camera.extension.wireName)
         }.toString()
 
-        val jpeg = encode(image)
         val created = server.createAnalysisJob(
-            imageJpeg = jpeg,
+            imageJpeg = encode(image),
             cameraContextJson = cameraContext,
             deviceCapabilitiesJson = capabilitySkill,
             localQualityJson = localQuality,
