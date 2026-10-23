@@ -1,7 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -37,6 +37,21 @@ class Settings(BaseSettings):
             raise ValueError("SIERRA_JWT_SECRET must be at least 32 characters")
         return value
 
+    @model_validator(mode="after")
+    def production_safety(self) -> "Settings":
+        if self.is_production:
+            jwt_value = self.jwt_secret.get_secret_value()
+            provider_key = self.provider_master_key.get_secret_value().strip()
+            if "development-only" in jwt_value.lower() or "change_me" in jwt_value.lower():
+                raise ValueError("production requires a generated SIERRA_JWT_SECRET")
+            if not provider_key:
+                raise ValueError("production requires SIERRA_PROVIDER_MASTER_KEY")
+            if "sierra_change_me" in self.database_url:
+                raise ValueError("production database password must be changed")
+            if not self.public_base_url.startswith("https://"):
+                raise ValueError("production requires an HTTPS SIERRA_PUBLIC_BASE_URL")
+        return self
+
     @property
     def cors_origins(self) -> list[str]:
         return [item.strip() for item in self.allowed_origins.split(",") if item.strip()]
@@ -47,7 +62,6 @@ class Settings(BaseSettings):
 
 
 @lru_cache
-
 def get_settings() -> Settings:
     value = Settings()
     value.runtime_dir.mkdir(parents=True, exist_ok=True)
