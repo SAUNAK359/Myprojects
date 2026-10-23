@@ -184,9 +184,13 @@ class MultiProviderVlmRuntime(
                 val result = withTimeout(routeTimeoutMs(route, validation = false)) {
                     request(route, prompt, imageDataUrl, maxTokens = 1050, outputKind = outputKind)
                 }
+                val structured = ProviderResponseParser.directorJson(
+                    result,
+                    if (outputKind == OutputKind.PLAN) ProviderResponseParser.Kind.PLAN else ProviderResponseParser.Kind.EVALUATION
+                )
                 recordSuccess(route.preset, SystemClock.elapsedRealtime() - started)
                 lastSuccessfulRoute = route
-                return cleanJson(result)
+                return structured
             } catch (t: Throwable) {
                 if (t is CancellationException && t !is TimeoutCancellationException) throw t
                 val failure = timeoutAsIo(route, t)
@@ -244,6 +248,9 @@ class MultiProviderVlmRuntime(
 
             if (outputKind != null && route.preset != AiProviderPreset.CUSTOM_OPENAI) {
                 body.put("response_format", responseFormat(route, outputKind))
+                if (route.preset.name.startsWith("OPENROUTER")) {
+                    body.put("provider", JSONObject().put("require_parameters", true))
+                }
             }
 
             Request.Builder()
@@ -264,7 +271,7 @@ class MultiProviderVlmRuntime(
             await(call).use { response ->
                 val raw = response.body?.string().orEmpty()
                 if (!response.isSuccessful) throw ProviderApiException.from(route, response.code, raw)
-                return extractText(route, raw)
+                return ProviderResponseParser.messageText(raw, route.preset.label)
             }
         } finally {
             if (activeCall === call) activeCall = null
@@ -394,7 +401,7 @@ class MultiProviderVlmRuntime(
         }
     }
 
-    private fun parseObject(raw: String): JSONObject = runCatching { JSONObject(cleanJson(raw)) }
+    private fun parseObject(raw: String): JSONObject = runCatching { JSONObject(raw) }
         .getOrElse { throw IllegalArgumentException("AI returned an invalid analysis response", it) }
 
     private fun routesFor(preset: AiProviderPreset): List<ResolvedAiRoute> {
@@ -465,25 +472,6 @@ class MultiProviderVlmRuntime(
             else -> preset.model.orEmpty()
         }
         return endpoint.startsWith("https://") && model.isNotBlank()
-    }
-
-    private fun extractText(route: ResolvedAiRoute, raw: String): String {
-        val parsed = runCatching { JSONObject(raw) }.getOrElse { error("${route.preset.label} returned unreadable JSON") }
-        val choices = parsed.optJSONArray("choices") ?: error("${route.preset.label} returned no choices")
-        if (choices.length() == 0) error("${route.preset.label} returned no choices")
-        val message = choices.optJSONObject(0)?.optJSONObject("message") ?: error("${route.preset.label} returned no message")
-        val content = message.optString("content").trim()
-        if (content.isBlank()) error("${route.preset.label} returned empty output")
-        return content
-    }
-
-    private fun cleanJson(text: String): String {
-        val cleaned = text.trim().removePrefix("```json").removePrefix("```").removeSuffix("```").trim()
-        if (cleaned.startsWith("{") && cleaned.endsWith("}")) return cleaned
-        val start = cleaned.indexOf('{')
-        val end = cleaned.lastIndexOf('}')
-        if (start >= 0 && end > start) return cleaned.substring(start, end + 1)
-        error("AI provider returned non-JSON output")
     }
 
     private suspend fun await(call: Call): Response = suspendCancellableCoroutine { continuation ->
