@@ -5,8 +5,10 @@ import androidx.camera.view.PreviewView
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.viewModelScope
+import com.saunak.director.ai.AiProviderPreset
+import com.saunak.director.ai.AiProviderSettings
 import com.saunak.director.ai.DeviceConfigSkill
-import com.saunak.director.ai.NvidiaNemotronVlmRuntime
+import com.saunak.director.ai.MultiProviderVlmRuntime
 import com.saunak.director.ai.SecureApiKeyStore
 import com.saunak.director.camera.CameraEngine
 import com.saunak.director.camera.StillFlashMode
@@ -30,9 +32,16 @@ import java.util.Locale
 class DirectorViewModel(app: Application) : AndroidViewModel(app) {
     private val camera = CameraEngine(app)
     private val keyStore = SecureApiKeyStore(app)
+    private val providerSettings = AiProviderSettings(app)
     private val recipeMemory = RecipeMemory(app)
     private val deviceConfigSkill = DeviceConfigSkill(app)
-    private val runtime = NvidiaNemotronVlmRuntime(app, keyStore = keyStore, deviceSkill = deviceConfigSkill, recipeMemory = recipeMemory)
+    private val runtime = MultiProviderVlmRuntime(
+        app,
+        keyStore = keyStore,
+        settings = providerSettings,
+        deviceSkill = deviceConfigSkill,
+        recipeMemory = recipeMemory
+    )
     private val repository = PhotoRepository(app)
     private val orchestrator = DirectorOrchestrator(
         camera = camera,
@@ -45,7 +54,7 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
     ) { state ->
         _ui.value = state.copy(
             camera = runCatching { camera.uiState() }.getOrDefault(state.camera),
-            hasApiKey = keyStore.hasKey(),
+            hasApiKey = runtime.isReady(),
             recipeCount = recipeMemory.count(),
             showSettings = _ui.value.showSettings,
             showTools = _ui.value.showTools,
@@ -56,10 +65,10 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _ui = MutableStateFlow(
         DirectorUiState(
-            hasApiKey = keyStore.hasKey(),
-            aiAvailable = keyStore.hasKey(),
+            hasApiKey = runtime.isReady(),
+            aiAvailable = runtime.isReady(),
             recipeCount = recipeMemory.count(),
-            status = if (keyStore.hasKey()) "Camera ready • Nemotron configured" else "Camera ready • add NVIDIA key"
+            status = if (runtime.isReady()) "Camera ready • ${runtime.selectedPreset().label}" else "Camera ready • configure AI provider"
         )
     )
     val ui: StateFlow<DirectorUiState> = _ui.asStateFlow()
@@ -91,7 +100,7 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
                     withContext(Dispatchers.IO) {
                         runCatching { deviceConfigSkill.refresh(camera.capabilities(), camera.snapshot()) }
                     }
-                    refreshCamera("Camera ready${if (keyStore.hasKey()) " • Nemotron online" else " • add NVIDIA key"}")
+                    refreshCamera("Camera ready${if (runtime.isReady()) " • ${runtime.selectedPreset().label}" else " • configure AI"}")
                 }
                 .onFailure {
                     _ui.value = _ui.value.copy(stage = DirectorStage.ERROR, status = "Camera unavailable", error = it.message)
@@ -99,9 +108,7 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun primaryCapture() {
-        viewModelScope.launch { orchestrator.onPrimaryPressed() }
-    }
+    fun primaryCapture() { viewModelScope.launch { orchestrator.onPrimaryPressed() } }
 
     fun focus(x: Float, y: Float) {
         orchestrator.cancelForUserAction()
@@ -158,83 +165,128 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
     fun toggleGrid() { _ui.value = _ui.value.copy(gridEnabled = !_ui.value.gridEnabled) }
     fun toggleLevel() { _ui.value = _ui.value.copy(levelEnabled = !_ui.value.levelEnabled) }
 
-    fun saveApiKey(value: String): String? = runCatching {
-        keyStore.save(value)
+    fun providerPresets(): List<AiProviderPreset> = runtime.presets()
+    fun selectedProvider(): AiProviderPreset = runtime.selectedPreset()
+    fun providerHasCredential(preset: AiProviderPreset): Boolean = runtime.hasCredential(preset)
+    fun openRouterCustomModel(): String = runtime.openRouterCustomModel()
+    fun customEndpoint(): String = runtime.customEndpoint()
+    fun customModel(): String = runtime.customModel()
+
+    fun selectProvider(preset: AiProviderPreset) {
+        orchestrator.cancelForUserAction()
+        runtime.selectPreset(preset)
+        val ready = runtime.isReady()
         _ui.value = _ui.value.copy(
-            hasApiKey = true,
-            aiAvailable = true,
-            showSettings = false,
-            status = "Checking NVIDIA connection…",
+            hasApiKey = ready,
+            aiAvailable = ready,
+            stage = if (ready) DirectorStage.READY else DirectorStage.CAMERA_ONLY,
+            status = if (ready) "Selected • ${preset.label}" else if (preset == AiProviderPreset.AUTO) "Auto • add at least one provider key" else "${preset.label} • add API key",
+            error = null
+        )
+    }
+
+    fun saveProvider(
+        preset: AiProviderPreset,
+        apiKey: String,
+        endpoint: String = "",
+        model: String = ""
+    ): String? = runCatching {
+        require(preset != AiProviderPreset.AUTO) { "Choose a provider before adding a key" }
+        if (preset == AiProviderPreset.CUSTOM_OPENAI) {
+            require(endpoint.trim().startsWith("https://")) { "Custom endpoint must use HTTPS" }
+            require(model.isNotBlank()) { "Custom model ID is required" }
+            runtime.saveCustomRoute(endpoint, model)
+        }
+        if (preset == AiProviderPreset.OPENROUTER_CUSTOM) {
+            require(model.isNotBlank()) { "OpenRouter model ID is required" }
+            runtime.saveOpenRouterCustomModel(model)
+        }
+        if (apiKey.isNotBlank()) runtime.saveCredential(preset, apiKey)
+        require(runtime.hasCredential(preset)) { "API key is required" }
+        runtime.selectPreset(preset)
+        _ui.value = _ui.value.copy(
+            hasApiKey = runtime.isReady(),
+            aiAvailable = false,
+            status = "Testing ${preset.label}…",
             error = null
         )
         viewModelScope.launch {
-            runtime.validateConnection()
-                .onSuccess {
+            runtime.validateConnection(preset)
+                .onSuccess { label ->
                     _ui.value = _ui.value.copy(
                         hasApiKey = true,
                         aiAvailable = true,
                         stage = DirectorStage.READY,
-                        status = "Nemotron connected • Director ready",
+                        status = "$label connected • Director ready",
                         error = null
                     )
                 }
                 .onFailure { failure ->
                     _ui.value = _ui.value.copy(
-                        hasApiKey = true,
+                        hasApiKey = runtime.isReady(),
                         aiAvailable = false,
                         stage = DirectorStage.ERROR,
-                        status = nvidiaFailureMessage(failure),
+                        status = providerFailureMessage(failure),
                         error = failure.message
                     )
                 }
         }
         null
-    }.getOrElse { it.message ?: "Could not save NVIDIA key" }
+    }.getOrElse { it.message ?: "Could not save provider" }
 
-    fun clearApiKey() {
+    fun clearProvider(preset: AiProviderPreset) {
         orchestrator.cancelForUserAction()
-        keyStore.clear()
+        runtime.clearCredential(preset)
+        val ready = runtime.isReady()
         _ui.value = _ui.value.copy(
-            hasApiKey = false,
-            aiAvailable = false,
-            showSettings = false,
-            stage = DirectorStage.CAMERA_ONLY,
-            status = "Camera ready • add NVIDIA key",
+            hasApiKey = ready,
+            aiAvailable = ready,
+            stage = if (ready) DirectorStage.READY else DirectorStage.CAMERA_ONLY,
+            status = if (ready) "Provider key removed • another route is available" else "Camera ready • configure AI provider",
             error = null
         )
     }
 
-    private fun nvidiaFailureMessage(t: Throwable): String {
+    /** Backward-compatible hook for older Settings UI. */
+    fun saveApiKey(value: String): String? {
+        val preset = selectedProvider().takeUnless { it == AiProviderPreset.AUTO } ?: AiProviderPreset.NVIDIA_NEMOTRON
+        return saveProvider(preset, value)
+    }
+
+    fun clearApiKey() {
+        val preset = selectedProvider().takeUnless { it == AiProviderPreset.AUTO } ?: AiProviderPreset.NVIDIA_NEMOTRON
+        clearProvider(preset)
+    }
+
+    private fun providerFailureMessage(t: Throwable): String {
         val message = t.message.orEmpty().trim()
         val lower = message.lowercase()
         return when {
-            "401" in lower || "invalid" in lower && "key" in lower -> "NVIDIA key invalid • update it in Settings"
-            "402" in lower || "credits" in lower || "billing" in lower -> "NVIDIA credits required for this endpoint"
-            "403" in lower || "blocked" in lower -> "NVIDIA access blocked • check API key"
-            "404" in lower || "model" in lower && "unavailable" in lower -> "Nemotron endpoint unavailable"
-            "429" in lower || "rate limit" in lower -> "NVIDIA free-tier limit reached • try later"
-            "timeout" in lower || "timed out" in lower -> "Nemotron response timed out • try again"
-            message.isNotBlank() -> "NVIDIA API error • ${message.take(96)}"
-            else -> "NVIDIA connection failed"
+            "401" in lower || "invalid" in lower && "key" in lower -> "API key invalid • update it in Settings"
+            "402" in lower || "credits" in lower || "billing" in lower -> "Provider credits/billing required"
+            "403" in lower || "blocked" in lower -> "Provider access blocked • check key/account"
+            "404" in lower || "unavailable" in lower -> "Selected model/endpoint unavailable"
+            "429" in lower || "rate limit" in lower -> "Provider rate limit reached • switch route or retry"
+            "timeout" in lower || "timed out" in lower -> "AI provider timed out • switch route or retry"
+            message.isNotBlank() -> "AI provider error • ${message.take(96)}"
+            else -> "AI provider connection failed"
         }
     }
 
     private fun refreshCamera(status: String = _ui.value.status) {
+        val ready = runtime.isReady()
         _ui.value = _ui.value.copy(
             camera = runCatching { camera.uiState() }.getOrDefault(_ui.value.camera),
             status = status,
-            hasApiKey = keyStore.hasKey(),
-            aiAvailable = keyStore.hasKey(),
+            hasApiKey = ready,
+            aiAvailable = ready,
             recipeCount = recipeMemory.count(),
-            stage = if (keyStore.hasKey()) DirectorStage.READY else DirectorStage.CAMERA_ONLY
+            stage = if (ready) DirectorStage.READY else DirectorStage.CAMERA_ONLY
         )
     }
 
     private fun refreshCameraSoon(status: String) {
-        viewModelScope.launch {
-            delay(80)
-            refreshCamera(status)
-        }
+        viewModelScope.launch { delay(80); refreshCamera(status) }
     }
 
     fun onAppBackgrounded() { orchestrator.cancelForUserAction() }
