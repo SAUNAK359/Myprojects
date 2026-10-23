@@ -1,40 +1,59 @@
 version: 2.1
 
+server_env: &server_env
+  SIERRA_JWT_SECRET: 0123456789012345678901234567890123456789
+  SIERRA_PROVIDER_MASTER_KEY: j9fYzPzGZRXnZN4oWg_2-ZE6fAKh4CrJz8X3rOMbTgI=
+
+install_steps: &install_steps
+  - checkout
+  - run:
+      name: Install Sierra server
+      command: |
+        set -euo pipefail
+        cd SierraServer
+        python -m pip install --upgrade pip
+        pip install '.[dev]'
+
 jobs:
-  test-sierra-server:
+  sierra-import:
     docker:
       - image: cimg/python:3.12
     resource_class: medium
     working_directory: ~/project
-    environment:
-      SIERRA_JWT_SECRET: 0123456789012345678901234567890123456789
-      SIERRA_PROVIDER_MASTER_KEY: j9fYzPzGZRXnZN4oWg_2-ZE6fAKh4CrJz8X3rOMbTgI=
-
+    environment: *server_env
     steps:
-      - checkout
-
-      - restore_cache:
-          keys:
-            - sierra-server-pip-v2-{{ checksum "SierraServer/pyproject.toml" }}
-            - sierra-server-pip-v2-
-
+      - *install_steps
       - run:
-          name: Install Sierra server
-          command: |
-            set -euo pipefail
-            cd SierraServer
-            python -m pip install --upgrade pip
-            pip install '.[dev]'
-
-      - run:
-          name: Import and static validation
+          name: Compile and import
           command: |
             set -euo pipefail
             cd SierraServer
             python -m compileall -q app tests scripts
-            python -c 'import app.main; import app.provider_client; import app.job_worker'
+            python -c 'import app.main; import app.provider_client; import app.job_worker; print("Sierra import OK")'
+
+  sierra-static:
+    docker:
+      - image: cimg/python:3.12
+    resource_class: medium
+    working_directory: ~/project
+    environment: *server_env
+    steps:
+      - *install_steps
+      - run:
+          name: Static correctness
+          command: |
+            set -euo pipefail
+            cd SierraServer
             ruff check app tests scripts
 
+  sierra-tests:
+    docker:
+      - image: cimg/python:3.12
+    resource_class: medium
+    working_directory: ~/project
+    environment: *server_env
+    steps:
+      - *install_steps
       - run:
           name: Unit tests
           command: |
@@ -42,20 +61,18 @@ jobs:
             cd SierraServer
             mkdir -p /tmp/sierra-test-results
             pytest -q --junitxml=/tmp/sierra-test-results/results.xml
-
-      - save_cache:
-          key: sierra-server-pip-v2-{{ checksum "SierraServer/pyproject.toml" }}
-          paths:
-            - ~/.cache/pip
-
       - store_test_results:
           path: /tmp/sierra-test-results
 
 workflows:
   sierra-server-build:
     jobs:
-      - test-sierra-server:
-          filters:
+      - sierra-import:
+          filters: &server_filter
             branches:
               only:
                 - sierra-vision-server-v1
+      - sierra-static:
+          filters: *server_filter
+      - sierra-tests:
+          filters: *server_filter
