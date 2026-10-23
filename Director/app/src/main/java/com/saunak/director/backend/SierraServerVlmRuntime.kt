@@ -29,10 +29,12 @@ class SierraServerVlmRuntime(
     context: Context,
     private val backend: SierraBackendClient
 ) : VlmRuntime {
-    private val appContext = context.applicationContext
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val activeJobId = AtomicReference<String?>(null)
-    private val prefs = appContext.getSharedPreferences("sierra_cloud_jobs_v1", Context.MODE_PRIVATE)
+    private val prefs = context.applicationContext.getSharedPreferences(
+        "sierra_cloud_jobs_v1",
+        Context.MODE_PRIVATE
+    )
     @Volatile private var maxImageDimension = 704
 
     override suspend fun load(modelPath: String, projectorPath: String): Result<Unit> =
@@ -53,7 +55,7 @@ class SierraServerVlmRuntime(
         skillContext: String,
         localQuality: TechnicalQuality?
     ): Result<PlanOutput> = preservingCancellation {
-        retryPendingCompletion()
+        retryPendingCompletion().getOrThrow()
         val jpeg = withContext(Dispatchers.Default) { encodeForServer(image) }
         val request = SierraAnalysisJobRequest(
             imageJpeg = jpeg,
@@ -103,24 +105,44 @@ class SierraServerVlmRuntime(
     )
 
     override suspend fun confirmFinalCapture(captureId: String): Result<Unit> = preservingCancellation {
-        val jobId = activeJobId.get() ?: prefs.getString(KEY_PENDING_JOB, null) ?: return@preservingCancellation Unit
+        val jobId = activeJobId.get()
+            ?: prefs.getString(KEY_PENDING_JOB, null)
+            ?: return@preservingCancellation Unit
         val safeCaptureId = captureId.take(120)
         require(safeCaptureId.length >= 8) { "capture id is invalid" }
         prefs.edit()
             .putString(KEY_PENDING_JOB, jobId)
             .putString(KEY_PENDING_CAPTURE, safeCaptureId)
             .apply()
-        backend.complete(jobId, safeCaptureId).getOrThrow()
-        clearPending(jobId)
+        completeOrResolveTerminal(jobId, safeCaptureId)
     }
 
     suspend fun retryPendingCompletion(): Result<Unit> = preservingCancellation {
         val jobId = prefs.getString(KEY_PENDING_JOB, null) ?: return@preservingCancellation Unit
         val captureId = prefs.getString(KEY_PENDING_CAPTURE, null) ?: return@preservingCancellation Unit
-        val result = backend.complete(jobId, captureId)
-        if (result.isSuccess) clearPending(jobId)
-        result.getOrThrow()
-        Unit
+        completeOrResolveTerminal(jobId, captureId)
+    }
+
+    private suspend fun completeOrResolveTerminal(jobId: String, captureId: String) {
+        val completion = backend.complete(jobId, captureId)
+        if (completion.isSuccess) {
+            clearPending(jobId)
+            return
+        }
+
+        val failure = completion.exceptionOrNull()
+        if (failure is SierraApiException && failure.statusCode == 404) {
+            clearPending(jobId)
+            return
+        }
+        if (failure is SierraApiException && failure.statusCode == 409) {
+            val current = backend.job(jobId).getOrNull()
+            if (current == null || current.state in TERMINAL_STATES) {
+                clearPending(jobId)
+                return
+            }
+        }
+        throw failure ?: IOException("Sierra credit settlement failed")
     }
 
     override fun setMaxImageDimension(pixels: Int) {
@@ -142,9 +164,7 @@ class SierraServerVlmRuntime(
     }
 
     private fun cancelReservation(jobId: String) {
-        scope.launch {
-            runCatching { backend.cancel(jobId) }
-        }
+        scope.launch { runCatching { backend.cancel(jobId) } }
     }
 
     private fun clearPending(jobId: String) {
@@ -234,5 +254,11 @@ class SierraServerVlmRuntime(
         private const val POLL_INTERVAL_MS = 120L
         private const val KEY_PENDING_JOB = "pending_completion_job"
         private const val KEY_PENDING_CAPTURE = "pending_completion_capture"
+        private val TERMINAL_STATES = setOf(
+            SierraJobState.COMPLETED,
+            SierraJobState.CANCELLED,
+            SierraJobState.EXPIRED,
+            SierraJobState.FAILED
+        )
     }
 }
