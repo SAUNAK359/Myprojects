@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse
 from sqlalchemy import select
 
-from app.config import settings
+from app.config import prepare_runtime_directories, settings, validate_runtime_config
 from app.db import SessionLocal
 from app.job_worker import worker_loop
 from app.models import User
@@ -54,6 +54,8 @@ async def bootstrap_admin() -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    validate_runtime_config(settings)
+    prepare_runtime_directories(settings)
     await bootstrap_admin()
     stop = asyncio.Event()
     task = asyncio.create_task(worker_loop(stop), name="sierra-job-worker")
@@ -76,7 +78,7 @@ if settings.cors_origins:
         CORSMiddleware,
         allow_origins=settings.cors_origins,
         allow_credentials=False,
-        allow_methods=["GET", "POST", "PATCH", "DELETE"],
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
         allow_headers=["Authorization", "Content-Type", "Idempotency-Key"],
     )
 
