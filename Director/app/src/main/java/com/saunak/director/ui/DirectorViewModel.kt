@@ -5,6 +5,7 @@ import androidx.camera.view.PreviewView
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.viewModelScope
+import com.saunak.director.ai.DeviceConfigSkill
 import com.saunak.director.ai.GeminiVlmRuntime
 import com.saunak.director.ai.SecureApiKeyStore
 import com.saunak.director.camera.CameraEngine
@@ -17,17 +18,21 @@ import com.saunak.director.skills.SkillEngine
 import com.saunak.director.storage.PhotoRepository
 import com.saunak.director.storage.RecipeMemory
 import com.saunak.director.tools.ToolExecutor
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.util.Locale
 
 class DirectorViewModel(app: Application) : AndroidViewModel(app) {
     private val camera = CameraEngine(app)
     private val keyStore = SecureApiKeyStore(app)
     private val recipeMemory = RecipeMemory(app)
-    private val runtime = GeminiVlmRuntime(app, keyStore = keyStore, recipeMemory = recipeMemory)
+    private val deviceConfigSkill = DeviceConfigSkill(app)
+    private val runtime = GeminiVlmRuntime(app, keyStore = keyStore, deviceSkill = deviceConfigSkill, recipeMemory = recipeMemory)
     private val repository = PhotoRepository(app)
     private val orchestrator = DirectorOrchestrator(
         camera = camera,
@@ -83,6 +88,9 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
             runCatching { camera.bind(owner, view) }
                 .onSuccess {
                     cameraBound = true
+                    withContext(Dispatchers.IO) {
+                        runCatching { deviceConfigSkill.refresh(camera.capabilities(), camera.snapshot()) }
+                    }
                     refreshCamera("Camera ready${if (keyStore.hasKey()) " • Director online" else " • add Gemini key"}")
                 }
                 .onFailure {
@@ -104,7 +112,7 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
     fun zoom(value: Float) {
         orchestrator.cancelForUserAction()
         camera.userSetZoom(value)
-        refreshCameraSoon("Zoom ${"%.1f".format(value)}×")
+        refreshCameraSoon("Zoom ${String.format(Locale.US, "%.1f", value)}×")
     }
 
     fun exposure(index: Int) {
@@ -133,7 +141,14 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
     fun switchCamera() {
         orchestrator.cancelForUserAction()
         runCatching { camera.switchLens() }
-            .onSuccess { refreshCamera(if (it) "Camera switched" else "Other camera unavailable") }
+            .onSuccess { switched ->
+                if (switched) {
+                    viewModelScope.launch(Dispatchers.IO) {
+                        runCatching { deviceConfigSkill.refresh(camera.capabilities(), camera.snapshot()) }
+                    }
+                }
+                refreshCamera(if (switched) "Camera switched" else "Other camera unavailable")
+            }
             .onFailure { _ui.value = _ui.value.copy(error = it.message, status = "Camera switch failed") }
     }
 
