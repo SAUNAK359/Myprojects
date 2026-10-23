@@ -1,0 +1,106 @@
+version: 2.1
+
+jobs:
+  build-director-apk:
+    docker:
+      - image: cimg/android:2026.08
+    resource_class: small
+    working_directory: ~/project
+    environment:
+      GRADLE_USER_HOME: /home/circleci/.gradle
+      TERM: dumb
+
+    steps:
+      - checkout
+
+      - restore_cache:
+          keys:
+            - director-gradle-v2-{{ checksum "Director/gradle.properties" }}
+            - director-gradle-v2-
+
+      - run:
+          name: Prepare Java 17 and Android SDK 36
+          command: |
+            set -euo pipefail
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq openjdk-17-jdk-headless unzip zip
+
+            JAVA17_HOME="$(dirname "$(dirname "$(readlink -f "$(update-alternatives --list java | grep 'java-17' | head -n 1)")")")"
+            echo "export JAVA_HOME=$JAVA17_HOME" >> "$BASH_ENV"
+            echo 'export PATH=$JAVA_HOME/bin:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH' >> "$BASH_ENV"
+            source "$BASH_ENV"
+
+            java -version
+            yes | sdkmanager --licenses >/dev/null || true
+            sdkmanager \
+              'platform-tools' \
+              'platforms;android-36' \
+              'build-tools;36.0.0'
+
+            cd Director
+            printf 'sdk.dir=%s\n' "$ANDROID_HOME" > local.properties
+            chmod +x gradlew
+            ./gradlew --version
+
+      - run:
+          name: Unit tests, lint and build APK
+          command: |
+            set -euo pipefail
+            source "$BASH_ENV"
+            cd Director
+            ./gradlew \
+              --no-daemon \
+              --stacktrace \
+              --max-workers=2 \
+              testDebugUnitTest \
+              lintDebug \
+              assembleDebug
+
+      - run:
+          name: Verify and package APK
+          command: |
+            set -euo pipefail
+            source "$BASH_ENV"
+            cd Director
+
+            APK="$(find app/build/outputs/apk/debug -type f -name '*.apk' -print -quit)"
+            test -n "$APK"
+            test -s "$APK"
+
+            BUILD_TOOLS="$ANDROID_HOME/build-tools/36.0.0"
+            "$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$APK"
+            "$BUILD_TOOLS/zipalign" -c -P 16 -v 4 "$APK" >/dev/null
+            unzip -t "$APK" >/dev/null
+            unzip -l "$APK" | grep -qE '(^|[[:space:]])classes\.dex$'
+
+            mkdir -p /tmp/director-artifacts
+            cp "$APK" /tmp/director-artifacts/Director-debug.apk
+            sha256sum /tmp/director-artifacts/Director-debug.apk \
+              | tee /tmp/director-artifacts/Director-debug.apk.sha256
+
+      - save_cache:
+          key: director-gradle-v2-{{ checksum "Director/gradle.properties" }}
+          paths:
+            - ~/.gradle/caches
+            - ~/.gradle/wrapper
+            - ~/.gradle/director-wrapper
+
+      - store_test_results:
+          path: Director/app/build/test-results
+
+      - store_artifacts:
+          path: /tmp/director-artifacts
+          destination: director-apk
+
+      - store_artifacts:
+          path: Director/app/build/reports
+          destination: reports
+
+workflows:
+  director-build:
+    jobs:
+      - build-director-apk:
+          filters:
+            branches:
+              only:
+                - director-gemini-v1
