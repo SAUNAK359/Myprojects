@@ -87,6 +87,7 @@ def upgrade() -> None:
         sa.Column("error_code", sa.String(80)),
         sa.Column("error_message", sa.String(300)),
         sa.Column("attempt_count", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column("capture_id", sa.String(120)),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("ready_expires_at", sa.DateTime(timezone=True)),
