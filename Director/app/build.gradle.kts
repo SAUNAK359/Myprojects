@@ -21,6 +21,14 @@ android {
         versionName = (project.findProperty("versionName") as String?) ?: "1.0.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
+
+        val serverUrl = (project.findProperty("SIERRA_SERVER_BASE_URL") as String?)
+            ?.trim()
+            ?.trimEnd('/')
+            .orEmpty()
+            .replace("\\", "\\\\")
+            .replace("\"", "\\\"")
+        buildConfigField("String", "SIERRA_SERVER_BASE_URL", "\"$serverUrl\"")
     }
 
     buildTypes {
