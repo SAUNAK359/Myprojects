@@ -56,7 +56,7 @@ class DirectorOrchestrator(
                 DirectorUiState(
                     stage = DirectorStage.READY,
                     aiAvailable = vlm.isReady(),
-                    status = "Director timed out • try again",
+                    status = "Director timed out • check connection and try again",
                     camera = camera.uiState(),
                     recipeCount = recipeMemory.count()
                 )
@@ -96,7 +96,8 @@ class DirectorOrchestrator(
                 vlm.setMaxImageDimension(thermalPolicy.maxAiDimension)
                 var caps = camera.capabilities()
                 val plan = vlm.plan(referenceBitmap, caps, camera.snapshot(), skills.planningContext()).getOrElse {
-                    emit(session, DirectorUiState(DirectorStage.ERROR, true, "Director analysis failed", error = it.message, camera = camera.uiState()))
+                    val reason = aiFailureMessage(it)
+                    emit(session, DirectorUiState(DirectorStage.ERROR, true, reason, error = it.message, camera = camera.uiState()))
                     return null
                 }
                 assertCurrent(session)
@@ -140,7 +141,10 @@ class DirectorOrchestrator(
                             issues,
                             skills.evaluationContext(branch),
                             caps
-                        ).getOrElse { break }
+                        ).getOrElse {
+                            issues = (listOf(aiFailureMessage(it)) + issues).distinct().take(8)
+                            break
+                        }
                         assertCurrent(session)
                         lastScore = CapturePolicy.combinedFallbackScore(eval.score, quality.heuristicScore)
                         if (CapturePolicy.accepted(eval, quality.catastrophic)) {
@@ -192,10 +196,26 @@ class DirectorOrchestrator(
             throw t
         } catch (t: Throwable) {
             runCatching { tools.restoreUserState() }
-            emit(session, DirectorUiState(DirectorStage.ERROR, vlm.isReady(), "Director preparation failed", error = t.message, camera = camera.uiState()))
+            emit(session, DirectorUiState(DirectorStage.ERROR, vlm.isReady(), aiFailureMessage(t), error = t.message, camera = camera.uiState()))
             return null
         } finally {
             storage.cleanup(created)
+        }
+    }
+
+    private fun aiFailureMessage(t: Throwable): String {
+        val message = t.message.orEmpty().trim()
+        val lower = message.lowercase()
+        return when {
+            "401" in lower || "invalid" in lower && "key" in lower -> "Gemini key invalid • update it in Settings"
+            "403" in lower || "blocked" in lower && "key" in lower -> "Gemini access blocked • check API key/project"
+            "404" in lower || "model is unavailable" in lower -> "Gemini model unavailable for this key"
+            "429" in lower || "quota" in lower || "rate limit" in lower -> "Gemini quota reached • try again shortly"
+            "timeout" in lower || "timed out" in lower -> "Gemini response timed out • try again"
+            "no candidate" in lower || "no content" in lower || "empty output" in lower -> "Gemini returned no usable analysis • try again"
+            "blocked the request" in lower -> "Gemini blocked this image request"
+            message.isNotBlank() -> "Director AI error • ${message.take(96)}"
+            else -> "Director analysis failed • try again"
         }
     }
 
@@ -243,6 +263,6 @@ class DirectorOrchestrator(
     private class StaleSession : RuntimeException()
 
     companion object {
-        private const val HARD_PREPARE_DEADLINE_MS = 7_000L
+        private const val HARD_PREPARE_DEADLINE_MS = 25_000L
     }
 }
