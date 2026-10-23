@@ -41,20 +41,8 @@ data class EvaluationOutput(
 )
 
 enum class DirectorStage {
-    CAMERA_ONLY,
-    READY,
-    CAPTURING,
-    ANALYZING,
-    PLANNING,
-    APPLYING,
-    RECAPTURING,
-    CHECKING,
-    CORRECTING,
-    PREPARED,
-    FINAL_CAPTURING,
-    SAVING,
-    ERROR,
-    OBSERVING
+    CAMERA_ONLY, READY, CAPTURING, ANALYZING, PLANNING, APPLYING, RECAPTURING,
+    CHECKING, CORRECTING, PREPARED, FINAL_CAPTURING, SAVING, ERROR, OBSERVING
 }
 
 enum class SierraMode { AI, BETA }
@@ -68,7 +56,6 @@ data class DirectorUiState(
     val error: String? = null,
     val camera: CameraUiState = CameraUiState(),
     val lastSavedUri: String? = null,
-    val hasApiKey: Boolean = false,
     val recipeCount: Int = 0,
     val showSettings: Boolean = false,
     val showTools: Boolean = false,
@@ -82,5 +69,11 @@ data class DirectorUiState(
     val sceneLabel: String? = null,
     val objective: String? = null,
     val privateMode: Boolean = false,
-    val keepOriginal: Boolean = false
+    val keepOriginal: Boolean = false,
+    val serverConfigured: Boolean = false,
+    val signedIn: Boolean = false,
+    val accountName: String? = null,
+    val creditsAvailable: Int? = null,
+    val authBusy: Boolean = false,
+    val authError: String? = null
 )
