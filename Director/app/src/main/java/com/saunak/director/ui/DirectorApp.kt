@@ -3,7 +3,6 @@ package com.saunak.director.ui
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.graphics.ImageDecoder
 import android.net.Uri
 import android.provider.MediaStore
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -12,28 +11,26 @@ import androidx.camera.view.PreviewView
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -49,20 +46,18 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.saunak.director.ai.AiProviderPreset
 import com.saunak.director.camera.CameraUiState
 import com.saunak.director.camera.StillFlashMode
 import com.saunak.director.director.DirectorStage
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.withContext
 import kotlin.math.abs
-import kotlin.math.max
-import kotlin.math.min
 
 private val Ink = Color(0xFF07090D)
-private val Glass = Color(0xB512151C)
+private val Glass = Color(0xD512151C)
 private val DirectorYellow = Color(0xFFFFD45C)
 private val ReadyGreen = Color(0xFF98F5BE)
+private val ErrorRed = Color(0xFFFF8A80)
 private val Muted = Color(0xFFADB3C2)
 
 @Composable
@@ -90,8 +85,7 @@ fun DirectorApp(vm: DirectorViewModel = viewModel()) {
     }
 
     MaterialTheme(colorScheme = darkColorScheme(background = Ink, surface = Ink)) {
-        if (!granted) PermissionScreen { launcher.launch(Manifest.permission.CAMERA) }
-        else CameraScreen(vm)
+        if (!granted) PermissionScreen { launcher.launch(Manifest.permission.CAMERA) } else CameraScreen(vm)
     }
 }
 
@@ -103,13 +97,12 @@ private fun PermissionScreen(request: () -> Unit) {
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(18.dp)
         ) {
-            Box(
-                Modifier.size(84.dp).border(1.dp, DirectorYellow.copy(alpha = .55f), CircleShape),
-                contentAlignment = Alignment.Center
-            ) { Text("D", color = DirectorYellow, fontSize = 34.sp, fontWeight = FontWeight.Light) }
+            Box(Modifier.size(84.dp).border(1.dp, DirectorYellow.copy(alpha = .55f), CircleShape), contentAlignment = Alignment.Center) {
+                Text("D", color = DirectorYellow, fontSize = 34.sp, fontWeight = FontWeight.Light)
+            }
             Text("Director", color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.SemiBold)
             Text(
-                "Give Director camera access. Your NVIDIA API key stays encrypted on this device and final photos save directly to Gallery.",
+                "Give Director camera access. AI provider keys stay encrypted on this device; only selected analysis frames are sent when you use Director.",
                 color = Muted,
                 textAlign = TextAlign.Center,
                 lineHeight = 21.sp
@@ -167,6 +160,7 @@ private fun CameraScreen(vm: DirectorViewModel) {
 
         TopChrome(
             ui = ui,
+            providerLabel = vm.selectedProvider().label,
             onSettings = vm::toggleSettings,
             onTools = vm::toggleTools,
             modifier = Modifier.align(Alignment.TopCenter)
@@ -178,8 +172,10 @@ private fun CameraScreen(vm: DirectorViewModel) {
 
         AnimatedVisibility(ui.showTools, Modifier.align(Alignment.CenterStart)) {
             ToolRail(
-                ui = ui,
-                showExposure = showExposure,
+                ui.camera,
+                showExposure,
+                ui.gridEnabled,
+                ui.levelEnabled,
                 onTorch = { vm.torch(!ui.camera.torchEnabled) },
                 onFlash = vm::cycleFlash,
                 onExposure = { showExposure = !showExposure },
@@ -200,35 +196,32 @@ private fun CameraScreen(vm: DirectorViewModel) {
                     }
                 } ?: Intent(Intent.ACTION_VIEW, MediaStore.Images.Media.EXTERNAL_CONTENT_URI)
                 runCatching { context.startActivity(intent) }
-                    .recoverCatching { context.startActivity(Intent(Intent.ACTION_VIEW, MediaStore.Images.Media.EXTERNAL_CONTENT_URI)) }
             },
-            onCapture = {
-                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                vm.primaryCapture()
-            },
-            onSwitch = {
-                haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                vm.switchCamera()
-            },
+            onCapture = { haptics.performHapticFeedback(HapticFeedbackType.LongPress); vm.primaryCapture() },
+            onSwitch = { haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove); vm.switchCamera() },
             modifier = Modifier.align(Alignment.BottomCenter)
         )
 
-        if (ui.showSettings) {
-            SettingsSheet(ui.hasApiKey, ui.recipeCount, vm::saveApiKey, vm::clearApiKey, vm::dismissSettings)
-        }
+        if (ui.showSettings) ProviderSettingsSheet(vm, ui.recipeCount, vm::dismissSettings)
     }
 }
 
 @Composable
-private fun TopChrome(ui: com.saunak.director.director.DirectorUiState, onSettings: () -> Unit, onTools: () -> Unit, modifier: Modifier = Modifier) {
+private fun TopChrome(
+    ui: com.saunak.director.director.DirectorUiState,
+    providerLabel: String,
+    onSettings: () -> Unit,
+    onTools: () -> Unit,
+    modifier: Modifier = Modifier
+) {
     Column(modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 14.dp, vertical = 10.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
             GlassButton("☰", onTools)
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text("DIRECTOR", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold, letterSpacing = 3.sp)
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Box(Modifier.size(6.dp).background(if (ui.hasApiKey) ReadyGreen else Color(0xFFFF8A80), CircleShape))
-                    Text(if (ui.hasApiKey) "Nemotron configured" else "NVIDIA key required", color = Color.White.copy(alpha = .72f), fontSize = 10.sp)
+                    Box(Modifier.size(6.dp).background(if (ui.hasApiKey) ReadyGreen else ErrorRed, CircleShape))
+                    Text(providerLabel, color = Color.White.copy(alpha = .72f), fontSize = 9.sp, maxLines = 1)
                 }
             }
             GlassButton("⚙", onSettings)
@@ -239,10 +232,7 @@ private fun TopChrome(ui: com.saunak.director.director.DirectorUiState, onSettin
 }
 
 @Composable
-private fun StatusPill(
-    ui: com.saunak.director.director.DirectorUiState,
-    modifier: Modifier = Modifier
-) {
+private fun StatusPill(ui: com.saunak.director.director.DirectorUiState, modifier: Modifier = Modifier) {
     val busy = ui.stage in setOf(
         DirectorStage.CAPTURING, DirectorStage.ANALYZING, DirectorStage.PLANNING,
         DirectorStage.APPLYING, DirectorStage.RECAPTURING, DirectorStage.CHECKING,
@@ -250,15 +240,20 @@ private fun StatusPill(
     )
     val tint = when (ui.stage) {
         DirectorStage.PREPARED -> DirectorYellow
-        DirectorStage.ERROR -> Color(0xFFFF8A80)
+        DirectorStage.ERROR -> ErrorRed
         else -> Color.White
     }
     Surface(color = Glass, shape = RoundedCornerShape(22.dp), modifier = modifier) {
-        Row(Modifier.padding(horizontal = 14.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-            if (busy) CircularProgressIndicator(Modifier.size(13.dp), strokeWidth = 1.8.dp, color = DirectorYellow)
-            else Box(Modifier.size(7.dp).background(tint, CircleShape))
-            Text(ui.status, color = Color.White, fontSize = 12.sp, maxLines = 1)
-            ui.lastScore?.let { Text("${(it * 100).toInt()}%", color = DirectorYellow, fontSize = 11.sp, fontWeight = FontWeight.Bold) }
+        Column(Modifier.padding(horizontal = 14.dp, vertical = 8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+                if (busy) CircularProgressIndicator(Modifier.size(13.dp), strokeWidth = 1.8.dp, color = DirectorYellow)
+                else Box(Modifier.size(7.dp).background(tint, CircleShape))
+                Text(ui.status, color = Color.White, fontSize = 12.sp, maxLines = 2)
+                ui.lastScore?.let { Text("${(it * 100).toInt()}%", color = DirectorYellow, fontSize = 11.sp, fontWeight = FontWeight.Bold) }
+            }
+            if (ui.stage == DirectorStage.ERROR && !ui.error.isNullOrBlank()) {
+                Text(ui.error.take(160), color = ErrorRed.copy(alpha = .9f), fontSize = 9.sp, maxLines = 2)
+            }
         }
     }
 }
@@ -278,18 +273,12 @@ private fun BottomChrome(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(15.dp)
     ) {
-        if (ui.recipeCount > 0) {
-            Surface(color = Glass, shape = RoundedCornerShape(18.dp)) {
-                Text("✦ ${ui.recipeCount} learned recipe${if (ui.recipeCount == 1) "" else "s"}", Modifier.padding(horizontal = 11.dp, vertical = 5.dp), color = Color.White.copy(alpha = .75f), fontSize = 10.sp)
-            }
+        if (ui.recipeCount > 0) Surface(color = Glass, shape = RoundedCornerShape(18.dp)) {
+            Text("✦ ${ui.recipeCount} learned recipe${if (ui.recipeCount == 1) "" else "s"}", Modifier.padding(horizontal = 11.dp, vertical = 5.dp), color = Color.White.copy(alpha = .75f), fontSize = 10.sp)
         }
         ZoomRow(ui.camera, requestedZoom, onZoom)
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 30.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            GalleryButton(ui.lastSavedUri, onGallery)
+        Row(Modifier.fillMaxWidth().padding(horizontal = 30.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+            GlassButton("▣", onGallery, 52.dp)
             DirectorShutter(ui.stage, ui.hasApiKey, onCapture)
             GlassButton("↻", onSwitch, 52.dp)
         }
@@ -305,17 +294,12 @@ private fun BottomChrome(
 @Composable
 private fun DirectorShutter(stage: DirectorStage, enabled: Boolean, onClick: () -> Unit) {
     val busy = stage in setOf(
-        DirectorStage.CAPTURING, DirectorStage.ANALYZING, DirectorStage.APPLYING,
+        DirectorStage.CAPTURING, DirectorStage.ANALYZING, DirectorStage.PLANNING, DirectorStage.APPLYING,
         DirectorStage.RECAPTURING, DirectorStage.CHECKING, DirectorStage.CORRECTING,
         DirectorStage.FINAL_CAPTURING, DirectorStage.SAVING
     )
     val ready = stage == DirectorStage.PREPARED
-    val ring = when {
-        ready -> DirectorYellow
-        busy -> DirectorYellow.copy(alpha = .75f)
-        else -> Color.White
-    }
-    val inner = if (ready) DirectorYellow else Color.White
+    val ring = when { ready -> DirectorYellow; busy -> DirectorYellow.copy(alpha = .75f); else -> Color.White }
     val scale by animateFloatAsState(if (busy) .9f else 1f, label = "shutter")
     Surface(
         onClick = onClick,
@@ -326,16 +310,165 @@ private fun DirectorShutter(stage: DirectorStage, enabled: Boolean, onClick: () 
         modifier = Modifier.size((84 * scale).dp)
     ) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Box(Modifier.size(65.dp).background(inner.copy(alpha = if (enabled) 1f else .4f), CircleShape))
+            Box(Modifier.size(65.dp).background((if (ready) DirectorYellow else Color.White).copy(alpha = if (enabled) 1f else .4f), CircleShape))
             if (busy) CircularProgressIndicator(Modifier.size(50.dp), color = Ink, strokeWidth = 2.dp)
         }
     }
 }
 
 @Composable
+private fun ProviderSettingsSheet(vm: DirectorViewModel, recipeCount: Int, dismiss: () -> Unit) {
+    var selected by remember { mutableStateOf(vm.selectedProvider()) }
+    var apiKey by remember(selected) { mutableStateOf("") }
+    var endpoint by remember(selected) { mutableStateOf(if (selected == AiProviderPreset.CUSTOM_OPENAI) vm.customEndpoint() else "") }
+    var model by remember(selected) {
+        mutableStateOf(
+            when (selected) {
+                AiProviderPreset.CUSTOM_OPENAI -> vm.customModel()
+                AiProviderPreset.OPENROUTER_CUSTOM -> vm.openRouterCustomModel()
+                else -> selected.model.orEmpty()
+            }
+        )
+    }
+    var error by remember { mutableStateOf<String?>(null) }
+    val scroll = rememberScrollState()
+
+    Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = .66f)).padding(14.dp), contentAlignment = Alignment.Center) {
+        Surface(color = Color(0xFA151820), shape = RoundedCornerShape(28.dp), tonalElevation = 10.dp, modifier = Modifier.fillMaxWidth().widthIn(max = 520.dp).heightIn(max = 720.dp)) {
+            Column(Modifier.padding(20.dp).verticalScroll(scroll), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Column {
+                        Text("AI Provider Hub", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
+                        Text("Switch cloud vision routes without rebuilding Director", color = Muted, fontSize = 11.sp)
+                    }
+                    TextButton(onClick = dismiss) { Text("✕", color = Color.White, fontSize = 20.sp) }
+                }
+
+                Text("Provider / model", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
+                vm.providerPresets().forEach { preset ->
+                    val active = selected == preset
+                    val configured = preset == AiProviderPreset.AUTO && vm.providerPresets().any { it != AiProviderPreset.AUTO && vm.providerHasCredential(it) } ||
+                        preset != AiProviderPreset.AUTO && vm.providerHasCredential(preset)
+                    Surface(
+                        onClick = {
+                            selected = preset
+                            error = null
+                            vm.selectProvider(preset)
+                        },
+                        color = if (active) DirectorYellow.copy(alpha = .14f) else Color.White.copy(alpha = .05f),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, if (active) DirectorYellow else Color.White.copy(alpha = .08f)),
+                        shape = RoundedCornerShape(16.dp)
+                    ) {
+                        Row(Modifier.fillMaxWidth().padding(13.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                            Column(Modifier.weight(1f)) {
+                                Text(preset.label, color = Color.White, fontSize = 12.sp, fontWeight = if (active) FontWeight.Bold else FontWeight.Medium)
+                                Text(
+                                    when {
+                                        preset == AiProviderPreset.AUTO -> "Automatic failover across configured providers"
+                                        preset.freeRoute -> "Free/trial-friendly route • provider limits apply"
+                                        else -> "Direct selectable route"
+                                    },
+                                    color = Muted,
+                                    fontSize = 9.sp
+                                )
+                            }
+                            Box(Modifier.size(9.dp).background(if (configured) ReadyGreen else Color.White.copy(alpha = .22f), CircleShape))
+                        }
+                    }
+                }
+
+                if (selected != AiProviderPreset.AUTO) {
+                    HorizontalDivider(color = Color.White.copy(alpha = .08f))
+                    Text("Configure ${selected.label}", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
+
+                    if (selected == AiProviderPreset.CUSTOM_OPENAI) {
+                        OutlinedTextField(
+                            value = endpoint,
+                            onValueChange = { endpoint = it; error = null },
+                            label = { Text("HTTPS chat-completions endpoint") },
+                            placeholder = { Text("https://host/v1/chat/completions") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+
+                    if (selected == AiProviderPreset.CUSTOM_OPENAI || selected == AiProviderPreset.OPENROUTER_CUSTOM) {
+                        OutlinedTextField(
+                            value = model,
+                            onValueChange = { model = it; error = null },
+                            label = { Text("Vision model ID") },
+                            placeholder = { Text("provider/model-name") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+
+                    OutlinedTextField(
+                        value = apiKey,
+                        onValueChange = { apiKey = it; error = null },
+                        label = { Text(if (vm.providerHasCredential(selected)) "Replace API key (optional)" else "API key") },
+                        placeholder = { Text(providerKeyHint(selected)) },
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    error?.let { Text(it, color = ErrorRed, fontSize = 11.sp) }
+
+                    Button(
+                        onClick = { error = vm.saveProvider(selected, apiKey, endpoint, model) },
+                        enabled = apiKey.isNotBlank() || vm.providerHasCredential(selected),
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(containerColor = DirectorYellow, contentColor = Color.Black)
+                    ) {
+                        Text("Save, test & use", fontWeight = FontWeight.Bold)
+                    }
+
+                    if (vm.providerHasCredential(selected)) {
+                        TextButton(onClick = { vm.clearProvider(selected); apiKey = "" }, modifier = Modifier.fillMaxWidth()) {
+                            Text("Remove ${selected.credentialId} key", color = ErrorRed)
+                        }
+                    }
+                }
+
+                HorizontalDivider(color = Color.White.copy(alpha = .08f))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    InfoMetric("Recipes", recipeCount.toString())
+                    InfoMetric("Mode", vm.selectedProvider().label.substringBefore(" •"))
+                    InfoMetric("Retries", "≤ 3")
+                }
+                Text(
+                    "Auto priority: Groq Qwen → OpenRouter Nemotron Free → NVIDIA Direct → Gemini → Custom. Keys are encrypted separately with Android Keystore. Custom endpoints must use HTTPS.",
+                    color = Muted,
+                    fontSize = 10.sp,
+                    lineHeight = 15.sp
+                )
+                Text(
+                    "Privacy: free/trial hosted endpoints can have different data-use terms. Avoid sending sensitive/private faces or confidential imagery unless that provider's terms fit your use.",
+                    color = DirectorYellow.copy(alpha = .82f),
+                    fontSize = 9.sp,
+                    lineHeight = 14.sp
+                )
+            }
+        }
+    }
+}
+
+private fun providerKeyHint(preset: AiProviderPreset): String = when (preset) {
+    AiProviderPreset.NVIDIA_NEMOTRON -> "nvapi-…"
+    AiProviderPreset.OPENROUTER_NEMOTRON_FREE, AiProviderPreset.OPENROUTER_NEMOTRON, AiProviderPreset.OPENROUTER_CUSTOM -> "sk-or-v1-…"
+    AiProviderPreset.GROQ_QWEN38 -> "gsk_…"
+    AiProviderPreset.GEMINI_38_FLASH -> "Google AI Studio key"
+    AiProviderPreset.CUSTOM_OPENAI -> "Provider API key"
+    AiProviderPreset.AUTO -> ""
+}
+
+@Composable
 private fun ToolRail(
-    ui: com.saunak.director.director.DirectorUiState,
+    camera: CameraUiState,
     showExposure: Boolean,
+    grid: Boolean,
+    level: Boolean,
     onTorch: () -> Unit,
     onFlash: () -> Unit,
     onExposure: () -> Unit,
@@ -344,12 +477,12 @@ private fun ToolRail(
 ) {
     Surface(Modifier.padding(start = 12.dp), color = Glass, shape = RoundedCornerShape(26.dp)) {
         Column(Modifier.padding(7.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            ToolButton(if (ui.camera.torchEnabled) "☀" else "☼", "Torch", ui.camera.torchSupported, onTorch)
-            val flash = when (ui.camera.flashMode) { StillFlashMode.OFF -> "ϟ×"; StillFlashMode.AUTO -> "ϟA"; StillFlashMode.ON -> "ϟ" }
-            ToolButton(flash, "Flash", ui.camera.torchSupported, onFlash)
-            ToolButton("±", "EV", ui.camera.exposureSupported, onExposure, showExposure)
-            ToolButton("#", "Grid", true, onGrid, ui.gridEnabled)
-            ToolButton("—", "Guide", true, onLevel, ui.levelEnabled)
+            ToolButton(if (camera.torchEnabled) "☀" else "☼", "Torch", camera.torchSupported, onTorch)
+            val flash = when (camera.flashMode) { StillFlashMode.OFF -> "ϟ×"; StillFlashMode.AUTO -> "ϟA"; StillFlashMode.ON -> "ϟ" }
+            ToolButton(flash, "Flash", camera.torchSupported, onFlash)
+            ToolButton("±", "EV", camera.exposureSupported, onExposure, showExposure)
+            ToolButton("#", "Grid", true, onGrid, grid)
+            ToolButton("—", "Guide", true, onLevel, level)
         }
     }
 }
@@ -365,70 +498,9 @@ private fun ToolButton(symbol: String, label: String, enabled: Boolean, onClick:
 }
 
 @Composable
-private fun SettingsSheet(hasKey: Boolean, recipeCount: Int, save: (String) -> String?, clear: () -> Unit, dismiss: () -> Unit) {
-    var value by remember { mutableStateOf("") }
-    var error by remember { mutableStateOf<String?>(null) }
-    Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = .58f)).padding(18.dp), contentAlignment = Alignment.Center) {
-        Surface(color = Color(0xF5151820), shape = RoundedCornerShape(30.dp), tonalElevation = 10.dp, modifier = Modifier.fillMaxWidth().widthIn(max = 480.dp)) {
-            Column(Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(17.dp)) {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Column {
-                        Text("Director Settings", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
-                        Text("Private device configuration", color = Muted, fontSize = 11.sp)
-                    }
-                    TextButton(onClick = dismiss) { Text("✕", color = Color.White, fontSize = 20.sp) }
-                }
-
-                Surface(color = Color.White.copy(alpha = .06f), shape = RoundedCornerShape(18.dp)) {
-                    Row(Modifier.fillMaxWidth().padding(15.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-                        Column {
-                            Text("NVIDIA Nemotron", color = Color.White, fontWeight = FontWeight.Medium)
-                            Text(if (hasKey) "API key encrypted with Android Keystore" else "Add your NVIDIA API key", color = Muted, fontSize = 11.sp)
-                        }
-                        Box(Modifier.size(9.dp).background(if (hasKey) ReadyGreen else Color(0xFFFF8A80), CircleShape))
-                    }
-                }
-
-                OutlinedTextField(
-                    value = value,
-                    onValueChange = { value = it; error = null },
-                    label = { Text(if (hasKey) "Replace NVIDIA API key" else "NVIDIA API key") },
-                    placeholder = { Text("nvapi-…") },
-                    visualTransformation = PasswordVisualTransformation(),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                error?.let { Text(it, color = Color(0xFFFF8A80), fontSize = 11.sp) }
-                Button(
-                    onClick = { error = save(value) },
-                    enabled = value.isNotBlank(),
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = ButtonDefaults.buttonColors(containerColor = DirectorYellow, contentColor = Color.Black)
-                ) { Text(if (hasKey) "Update NVIDIA key" else "Connect NVIDIA", fontWeight = FontWeight.Bold) }
-                if (hasKey) TextButton(onClick = clear, modifier = Modifier.fillMaxWidth()) { Text("Remove key", color = Color(0xFFFFA6A0)) }
-
-                HorizontalDivider(color = Color.White.copy(alpha = .08f))
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    InfoMetric("Recipe memory", recipeCount.toString())
-                    InfoMetric("AI model", "Nemotron 3.5 VL")
-                    InfoMetric("Retries", "≤ 3")
-                }
-                Text(
-                    "Director sends selected analysis/intermediate frames and current camera configuration to NVIDIA NIM only when you press the white shutter. Your stock camera app and firmware are never modified.",
-                    color = Muted,
-                    fontSize = 10.sp,
-                    lineHeight = 15.sp
-                )
-            }
-        }
-    }
-}
-
-@Composable
 private fun InfoMetric(label: String, value: String) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(value, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+        Text(value, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
         Text(label, color = Muted, fontSize = 9.sp)
     }
 }
@@ -456,9 +528,7 @@ private fun LevelGuide() {
 
 @Composable
 private fun FocusRing(point: Offset?) {
-    Canvas(Modifier.fillMaxSize()) {
-        point?.let { drawCircle(DirectorYellow, 30.dp.toPx(), it, style = Stroke(2.dp.toPx())) }
-    }
+    Canvas(Modifier.fillMaxSize()) { point?.let { drawCircle(DirectorYellow, 30.dp.toPx(), it, style = Stroke(2.dp.toPx())) } }
 }
 
 @Composable
@@ -494,29 +564,6 @@ private fun ZoomRow(camera: CameraUiState, current: Float, onZoom: (Float) -> Un
                 }
             }
         }
-    }
-}
-
-@Composable
-private fun GalleryButton(uri: String?, onClick: () -> Unit) {
-    val context = LocalContext.current
-    val thumbnail by produceState<androidx.compose.ui.graphics.ImageBitmap?>(initialValue = null, uri) {
-        value = if (uri == null) null else withContext(Dispatchers.IO) {
-            runCatching {
-                val source = ImageDecoder.createSource(context.contentResolver, Uri.parse(uri))
-                ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
-                    val w = info.size.width
-                    val h = info.size.height
-                    val scale = min(1f, 180f / max(w, h).toFloat())
-                    decoder.setTargetSize(max(1, (w * scale).toInt()), max(1, (h * scale).toInt()))
-                    decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
-                }.asImageBitmap()
-            }.getOrNull()
-        }
-    }
-    Surface(onClick = onClick, shape = RoundedCornerShape(17.dp), color = Glass, modifier = Modifier.size(52.dp)) {
-        if (thumbnail != null) Image(thumbnail!!, "Gallery", contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(17.dp)))
-        else Box(contentAlignment = Alignment.Center) { Text("▣", color = Color.White, fontSize = 19.sp) }
     }
 }
 
