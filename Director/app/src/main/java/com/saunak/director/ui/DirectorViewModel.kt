@@ -5,11 +5,10 @@ import androidx.camera.view.PreviewView
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.viewModelScope
-import com.saunak.director.ai.AiProviderPreset
-import com.saunak.director.ai.AiProviderSettings
 import com.saunak.director.ai.DeviceConfigSkill
-import com.saunak.director.ai.MultiProviderVlmRuntime
-import com.saunak.director.ai.SecureApiKeyStore
+import com.saunak.director.ai.SierraServerVlmRuntime
+import com.saunak.director.backend.DeviceProfileCollector
+import com.saunak.director.backend.SierraServerClient
 import com.saunak.director.camera.CameraEngine
 import com.saunak.director.camera.StillFlashMode
 import com.saunak.director.director.DirectorOrchestrator
@@ -34,22 +33,18 @@ import java.util.Locale
 
 class DirectorViewModel(app: Application) : AndroidViewModel(app) {
     private val camera = CameraEngine(app)
-    private val keyStore = SecureApiKeyStore(app)
-    private val providerSettings = AiProviderSettings(app)
+    private val server = SierraServerClient(app)
+    private val deviceProfile = DeviceProfileCollector(app)
     private val recipeMemory = RecipeMemory(app)
     private val deviceConfigSkill = DeviceConfigSkill(app)
-    private val runtime = MultiProviderVlmRuntime(
-        app,
-        keyStore = keyStore,
-        settings = providerSettings,
-        deviceSkill = deviceConfigSkill,
-        recipeMemory = recipeMemory
-    )
+    private val runtime = SierraServerVlmRuntime(app, server = server, deviceSkill = deviceConfigSkill)
     private val repository = PhotoRepository(app)
     private val preferences = app.getSharedPreferences("sierra_vision_preferences", Application.MODE_PRIVATE)
     private val initialPrivateMode = preferences.getBoolean("private_mode", false)
+    private val initialGuestMode = preferences.getBoolean("guest_mode", false)
     private val initialAspectRatioOverride = preferences.getString("aspect_ratio_override", null)?.takeIf(SierraCropPolicy::isSupported)
     private val initialKeepOriginal = preferences.getBoolean("keep_original", false)
+    private val initialSession = server.session()
 
     private val orchestrator = DirectorOrchestrator(
         camera = camera,
@@ -63,7 +58,6 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
         val current = _ui.value
         _ui.value = state.copy(
             camera = runCatching { camera.uiState() }.getOrDefault(state.camera),
-            hasApiKey = runtime.isReady(),
             recipeCount = recipeMemory.count(),
             showSettings = current.showSettings,
             showTools = current.showTools,
@@ -73,22 +67,36 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
             levelEnabled = current.levelEnabled,
             privateMode = current.privateMode,
             aspectRatioOverride = current.aspectRatioOverride,
-            keepOriginal = current.keepOriginal
+            keepOriginal = current.keepOriginal,
+            serverConfigured = current.serverConfigured,
+            signedIn = current.signedIn,
+            guestMode = current.guestMode,
+            accountName = current.accountName,
+            creditsAvailable = server.session()?.creditsAvailable ?: current.creditsAvailable,
+            authBusy = current.authBusy,
+            authError = current.authError
         )
-        if (state.lastSavedUri != null && state.stage == DirectorStage.READY) refreshGallery()
+        if (state.lastSavedUri != null && state.stage == DirectorStage.READY) {
+            refreshGallery()
+            refreshCredits()
+        }
     }
 
     private val _ui = MutableStateFlow(
         DirectorUiState(
-            hasApiKey = runtime.isReady(),
             aiAvailable = runtime.isReady() && !initialPrivateMode,
             recipeCount = recipeMemory.count(),
-            status = if (initialPrivateMode || !runtime.isReady()) "Sierra β ready" else "Sierra AI + β ready",
-            sierraMode = if (initialPrivateMode || !runtime.isReady()) SierraMode.BETA else SierraMode.AI,
+            status = if (runtime.isReady() && !initialPrivateMode) "Sierra AI + β ready" else "Sierra β ready",
+            sierraMode = if (runtime.isReady() && !initialPrivateMode) SierraMode.AI else SierraMode.BETA,
             privateMode = initialPrivateMode,
             aspectRatioOverride = initialAspectRatioOverride,
             aspectRatio = initialAspectRatioOverride ?: "4:3",
-            keepOriginal = initialKeepOriginal
+            keepOriginal = initialKeepOriginal,
+            serverConfigured = server.configured,
+            signedIn = initialSession != null,
+            guestMode = initialGuestMode && initialSession == null,
+            accountName = initialSession?.displayName,
+            creditsAvailable = initialSession?.creditsAvailable
         )
     )
     val ui: StateFlow<DirectorUiState> = _ui.asStateFlow()
@@ -98,10 +106,11 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
     private var cameraBound = false
 
     init {
-        orchestrator.setCloudEnabled(!initialPrivateMode)
+        orchestrator.setCloudEnabled(initialSession != null && !initialPrivateMode)
         orchestrator.setAspectRatioOverride(initialAspectRatioOverride)
         orchestrator.setKeepOriginal(initialKeepOriginal)
         refreshGallery()
+        refreshCredits()
         viewModelScope.launch {
             val recovered = orchestrator.recoverPendingReferences()
             if (recovered.isNotEmpty()) {
@@ -126,11 +135,96 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
                         runCatching { deviceConfigSkill.refresh(camera.capabilities(), camera.snapshot()) }
                     }
                     refreshCamera()
+                    syncDeviceProfile()
                 }
                 .onFailure {
                     _ui.value = _ui.value.copy(stage = DirectorStage.ERROR, status = "Camera unavailable", error = it.message)
                 }
         }
+    }
+
+    fun signup(name: String, email: String, phone: String, dobIso: String, password: String) {
+        if (_ui.value.authBusy) return
+        _ui.value = _ui.value.copy(authBusy = true, authError = null)
+        viewModelScope.launch {
+            server.signup(name.trim(), email.trim(), phone.trim(), dobIso.trim(), password, deviceProfile.collect())
+                .onSuccess { session ->
+                    preferences.edit().putBoolean("guest_mode", false).apply()
+                    orchestrator.setCloudEnabled(!_ui.value.privateMode)
+                    _ui.value = _ui.value.copy(
+                        signedIn = true,
+                        guestMode = false,
+                        accountName = session.displayName,
+                        creditsAvailable = session.creditsAvailable,
+                        aiAvailable = !_ui.value.privateMode,
+                        sierraMode = if (_ui.value.privateMode) SierraMode.BETA else SierraMode.AI,
+                        authBusy = false,
+                        authError = null,
+                        status = if (_ui.value.privateMode) "Sierra β Private • on-device only" else "Sierra AI + β ready"
+                    )
+                    syncDeviceProfile()
+                }
+                .onFailure { error ->
+                    _ui.value = _ui.value.copy(authBusy = false, authError = error.message ?: "Could not create account")
+                }
+        }
+    }
+
+    fun login(email: String, password: String) {
+        if (_ui.value.authBusy) return
+        _ui.value = _ui.value.copy(authBusy = true, authError = null)
+        viewModelScope.launch {
+            server.login(email.trim(), password)
+                .onSuccess { session ->
+                    preferences.edit().putBoolean("guest_mode", false).apply()
+                    orchestrator.setCloudEnabled(!_ui.value.privateMode)
+                    _ui.value = _ui.value.copy(
+                        signedIn = true,
+                        guestMode = false,
+                        accountName = session.displayName,
+                        creditsAvailable = session.creditsAvailable,
+                        aiAvailable = !_ui.value.privateMode,
+                        sierraMode = if (_ui.value.privateMode) SierraMode.BETA else SierraMode.AI,
+                        authBusy = false,
+                        authError = null,
+                        status = if (_ui.value.privateMode) "Sierra β Private • on-device only" else "Sierra AI + β ready"
+                    )
+                    syncDeviceProfile()
+                }
+                .onFailure { error ->
+                    _ui.value = _ui.value.copy(authBusy = false, authError = error.message ?: "Could not sign in")
+                }
+        }
+    }
+
+    fun continueWithBeta() {
+        preferences.edit().putBoolean("guest_mode", true).apply()
+        orchestrator.setCloudEnabled(false)
+        _ui.value = _ui.value.copy(
+            guestMode = true,
+            signedIn = false,
+            aiAvailable = false,
+            sierraMode = SierraMode.BETA,
+            authBusy = false,
+            authError = null,
+            status = "Sierra β ready • local only"
+        )
+    }
+
+    fun signOut() {
+        orchestrator.cancelForUserAction()
+        server.logoutLocal()
+        preferences.edit().putBoolean("guest_mode", false).apply()
+        orchestrator.setCloudEnabled(false)
+        _ui.value = _ui.value.copy(
+            signedIn = false,
+            guestMode = false,
+            accountName = null,
+            creditsAvailable = null,
+            aiAvailable = false,
+            sierraMode = SierraMode.BETA,
+            status = "Signed out • Sierra β available"
+        )
     }
 
     fun primaryCapture() {
@@ -141,20 +235,10 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
                 throw cancelled
             } catch (oom: OutOfMemoryError) {
                 runtime.cancel()
-                _ui.value = _ui.value.copy(
-                    stage = DirectorStage.ERROR,
-                    aiAvailable = runtime.isReady() && !_ui.value.privateMode,
-                    status = "Sierra memory pressure • try again",
-                    error = "Analysis used too much memory"
-                )
+                _ui.value = _ui.value.copy(stage = DirectorStage.ERROR, aiAvailable = runtime.isReady() && !_ui.value.privateMode, status = "Sierra memory pressure • try again", error = "Analysis used too much memory")
             } catch (t: Throwable) {
                 runtime.cancel()
-                _ui.value = _ui.value.copy(
-                    stage = DirectorStage.ERROR,
-                    aiAvailable = runtime.isReady() && !_ui.value.privateMode,
-                    status = "Sierra could not prepare the shot",
-                    error = t.message ?: t::class.java.simpleName
-                )
+                _ui.value = _ui.value.copy(stage = DirectorStage.ERROR, aiAvailable = runtime.isReady() && !_ui.value.privateMode, status = "Sierra could not prepare the shot", error = t.message ?: t::class.java.simpleName)
             }
         }
     }
@@ -166,21 +250,15 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun zoom(value: Float) {
-        orchestrator.cancelForUserAction()
-        camera.userSetZoom(value)
-        refreshCameraSoon("Zoom ${String.format(Locale.US, "%.1f", value)}×")
+        orchestrator.cancelForUserAction(); camera.userSetZoom(value); refreshCameraSoon("Zoom ${String.format(Locale.US, "%.1f", value)}×")
     }
 
     fun exposure(index: Int) {
-        orchestrator.cancelForUserAction()
-        camera.userSetExposureIndex(index)
-        refreshCameraSoon("Exposure adjusted")
+        orchestrator.cancelForUserAction(); camera.userSetExposureIndex(index); refreshCameraSoon("Exposure adjusted")
     }
 
     fun torch(enabled: Boolean) {
-        orchestrator.cancelForUserAction()
-        camera.userSetTorch(enabled)
-        refreshCameraSoon(if (enabled) "Torch on" else "Torch off")
+        orchestrator.cancelForUserAction(); camera.userSetTorch(enabled); refreshCameraSoon(if (enabled) "Torch on" else "Torch off")
     }
 
     fun cycleFlash() {
@@ -190,8 +268,7 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
             StillFlashMode.AUTO -> StillFlashMode.ON
             StillFlashMode.ON -> StillFlashMode.OFF
         }
-        camera.userSetFlash(next)
-        refreshCameraSoon("Flash ${next.wireName}")
+        camera.userSetFlash(next); refreshCameraSoon("Flash ${next.wireName}")
     }
 
     fun switchCamera() {
@@ -199,9 +276,8 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
         runCatching { camera.switchLens() }
             .onSuccess { switched ->
                 if (switched) {
-                    viewModelScope.launch(Dispatchers.IO) {
-                        runCatching { deviceConfigSkill.refresh(camera.capabilities(), camera.snapshot()) }
-                    }
+                    viewModelScope.launch(Dispatchers.IO) { runCatching { deviceConfigSkill.refresh(camera.capabilities(), camera.snapshot()) } }
+                    syncDeviceProfile()
                 }
                 refreshCamera(if (switched) "Camera switched" else "Other camera unavailable")
             }
@@ -211,46 +287,33 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
     fun togglePrivateMode() {
         val enabled = !_ui.value.privateMode
         orchestrator.cancelForUserAction()
-        orchestrator.setCloudEnabled(!enabled)
+        orchestrator.setCloudEnabled(!enabled && _ui.value.signedIn)
         preferences.edit().putBoolean("private_mode", enabled).apply()
+        val aiReady = !enabled && runtime.isReady()
         _ui.value = _ui.value.copy(
             privateMode = enabled,
-            aiAvailable = !enabled && runtime.isReady(),
-            sierraMode = if (!enabled && runtime.isReady()) SierraMode.AI else SierraMode.BETA,
+            aiAvailable = aiReady,
+            sierraMode = if (aiReady) SierraMode.AI else SierraMode.BETA,
             stage = DirectorStage.READY,
-            status = if (enabled) "Sierra β Private • on-device only" else if (runtime.isReady()) "Sierra AI + β ready" else "Sierra β ready",
+            status = if (enabled) "Sierra β Private • on-device only" else if (aiReady) "Sierra AI + β ready" else "Sierra β ready",
             error = null
         )
     }
 
     fun setAspectRatioOverride(value: String?) {
         val safe = value?.takeIf(SierraCropPolicy::isSupported)
-        orchestrator.cancelForUserAction()
-        orchestrator.setAspectRatioOverride(safe)
-        preferences.edit().apply {
-            if (safe == null) remove("aspect_ratio_override") else putString("aspect_ratio_override", safe)
-        }.apply()
-        _ui.value = _ui.value.copy(
-            aspectRatioOverride = safe,
-            aspectRatio = safe ?: _ui.value.aspectRatio,
-            stage = DirectorStage.READY,
-            status = if (safe == null) "Aspect ratio • Sierra Auto" else "Aspect ratio • $safe",
-            error = null
-        )
+        orchestrator.cancelForUserAction(); orchestrator.setAspectRatioOverride(safe)
+        preferences.edit().apply { if (safe == null) remove("aspect_ratio_override") else putString("aspect_ratio_override", safe) }.apply()
+        _ui.value = _ui.value.copy(aspectRatioOverride = safe, aspectRatio = safe ?: _ui.value.aspectRatio, stage = DirectorStage.READY, status = if (safe == null) "Aspect ratio • Sierra Auto" else "Aspect ratio • $safe", error = null)
     }
 
     fun toggleKeepOriginal() {
         val enabled = !_ui.value.keepOriginal
-        orchestrator.setKeepOriginal(enabled)
-        preferences.edit().putBoolean("keep_original", enabled).apply()
+        orchestrator.setKeepOriginal(enabled); preferences.edit().putBoolean("keep_original", enabled).apply()
         _ui.value = _ui.value.copy(keepOriginal = enabled, status = if (enabled) "Originals will also be saved" else "Saving Sierra final only")
     }
 
-    fun openGallery() {
-        refreshGallery()
-        _ui.value = _ui.value.copy(showGallery = true, showTools = false, showSettings = false)
-    }
-
+    fun openGallery() { refreshGallery(); _ui.value = _ui.value.copy(showGallery = true, showTools = false, showSettings = false) }
     fun closeGallery() { _ui.value = _ui.value.copy(showGallery = false) }
 
     fun refreshGallery() {
@@ -267,72 +330,57 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
     fun toggleGrid() { _ui.value = _ui.value.copy(gridEnabled = !_ui.value.gridEnabled) }
     fun toggleLevel() { _ui.value = _ui.value.copy(levelEnabled = !_ui.value.levelEnabled) }
 
-    // Development-only provider hooks retained until the Sierra laptop gateway replaces direct
-    // provider access. The customer Sierra Vision surface does not expose these controls.
-    fun providerPresets(): List<AiProviderPreset> = runtime.presets()
-    fun selectedProvider(): AiProviderPreset = runtime.selectedPreset()
-    fun providerHasCredential(preset: AiProviderPreset): Boolean = runtime.hasCredential(preset)
-    fun openRouterCustomModel(): String = runtime.openRouterCustomModel()
-    fun customEndpoint(): String = runtime.customEndpoint()
-    fun customModel(): String = runtime.customModel()
-
-    fun selectProvider(preset: AiProviderPreset) {
-        orchestrator.cancelForUserAction()
-        runtime.selectPreset(preset)
-        refreshCamera()
-    }
-
-    fun saveProvider(preset: AiProviderPreset, apiKey: String, endpoint: String = "", model: String = ""): String? = runCatching {
-        require(preset != AiProviderPreset.AUTO) { "Choose a provider before adding a key" }
-        if (preset == AiProviderPreset.CUSTOM_OPENAI) {
-            require(endpoint.trim().startsWith("https://")) { "Custom endpoint must use HTTPS" }
-            require(model.isNotBlank()) { "Custom model ID is required" }
-            runtime.saveCustomRoute(endpoint, model)
-        }
-        if (preset == AiProviderPreset.OPENROUTER_CUSTOM) {
-            require(model.isNotBlank()) { "OpenRouter model ID is required" }
-            runtime.saveOpenRouterCustomModel(model)
-        }
-        if (apiKey.isNotBlank()) runtime.saveCredential(preset, apiKey)
-        require(runtime.hasCredential(preset)) { "API key is required" }
-        runtime.selectPreset(preset)
-        viewModelScope.launch {
-            runtime.validateConnection(preset).onSuccess { refreshCamera("Sierra AI route connected") }
-                .onFailure { refreshCamera("Sierra β ready • cloud route unavailable") }
-        }
-        null
-    }.getOrElse { it.message ?: "Could not save provider" }
-
-    fun clearProvider(preset: AiProviderPreset) { runtime.clearCredential(preset); refreshCamera() }
-    fun saveApiKey(value: String): String? = saveProvider(selectedProvider().takeUnless { it == AiProviderPreset.AUTO } ?: AiProviderPreset.NVIDIA_NEMOTRON, value)
-    fun clearApiKey() = clearProvider(selectedProvider().takeUnless { it == AiProviderPreset.AUTO } ?: AiProviderPreset.NVIDIA_NEMOTRON)
-
     private fun refreshCamera(status: String? = null) {
         val current = _ui.value
-        val privateMode = current.privateMode
-        val aiReady = runtime.isReady() && !privateMode
+        val aiReady = runtime.isReady() && !current.privateMode
         _ui.value = current.copy(
             camera = runCatching { camera.uiState() }.getOrDefault(current.camera),
-            status = status ?: if (privateMode) "Sierra β Private • on-device only" else if (aiReady) "Sierra AI + β ready" else "Sierra β ready",
-            hasApiKey = runtime.isReady(),
+            status = status ?: if (current.privateMode) "Sierra β Private • on-device only" else if (aiReady) "Sierra AI + β ready" else "Sierra β ready",
             aiAvailable = aiReady,
             recipeCount = recipeMemory.count(),
             sierraMode = if (aiReady) SierraMode.AI else SierraMode.BETA,
+            creditsAvailable = server.session()?.creditsAvailable ?: current.creditsAvailable,
             stage = DirectorStage.READY
         )
     }
 
-    private fun refreshCameraSoon(status: String) {
-        viewModelScope.launch { delay(80); refreshCamera(status) }
+    private fun refreshCredits() {
+        if (!server.authenticated) return
+        viewModelScope.launch {
+            server.credits().onSuccess { value -> _ui.value = _ui.value.copy(creditsAvailable = value.available) }
+        }
     }
 
+    private fun syncDeviceProfile() {
+        if (!server.authenticated) return
+        viewModelScope.launch {
+            val cameraProfile = if (cameraBound) runCatching {
+                val caps = camera.capabilities()
+                mapOf(
+                    "lens_facing" to caps.lensFacing.toString(),
+                    "zoom_min" to caps.minZoom.toString(),
+                    "zoom_max" to caps.maxZoom.toString(),
+                    "exposure_ev_min" to caps.minExposureEv.toString(),
+                    "exposure_ev_max" to caps.maxExposureEv.toString(),
+                    "flash" to caps.hasFlash.toString(),
+                    "torch" to caps.torchSupported.toString(),
+                    "focus_metering" to caps.focusMeteringSupported.toString(),
+                    "manual_sensor" to caps.manualSensorSupported.toString(),
+                    "raw" to caps.rawSupported.toString(),
+                    "focal_lengths_mm" to caps.focalLengthsMm.joinToString(","),
+                    "extensions" to caps.extensions.joinToString(",") { it.wireName }
+                )
+            }.getOrNull() else null
+            server.syncDevice(deviceProfile.collect(cameraProfile))
+        }
+    }
+
+    private fun refreshCameraSoon(status: String) { viewModelScope.launch { delay(80); refreshCamera(status) } }
+
     fun onAppBackgrounded() { orchestrator.cancelForUserAction() }
-    fun onAppForegrounded() { refreshCamera(); refreshGallery() }
+    fun onAppForegrounded() { refreshCamera(); refreshGallery(); refreshCredits(); syncDeviceProfile() }
 
     override fun onCleared() {
-        orchestrator.cancelForUserAction()
-        runtime.close()
-        camera.close()
-        super.onCleared()
+        orchestrator.cancelForUserAction(); runtime.close(); camera.close(); super.onCleared()
     }
 }
