@@ -189,14 +189,19 @@ class SierraBackendClient(
         if (!force && current.accessExpiresAtMs > System.currentTimeMillis() + 30_000L) {
             return@withLock current.accessToken
         }
-        val raw = postPublic(
-            "/v1/auth/refresh",
-            json.encodeToString(SierraRefreshRequest(current.refreshToken)),
-            200
-        )
-        val pair = json.decodeFromString<SierraTokenPair>(raw)
-        sessions.save(pair)
-        pair.accessToken
+        try {
+            val raw = postPublic(
+                "/v1/auth/refresh",
+                json.encodeToString(SierraRefreshRequest(current.refreshToken)),
+                200
+            )
+            val pair = json.decodeFromString<SierraTokenPair>(raw)
+            sessions.save(pair)
+            pair.accessToken
+        } catch (auth: SierraAuthException) {
+            sessions.clear()
+            throw auth
+        }
     }
 
     private suspend fun postPublic(path: String, body: String, expectedCode: Int): String {
