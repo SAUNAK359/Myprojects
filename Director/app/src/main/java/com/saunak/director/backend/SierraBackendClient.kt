@@ -1,23 +1,28 @@
 package com.saunak.director.backend
 
 import android.content.Context
-import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
 import java.io.Closeable
 import java.io.IOException
 import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 class SierraBackendClient(
     context: Context,
@@ -118,8 +123,7 @@ class SierraBackendClient(
     }
 
     override suspend fun complete(jobId: String, captureId: String): Result<SierraJobView> = result {
-        val body = json.encodeToString(SierraCompleteRequest(captureId))
-            .toRequestBody(JSON_MEDIA)
+        val body = json.encodeToString(SierraCompleteRequest(captureId)).toRequestBody(JSON_MEDIA)
         val raw = executeAuthenticated { token ->
             Request.Builder()
                 .url(url("/v1/jobs/${safeId(jobId)}/complete"))
@@ -207,8 +211,18 @@ class SierraBackendClient(
         }
     }
 
-    private suspend fun execute(request: Request) = withContext(Dispatchers.IO) {
-        client.newCall(request).execute()
+    private suspend fun execute(request: Request): Response = suspendCancellableCoroutine { continuation ->
+        val call = client.newCall(request)
+        continuation.invokeOnCancellation { call.cancel() }
+        call.enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                if (continuation.isActive) continuation.resumeWithException(e)
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                if (continuation.isActive) continuation.resume(response) else response.close()
+            }
+        })
     }
 
     private fun apiError(code: Int, raw: String): IOException {
@@ -240,6 +254,8 @@ class SierraBackendClient(
 
     private suspend fun <T> result(block: suspend () -> T): Result<T> = try {
         Result.success(block())
+    } catch (t: CancellationException) {
+        throw t
     } catch (t: Throwable) {
         Result.failure(t)
     }
