@@ -21,7 +21,11 @@ data class PlanOutput(
     @SerialName("reference_score") val referenceScore: Double = 0.5,
     @SerialName("reference_accept") val referenceAccept: Boolean = false,
     @SerialName("calls") val toolCalls: List<ToolCall> = emptyList(),
-    @SerialName("recapture") val recapture: Boolean = true
+    @SerialName("recapture") val recapture: Boolean = true,
+    @SerialName("aspect_ratio") val aspectRatio: String = "4:3",
+    @SerialName("crop_center_x") val cropCenterX: Double = 0.5,
+    @SerialName("crop_center_y") val cropCenterY: Double = 0.5,
+    @SerialName("planner") val planner: String = "sierra_ai"
 )
 
 @Serializable
@@ -53,6 +57,8 @@ enum class DirectorStage {
     OBSERVING
 }
 
+enum class SierraMode { AI, BETA }
+
 data class DirectorUiState(
     val stage: DirectorStage = DirectorStage.CAMERA_ONLY,
     val aiAvailable: Boolean = false,
@@ -67,5 +73,10 @@ data class DirectorUiState(
     val showSettings: Boolean = false,
     val showTools: Boolean = false,
     val gridEnabled: Boolean = false,
-    val levelEnabled: Boolean = false
+    val levelEnabled: Boolean = false,
+    val sierraMode: SierraMode = SierraMode.BETA,
+    val aspectRatio: String = "4:3",
+    val sceneLabel: String? = null,
+    val objective: String? = null,
+    val privateMode: Boolean = false
 )
