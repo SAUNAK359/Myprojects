@@ -5,6 +5,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Header, HTTPException, UploadFile, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -16,6 +17,7 @@ from app.schemas import CompleteJobRequest, CreditView, JobView, SierraPlan
 
 router = APIRouter(prefix="/v1/jobs", tags=["jobs"])
 ALLOWED_TYPES = {"image/jpeg", "image/png", "image/webp"}
+TERMINAL = {"completed", "failed", "cancelled", "expired"}
 
 
 def _view(job: Job, user: User) -> JobView:
@@ -29,8 +31,16 @@ def _view(job: Job, user: User) -> JobView:
         provider_model=job.provider_model,
         created_at=job.created_at,
         ready_expires_at=job.ready_expires_at,
-        credits=CreditView(balance=user.credit_balance, reserved=user.credit_reserved, available=user.available_credits),
+        credits=CreditView(
+            balance=user.credit_balance,
+            reserved=user.credit_reserved,
+            available=user.available_credits,
+        ),
     )
+
+
+async def _existing_job(db: AsyncSession, user_id: uuid.UUID, key: str) -> Job | None:
+    return await db.scalar(select(Job).where(Job.user_id == user_id, Job.idempotency_key == key))
 
 
 @router.post("", response_model=JobView, status_code=status.HTTP_202_ACCEPTED)
@@ -40,21 +50,37 @@ async def create_job(
     user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
 ) -> JobView:
-    existing = await db.scalar(select(Job).where(Job.user_id == user.id, Job.idempotency_key == idempotency_key))
+    existing = await _existing_job(db, user.id, idempotency_key)
     if existing:
         await db.refresh(user)
         return _view(existing, user)
+
     if image.content_type not in ALLOWED_TYPES:
         raise HTTPException(status_code=415, detail="analysis image must be JPEG, PNG or WebP")
     raw = await image.read(settings.max_upload_bytes + 1)
     if not raw or len(raw) > settings.max_upload_bytes:
         raise HTTPException(status_code=413, detail="analysis image is too large")
-    if raw[:2] != b"\xff\xd8" and raw[:8] != b"\x89PNG\r\n\x1a\n" and raw[:4] not in {b"RIFF"}:
+
+    is_jpeg = raw[:2] == b"\xff\xd8"
+    is_png = raw[:8] == b"\x89PNG\r\n\x1a\n"
+    is_webp = len(raw) >= 12 and raw[:4] == b"RIFF" and raw[8:12] == b"WEBP"
+    if not (is_jpeg or is_png or is_webp):
         raise HTTPException(status_code=415, detail="analysis payload is not a recognized image")
 
     job = Job(user_id=user.id, idempotency_key=idempotency_key, state="queued")
     db.add(job)
-    await db.flush()
+    try:
+        await db.flush()
+    except IntegrityError:
+        # A concurrent retry with the same key won the unique-key race. Return that exact job
+        # rather than creating a second reservation or charging twice.
+        await db.rollback()
+        winner = await _existing_job(db, user.id, idempotency_key)
+        if winner is None:
+            raise
+        await db.refresh(user)
+        return _view(winner, user)
+
     path = settings.runtime_dir / "analysis" / f"{job.id}_{secrets.token_hex(8)}.img"
     try:
         path.write_bytes(raw)
@@ -65,12 +91,17 @@ async def create_job(
         await db.rollback()
         path.unlink(missing_ok=True)
         raise
+
     await db.refresh(job)
     return _view(job, user)
 
 
 @router.get("/{job_id}", response_model=JobView)
-async def get_job(job_id: uuid.UUID, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)) -> JobView:
+async def get_job(
+    job_id: uuid.UUID,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+) -> JobView:
     job = await db.scalar(select(Job).where(Job.id == job_id, Job.user_id == user.id))
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
@@ -79,8 +110,16 @@ async def get_job(job_id: uuid.UUID, user: User = Depends(current_user), db: Asy
 
 
 @router.post("/{job_id}/complete", response_model=JobView)
-async def complete_job(job_id: uuid.UUID, payload: CompleteJobRequest, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)) -> JobView:
-    job = await db.scalar(select(Job).where(Job.id == job_id, Job.user_id == user.id).with_for_update())
+async def complete_job(
+    job_id: uuid.UUID,
+    payload: CompleteJobRequest,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+) -> JobView:
+    del payload  # final photo remains on-device; request confirms final capture completed
+    job = await db.scalar(
+        select(Job).where(Job.id == job_id, Job.user_id == user.id).with_for_update()
+    )
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
     if job.state == "completed":
@@ -93,6 +132,7 @@ async def complete_job(job_id: uuid.UUID, payload: CompleteJobRequest, user: Use
         await release_job_credit(db, job, "complete arrived after expiry")
         await db.commit()
         raise HTTPException(status_code=409, detail="job expired before final capture confirmation")
+
     user = await commit_job_credit(db, job)
     job.state = "completed"
     job.completed_at = datetime.now(timezone.utc)
@@ -103,18 +143,25 @@ async def complete_job(job_id: uuid.UUID, payload: CompleteJobRequest, user: Use
 
 
 @router.post("/{job_id}/cancel", response_model=JobView)
-async def cancel_job(job_id: uuid.UUID, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)) -> JobView:
-    job = await db.scalar(select(Job).where(Job.id == job_id, Job.user_id == user.id).with_for_update())
+async def cancel_job(
+    job_id: uuid.UUID,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+) -> JobView:
+    job = await db.scalar(
+        select(Job).where(Job.id == job_id, Job.user_id == user.id).with_for_update()
+    )
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
-    if job.state in {"completed", "failed", "cancelled", "expired"}:
+    if job.state in TERMINAL:
         await db.refresh(user)
         return _view(job, user)
+
     job.state = "cancelled"
     user = await release_job_credit(db, job, "client cancelled")
+    image_path = job.analysis_image_path
+    job.analysis_image_path = None
     await db.commit()
-    if job.analysis_image_path:
-        Path(job.analysis_image_path).unlink(missing_ok=True)
-        job.analysis_image_path = None
-        await db.commit()
+    if image_path:
+        Path(image_path).unlink(missing_ok=True)
     return _view(job, user)
