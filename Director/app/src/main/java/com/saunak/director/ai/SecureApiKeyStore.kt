@@ -10,33 +10,27 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
-/**
- * Stores the user-supplied NVIDIA API key encrypted with an app-local Android Keystore key.
- * The API key is never committed to source, logs, crash messages, or Director recipes.
- *
- * v2 intentionally uses new preference keys so an old Gemini key is never accidentally sent
- * to NVIDIA after upgrading the app. The user must enter an NVIDIA NIM API key once.
- */
+/** Stores provider API keys encrypted with Android Keystore. */
 class SecureApiKeyStore(context: Context) {
     private val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
-    fun hasKey(): Boolean = !prefs.getString(KEY_CIPHERTEXT, null).isNullOrBlank()
+    fun hasKey(providerId: String = "nvidia"): Boolean = !prefs.getString(cipherName(providerId), null).isNullOrBlank()
 
-    fun save(apiKey: String) {
+    fun save(apiKey: String, providerId: String = "nvidia") {
         val clean = apiKey.trim()
-        require(clean.length >= 20) { "API key looks incomplete" }
+        require(clean.length >= 12) { "API key looks incomplete" }
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey())
         val encrypted = cipher.doFinal(clean.toByteArray(Charsets.UTF_8))
         prefs.edit()
-            .putString(KEY_CIPHERTEXT, Base64.encodeToString(encrypted, Base64.NO_WRAP))
-            .putString(KEY_IV, Base64.encodeToString(cipher.iv, Base64.NO_WRAP))
+            .putString(cipherName(providerId), Base64.encodeToString(encrypted, Base64.NO_WRAP))
+            .putString(ivName(providerId), Base64.encodeToString(cipher.iv, Base64.NO_WRAP))
             .apply()
     }
 
-    fun read(): String? {
-        val encrypted = prefs.getString(KEY_CIPHERTEXT, null) ?: return null
-        val iv = prefs.getString(KEY_IV, null) ?: return null
+    fun read(providerId: String = "nvidia"): String? {
+        val encrypted = prefs.getString(cipherName(providerId), null) ?: return null
+        val iv = prefs.getString(ivName(providerId), null) ?: return null
         return runCatching {
             val cipher = Cipher.getInstance(TRANSFORMATION)
             cipher.init(
@@ -48,9 +42,13 @@ class SecureApiKeyStore(context: Context) {
         }.getOrNull()
     }
 
-    fun clear() {
-        prefs.edit().remove(KEY_CIPHERTEXT).remove(KEY_IV).apply()
+    fun clear(providerId: String = "nvidia") {
+        prefs.edit().remove(cipherName(providerId)).remove(ivName(providerId)).apply()
     }
+
+    private fun cipherName(providerId: String) = "provider_${safe(providerId)}_ciphertext_v3"
+    private fun ivName(providerId: String) = "provider_${safe(providerId)}_iv_v3"
+    private fun safe(value: String) = value.lowercase().replace(Regex("[^a-z0-9_-]"), "_")
 
     private fun getOrCreateKey(): SecretKey {
         val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
@@ -71,9 +69,7 @@ class SecureApiKeyStore(context: Context) {
 
     companion object {
         private const val PREFS = "director_secure_settings"
-        private const val ALIAS = "director_nvidia_key_v2"
-        private const val KEY_CIPHERTEXT = "nvidia_ciphertext_v2"
-        private const val KEY_IV = "nvidia_iv_v2"
+        private const val ALIAS = "director_provider_keys_v3"
         private const val TRANSFORMATION = "AES/GCM/NoPadding"
     }
 }
