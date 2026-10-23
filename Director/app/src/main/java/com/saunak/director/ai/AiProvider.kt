@@ -11,14 +11,14 @@ enum class AiProviderPreset(
 ) {
     AUTO(
         id = "auto",
-        label = "Auto • best available",
+        label = "Auto • fastest configured",
         credentialId = null,
         endpoint = null,
         model = null
     ),
     GROQ_QWEN38(
         id = "groq_qwen38",
-        label = "Groq • Qwen 3.8 27B",
+        label = "Groq • Qwen 3.8 27B Vision",
         credentialId = "groq",
         endpoint = "https://api.groq.com/openai/v1/chat/completions",
         model = "qwen/qwen3.8-27b",
@@ -26,26 +26,10 @@ enum class AiProviderPreset(
     ),
     OPENROUTER_NEMOTRON_FREE(
         id = "openrouter_nemotron_free",
-        label = "OpenRouter • Nemotron 3.5 VL Free",
+        label = "OpenRouter • Nemotron 3.5 Super VL Free",
         credentialId = "openrouter",
         endpoint = "https://openrouter.ai/api/v1/chat/completions",
         model = "nvidia/nemotron-3.5-super-vl:free",
-        freeRoute = true
-    ),
-    OPENROUTER_QWEN38_FREE(
-        id = "openrouter_qwen38_free",
-        label = "OpenRouter • Qwen 3.8 27B Free",
-        credentialId = "openrouter",
-        endpoint = "https://openrouter.ai/api/v1/chat/completions",
-        model = "qwen/qwen3.8-27b:free",
-        freeRoute = true
-    ),
-    OPENROUTER_GEMMA4_31B_FREE(
-        id = "openrouter_gemma4_31b_free",
-        label = "OpenRouter • Gemma 4 31B Free",
-        credentialId = "openrouter",
-        endpoint = "https://openrouter.ai/api/v1/chat/completions",
-        model = "google/gemma-4-31b-it:free",
         freeRoute = true
     ),
     NVIDIA_NEMOTRON(
@@ -71,26 +55,17 @@ enum class AiProviderPreset(
         model = "nvidia/nemotron-3.5-super-vl",
         includeInAuto = false
     ),
-    OPENROUTER_QWEN38(
-        id = "openrouter_qwen38",
-        label = "OpenRouter • Qwen 3.8 27B",
+    OPENROUTER_CUSTOM(
+        id = "openrouter_custom",
+        label = "OpenRouter • Custom Vision Model",
         credentialId = "openrouter",
         endpoint = "https://openrouter.ai/api/v1/chat/completions",
-        model = "qwen/qwen3.8-27b",
-        includeInAuto = false
-    ),
-    OPENROUTER_FREE_ROUTER(
-        id = "openrouter_free_router",
-        label = "OpenRouter • Automatic Free Model",
-        credentialId = "openrouter",
-        endpoint = "https://openrouter.ai/api/v1/chat/completions",
-        model = "openrouter/free",
-        freeRoute = true,
+        model = null,
         includeInAuto = false
     ),
     CUSTOM_OPENAI(
         id = "custom_openai",
-        label = "Custom • OpenAI-compatible",
+        label = "Custom • OpenAI-compatible Vision API",
         credentialId = "custom",
         endpoint = null,
         model = null,
@@ -99,14 +74,10 @@ enum class AiProviderPreset(
 
     companion object {
         fun fromId(id: String?): AiProviderPreset = entries.firstOrNull { it.id == id } ?: AUTO
-
         val selectable: List<AiProviderPreset> = entries.toList()
-
         val autoPriority: List<AiProviderPreset> = listOf(
             GROQ_QWEN38,
             OPENROUTER_NEMOTRON_FREE,
-            OPENROUTER_QWEN38_FREE,
-            OPENROUTER_GEMMA4_31B_FREE,
             NVIDIA_NEMOTRON,
             GEMINI_38_FLASH,
             CUSTOM_OPENAI
