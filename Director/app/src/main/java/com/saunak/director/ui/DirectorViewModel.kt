@@ -20,6 +20,7 @@ import com.saunak.director.skills.SkillEngine
 import com.saunak.director.storage.PhotoRepository
 import com.saunak.director.storage.RecipeMemory
 import com.saunak.director.tools.ToolExecutor
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -108,7 +109,31 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun primaryCapture() { viewModelScope.launch { orchestrator.onPrimaryPressed() } }
+    fun primaryCapture() {
+        viewModelScope.launch {
+            try {
+                orchestrator.onPrimaryPressed()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (oom: OutOfMemoryError) {
+                runtime.cancel()
+                _ui.value = _ui.value.copy(
+                    stage = DirectorStage.ERROR,
+                    aiAvailable = runtime.isReady(),
+                    status = "Director memory pressure • try again",
+                    error = "Analysis used too much memory"
+                )
+            } catch (t: Throwable) {
+                runtime.cancel()
+                _ui.value = _ui.value.copy(
+                    stage = DirectorStage.ERROR,
+                    aiAvailable = runtime.isReady(),
+                    status = providerFailureMessage(t),
+                    error = t.message ?: t::class.java.simpleName
+                )
+            }
+        }
+    }
 
     fun focus(x: Float, y: Float) {
         orchestrator.cancelForUserAction()
@@ -262,6 +287,7 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
         val message = t.message.orEmpty().trim()
         val lower = message.lowercase()
         return when {
+            "out of memory" in lower || "memory" in lower && "frame" in lower -> "Director memory pressure • try again"
             "401" in lower || "invalid" in lower && "key" in lower -> "API key invalid • update it in Settings"
             "402" in lower || "credits" in lower || "billing" in lower -> "Provider credits/billing required"
             "403" in lower || "blocked" in lower -> "Provider access blocked • check key/account"
