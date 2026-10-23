@@ -6,7 +6,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.viewModelScope
 import com.saunak.director.ai.DeviceConfigSkill
-import com.saunak.director.ai.GeminiVlmRuntime
+import com.saunak.director.ai.NvidiaNemotronVlmRuntime
 import com.saunak.director.ai.SecureApiKeyStore
 import com.saunak.director.camera.CameraEngine
 import com.saunak.director.camera.StillFlashMode
@@ -32,7 +32,7 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
     private val keyStore = SecureApiKeyStore(app)
     private val recipeMemory = RecipeMemory(app)
     private val deviceConfigSkill = DeviceConfigSkill(app)
-    private val runtime = GeminiVlmRuntime(app, keyStore = keyStore, deviceSkill = deviceConfigSkill, recipeMemory = recipeMemory)
+    private val runtime = NvidiaNemotronVlmRuntime(app, keyStore = keyStore, deviceSkill = deviceConfigSkill, recipeMemory = recipeMemory)
     private val repository = PhotoRepository(app)
     private val orchestrator = DirectorOrchestrator(
         camera = camera,
@@ -59,7 +59,7 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
             hasApiKey = keyStore.hasKey(),
             aiAvailable = keyStore.hasKey(),
             recipeCount = recipeMemory.count(),
-            status = if (keyStore.hasKey()) "Camera ready • Director online" else "Camera ready • add Gemini key"
+            status = if (keyStore.hasKey()) "Camera ready • Nemotron configured" else "Camera ready • add NVIDIA key"
         )
     )
     val ui: StateFlow<DirectorUiState> = _ui.asStateFlow()
@@ -91,7 +91,7 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
                     withContext(Dispatchers.IO) {
                         runCatching { deviceConfigSkill.refresh(camera.capabilities(), camera.snapshot()) }
                     }
-                    refreshCamera("Camera ready${if (keyStore.hasKey()) " • Director online" else " • add Gemini key"}")
+                    refreshCamera("Camera ready${if (keyStore.hasKey()) " • Nemotron online" else " • add NVIDIA key"}")
                 }
                 .onFailure {
                     _ui.value = _ui.value.copy(stage = DirectorStage.ERROR, status = "Camera unavailable", error = it.message)
@@ -164,11 +164,32 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
             hasApiKey = true,
             aiAvailable = true,
             showSettings = false,
-            status = "Gemini connected • Director ready",
+            status = "Checking NVIDIA connection…",
             error = null
         )
+        viewModelScope.launch {
+            runtime.validateConnection()
+                .onSuccess {
+                    _ui.value = _ui.value.copy(
+                        hasApiKey = true,
+                        aiAvailable = true,
+                        stage = DirectorStage.READY,
+                        status = "Nemotron connected • Director ready",
+                        error = null
+                    )
+                }
+                .onFailure { failure ->
+                    _ui.value = _ui.value.copy(
+                        hasApiKey = true,
+                        aiAvailable = false,
+                        stage = DirectorStage.ERROR,
+                        status = nvidiaFailureMessage(failure),
+                        error = failure.message
+                    )
+                }
+        }
         null
-    }.getOrElse { it.message ?: "Could not save key" }
+    }.getOrElse { it.message ?: "Could not save NVIDIA key" }
 
     fun clearApiKey() {
         orchestrator.cancelForUserAction()
@@ -178,8 +199,24 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
             aiAvailable = false,
             showSettings = false,
             stage = DirectorStage.CAMERA_ONLY,
-            status = "Camera ready • add Gemini key"
+            status = "Camera ready • add NVIDIA key",
+            error = null
         )
+    }
+
+    private fun nvidiaFailureMessage(t: Throwable): String {
+        val message = t.message.orEmpty().trim()
+        val lower = message.lowercase()
+        return when {
+            "401" in lower || "invalid" in lower && "key" in lower -> "NVIDIA key invalid • update it in Settings"
+            "402" in lower || "credits" in lower || "billing" in lower -> "NVIDIA credits required for this endpoint"
+            "403" in lower || "blocked" in lower -> "NVIDIA access blocked • check API key"
+            "404" in lower || "model" in lower && "unavailable" in lower -> "Nemotron endpoint unavailable"
+            "429" in lower || "rate limit" in lower -> "NVIDIA free-tier limit reached • try later"
+            "timeout" in lower || "timed out" in lower -> "Nemotron response timed out • try again"
+            message.isNotBlank() -> "NVIDIA API error • ${message.take(96)}"
+            else -> "NVIDIA connection failed"
+        }
     }
 
     private fun refreshCamera(status: String = _ui.value.status) {
