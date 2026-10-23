@@ -39,12 +39,38 @@ class SierraPlan(BaseModel):
         return value
 
 
+class DeviceProfileInput(BaseModel):
+    install_id: str = Field(min_length=8, max_length=64)
+    manufacturer: str = Field(min_length=1, max_length=80)
+    model: str = Field(min_length=1, max_length=120)
+    device_name: str | None = Field(default=None, max_length=120)
+    android_release: str = Field(min_length=1, max_length=32)
+    sdk_int: int = Field(ge=29, le=100)
+    app_version: str = Field(min_length=1, max_length=40)
+    app_build: int = Field(ge=1, le=2_147_483_647)
+    locale: str = Field(min_length=2, max_length=40)
+    timezone: str = Field(min_length=1, max_length=80)
+    screen_width_px: int | None = Field(default=None, ge=1, le=20000)
+    screen_height_px: int | None = Field(default=None, ge=1, le=20000)
+    density_dpi: int | None = Field(default=None, ge=72, le=2000)
+    is_emulator: bool = False
+    sierra_beta_version: str | None = Field(default=None, max_length=40)
+    camera_capabilities: dict | None = None
+
+
+class DeviceView(DeviceProfileInput):
+    id: uuid.UUID
+    first_seen_at: datetime
+    last_seen_at: datetime
+
+
 class SignupRequest(BaseModel):
     display_name: str = Field(min_length=1, max_length=120)
     email: EmailStr
     phone: str = Field(min_length=7, max_length=32)
     dob: date
     password: str = Field(min_length=12, max_length=200)
+    device: DeviceProfileInput
 
 
 class LoginRequest(BaseModel):
