@@ -1,6 +1,8 @@
 package com.saunak.director.camera
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Matrix
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
@@ -14,6 +16,7 @@ import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.FocusMeteringAction
+import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.MeteringPointFactory
@@ -26,11 +29,14 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import com.google.common.util.concurrent.ListenableFuture
 import kotlinx.coroutines.CancellableContinuation
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -40,6 +46,7 @@ class CameraEngine(private val context: Context) : AutoCloseable {
     private var provider: ProcessCameraProvider? = null
     private var camera: Camera? = null
     private var imageCapture: ImageCapture? = null
+    private var imageAnalysis: ImageAnalysis? = null
     private var preview: Preview? = null
     private var boundView: PreviewView? = null
     private var owner: LifecycleOwner? = null
@@ -47,6 +54,12 @@ class CameraEngine(private val context: Context) : AutoCloseable {
     private var lensFacing = CameraSelector.LENS_FACING_BACK
     private var currentExtension = DirectorExtension.NONE
     private val captureMutex = Mutex()
+
+    private val analysisExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "director-analysis-frame").apply { priority = Thread.NORM_PRIORITY - 1 }
+    }
+    private val frameLock = Any()
+    private var pendingFrame: CompletableDeferred<Bitmap>? = null
 
     @Volatile private var lastAf: Int? = null
     @Volatile private var lastAe: Int? = null
@@ -96,36 +109,140 @@ class CameraEngine(private val context: Context) : AutoCloseable {
         return manager.getExtensionEnabledCameraSelector(base, mode)
     }
 
+    private fun buildPreview(view: PreviewView, interop: Boolean): Preview {
+        val builder = Preview.Builder()
+        if (interop) Camera2Interop.Extender(builder).setSessionCaptureCallback(captureCallback)
+        return builder.build().also { it.surfaceProvider = view.surfaceProvider }
+    }
+
+    private fun buildImageCapture(view: PreviewView): ImageCapture = ImageCapture.Builder()
+        .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+        .setTargetRotation(view.display?.rotation ?: Surface.ROTATION_0)
+        .build()
+        .also { it.flashMode = flashModeToCameraX(userFlash) }
+
+    private fun buildImageAnalysis(view: PreviewView): ImageAnalysis {
+        val analysis = ImageAnalysis.Builder()
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+            .setTargetRotation(view.display?.rotation ?: Surface.ROTATION_0)
+            .build()
+
+        analysis.setAnalyzer(analysisExecutor) { image ->
+            val waiter = synchronized(frameLock) {
+                val current = pendingFrame
+                if (current?.isActive == true) pendingFrame = null
+                current
+            }
+            if (waiter == null || !waiter.isActive) {
+                image.close()
+                return@setAnalyzer
+            }
+
+            try {
+                var bitmap = image.toBitmap()
+                val rotation = image.imageInfo.rotationDegrees
+                if (rotation != 0) {
+                    val matrix = Matrix().apply { postRotate(rotation.toFloat()) }
+                    val rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+                    if (rotated !== bitmap && !bitmap.isRecycled) bitmap.recycle()
+                    bitmap = rotated
+                }
+                waiter.complete(bitmap)
+            } catch (t: Throwable) {
+                waiter.completeExceptionally(t)
+            } finally {
+                image.close()
+            }
+        }
+        return analysis
+    }
+
+    private fun clearAnalysisUseCase() {
+        runCatching { imageAnalysis?.clearAnalyzer() }
+        imageAnalysis = null
+        synchronized(frameLock) {
+            pendingFrame?.cancel()
+            pendingFrame = null
+        }
+    }
+
     private fun bindInternal(extension: DirectorExtension) {
         val p = checkNotNull(provider)
         val lifecycleOwner = checkNotNull(owner)
         val view = checkNotNull(boundView)
+        clearAnalysisUseCase()
         p.unbindAll()
-        lastAf = null; lastAe = null; lastAwb = null
+        lastAf = null
+        lastAe = null
+        lastAwb = null
 
-        val previewBuilder = Preview.Builder()
-        if (extension == DirectorExtension.NONE) Camera2Interop.Extender(previewBuilder).setSessionCaptureCallback(captureCallback)
-        preview = previewBuilder.build().also { it.surfaceProvider = view.surfaceProvider }
-        imageCapture = ImageCapture.Builder()
-            .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
-            .setTargetRotation(view.display?.rotation ?: Surface.ROTATION_0)
-            .build().also { it.flashMode = flashModeToCameraX(userFlash) }
-
+        preview = buildPreview(view, interop = extension == DirectorExtension.NONE)
+        imageCapture = buildImageCapture(view)
         val selector = effectiveSelector(extension)
+
         try {
-            camera = p.bindToLifecycle(lifecycleOwner, selector, preview, imageCapture)
+            if (extension == DirectorExtension.NONE) {
+                val analysis = buildImageAnalysis(view)
+                imageAnalysis = analysis
+                camera = try {
+                    p.bindToLifecycle(lifecycleOwner, selector, preview, imageCapture, analysis)
+                } catch (analysisBindFailure: Throwable) {
+                    // Older/limited devices can reject the three-use-case surface combination.
+                    // Director remains functional and falls back to a still for AI analysis.
+                    Log.w("DirectorCamera", "Live analysis unavailable; using still fallback", analysisBindFailure)
+                    analysis.clearAnalyzer()
+                    imageAnalysis = null
+                    p.unbindAll()
+                    preview = buildPreview(view, interop = true)
+                    imageCapture = buildImageCapture(view)
+                    p.bindToLifecycle(lifecycleOwner, selector, preview, imageCapture)
+                }
+            } else {
+                // CameraX only guarantees Preview + ImageCapture when an OEM extension is active.
+                camera = p.bindToLifecycle(lifecycleOwner, selector, preview, imageCapture)
+            }
             currentExtension = extension
         } catch (t: Throwable) {
             if (extension == DirectorExtension.NONE) throw t
             Log.w("DirectorCamera", "Extension bind failed; restoring normal camera", t)
+            clearAnalysisUseCase()
             p.unbindAll()
-            val fallbackPreviewBuilder = Preview.Builder()
-            Camera2Interop.Extender(fallbackPreviewBuilder).setSessionCaptureCallback(captureCallback)
-            preview = fallbackPreviewBuilder.build().also { it.surfaceProvider = view.surfaceProvider }
-            imageCapture = ImageCapture.Builder().setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
-                .setTargetRotation(view.display?.rotation ?: Surface.ROTATION_0).build().also { it.flashMode = flashModeToCameraX(userFlash) }
-            camera = p.bindToLifecycle(lifecycleOwner, baseSelector(), preview, imageCapture)
+            preview = buildPreview(view, interop = true)
+            imageCapture = buildImageCapture(view)
+            val analysis = buildImageAnalysis(view)
+            imageAnalysis = analysis
+            camera = try {
+                p.bindToLifecycle(lifecycleOwner, baseSelector(), preview, imageCapture, analysis)
+            } catch (analysisBindFailure: Throwable) {
+                Log.w("DirectorCamera", "Fallback live analysis unavailable", analysisBindFailure)
+                analysis.clearAnalyzer()
+                imageAnalysis = null
+                p.unbindAll()
+                preview = buildPreview(view, interop = true)
+                imageCapture = buildImageCapture(view)
+                p.bindToLifecycle(lifecycleOwner, baseSelector(), preview, imageCapture)
+            }
             currentExtension = DirectorExtension.NONE
+        }
+    }
+
+    /** Returns one fresh preview frame. No full-resolution still is captured or written to disk. */
+    suspend fun captureAnalysisFrame(timeoutMs: Long = 800L): Bitmap? {
+        if (imageAnalysis == null) return null
+        val request = CompletableDeferred<Bitmap>()
+        synchronized(frameLock) {
+            pendingFrame?.cancel()
+            pendingFrame = request
+        }
+        return try {
+            withTimeoutOrNull(timeoutMs.coerceIn(150L, 1500L)) { request.await() }
+        } catch (_: Throwable) {
+            null
+        } finally {
+            synchronized(frameLock) {
+                if (pendingFrame === request) pendingFrame = null
+            }
         }
     }
 
@@ -135,7 +252,11 @@ class CameraEngine(private val context: Context) : AutoCloseable {
         val selector = CameraSelector.Builder().requireLensFacing(desired).build()
         if (!p.hasCamera(selector)) return false
         lensFacing = desired
-        userZoom = 1f; userEvIndex = 0; userTorch = false; userFlash = StillFlashMode.OFF; userExtension = DirectorExtension.NONE
+        userZoom = 1f
+        userEvIndex = 0
+        userTorch = false
+        userFlash = StillFlashMode.OFF
+        userExtension = DirectorExtension.NONE
         currentExtension = DirectorExtension.NONE
         bindInternal(DirectorExtension.NONE)
         rememberCurrentAsUserState()
@@ -145,21 +266,37 @@ class CameraEngine(private val context: Context) : AutoCloseable {
     fun tapToFocus(factory: MeteringPointFactory, x: Float, y: Float) {
         val point = factory.createPoint(x, y)
         val action = FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE or FocusMeteringAction.FLAG_AWB)
-            .setAutoCancelDuration(4, TimeUnit.SECONDS).build()
+            .setAutoCancelDuration(4, TimeUnit.SECONDS)
+            .build()
         camera?.cameraControl?.startFocusAndMetering(action)
     }
 
     suspend fun aiFocusNormalized(x: Float, y: Float) {
         val view = boundView ?: return
         if (view.width <= 0 || view.height <= 0) return
-        val point = view.meteringPointFactory.createPoint(x.coerceIn(0f, 1f) * view.width, y.coerceIn(0f, 1f) * view.height)
+        val point = view.meteringPointFactory.createPoint(
+            x.coerceIn(0f, 1f) * view.width,
+            y.coerceIn(0f, 1f) * view.height
+        )
         val action = FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE or FocusMeteringAction.FLAG_AWB)
-            .setAutoCancelDuration(3, TimeUnit.SECONDS).build()
-        camera?.cameraControl?.startFocusAndMetering(action)?.await()
+            .setAutoCancelDuration(3, TimeUnit.SECONDS)
+            .build()
+        camera?.cameraControl?.startFocusAndMetereringSafe(action)
     }
 
-    fun userSetZoom(ratio: Float) { userZoom = clampZoom(ratio); camera?.cameraControl?.setZoomRatio(userZoom) }
-    suspend fun aiSetZoom(ratio: Float) { camera?.cameraControl?.setZoomRatio(clampZoom(ratio))?.await() }
+    private suspend fun androidx.camera.core.CameraControl.startFocusAndMetereringSafe(action: FocusMeteringAction) {
+        startFocusAndMetering(action).await()
+    }
+
+    fun userSetZoom(ratio: Float) {
+        userZoom = clampZoom(ratio)
+        camera?.cameraControl?.setZoomRatio(userZoom)
+    }
+
+    suspend fun aiSetZoom(ratio: Float) {
+        camera?.cameraControl?.setZoomRatio(clampZoom(ratio))?.await()
+    }
+
     private fun clampZoom(ratio: Float): Float {
         val state = camera?.cameraInfo?.zoomState?.value ?: return 1f
         return ratio.coerceIn(state.minZoomRatio, state.maxZoomRatio)
@@ -175,7 +312,8 @@ class CameraEngine(private val context: Context) : AutoCloseable {
     suspend fun aiSetExposureEv(ev: Float) {
         val e = camera?.cameraInfo?.exposureState ?: return
         if (!e.isExposureCompensationSupported || e.exposureCompensationStep.toFloat() == 0f) return
-        val index = (ev / e.exposureCompensationStep.toFloat()).toInt().coerceIn(e.exposureCompensationRange.lower, e.exposureCompensationRange.upper)
+        val index = (ev / e.exposureCompensationStep.toFloat()).toInt()
+            .coerceIn(e.exposureCompensationRange.lower, e.exposureCompensationRange.upper)
         camera?.cameraControl?.setExposureCompensationIndex(index)?.await()
     }
 
@@ -191,8 +329,15 @@ class CameraEngine(private val context: Context) : AutoCloseable {
         if (c.cameraInfo.hasFlashUnit()) c.cameraControl.enableTorch(enabled).await()
     }
 
-    fun userSetFlash(mode: StillFlashMode) { userFlash = mode; imageCapture?.flashMode = flashModeToCameraX(mode) }
-    fun aiSetFlash(mode: StillFlashMode) { imageCapture?.flashMode = flashModeToCameraX(mode) }
+    fun userSetFlash(mode: StillFlashMode) {
+        userFlash = mode
+        imageCapture?.flashMode = flashModeToCameraX(mode)
+    }
+
+    fun aiSetFlash(mode: StillFlashMode) {
+        imageCapture?.flashMode = flashModeToCameraX(mode)
+    }
+
     private fun flashModeToCameraX(mode: StillFlashMode): Int = when (mode) {
         StillFlashMode.OFF -> ImageCapture.FLASH_MODE_OFF
         StillFlashMode.AUTO -> ImageCapture.FLASH_MODE_AUTO
@@ -208,7 +353,9 @@ class CameraEngine(private val context: Context) : AutoCloseable {
         aiSetZoom(userZoom)
         val e = camera?.cameraInfo?.exposureState
         if (e?.isExposureCompensationSupported == true) {
-            camera?.cameraControl?.setExposureCompensationIndex(userEvIndex.coerceIn(e.exposureCompensationRange.lower, e.exposureCompensationRange.upper))?.await()
+            camera?.cameraControl?.setExposureCompensationIndex(
+                userEvIndex.coerceIn(e.exposureCompensationRange.lower, e.exposureCompensationRange.upper)
+            )?.await()
         }
         aiSetTorch(userTorch)
         imageCapture?.flashMode = flashModeToCameraX(userFlash)
@@ -223,26 +370,41 @@ class CameraEngine(private val context: Context) : AutoCloseable {
         userExtension = s.extension
     }
 
-    suspend fun awaitSettledState(timeoutMs: Long = 1200L) {
-        if (currentExtension != DirectorExtension.NONE) { delay(350); return }
+    suspend fun awaitSettledState(timeoutMs: Long = 900L) {
+        if (currentExtension != DirectorExtension.NONE) {
+            delay(280)
+            return
+        }
         val start = System.nanoTime()
         while ((System.nanoTime() - start) / 1_000_000L < timeoutMs) {
             if (threeASettled()) return
-            delay(30)
+            delay(24)
         }
-        delay(120)
+        delay(80)
     }
 
     private fun threeASettled(): Boolean {
-        val af = lastAf; val ae = lastAe; val awb = lastAwb
-        val afOk = af == null || af == CaptureResult.CONTROL_AF_STATE_INACTIVE || af == CaptureResult.CONTROL_AF_STATE_FOCUSED_LOCKED || af == CaptureResult.CONTROL_AF_STATE_NOT_FOCUSED_LOCKED || af == CaptureResult.CONTROL_AF_STATE_PASSIVE_FOCUSED || af == CaptureResult.CONTROL_AF_STATE_PASSIVE_UNFOCUSED
-        val aeOk = ae == null || ae == CaptureResult.CONTROL_AE_STATE_INACTIVE || ae == CaptureResult.CONTROL_AE_STATE_CONVERGED || ae == CaptureResult.CONTROL_AE_STATE_LOCKED || ae == CaptureResult.CONTROL_AE_STATE_FLASH_REQUIRED
-        val awbOk = awb == null || awb == CaptureResult.CONTROL_AWB_STATE_INACTIVE || awb == CaptureResult.CONTROL_AWB_STATE_CONVERGED || awb == CaptureResult.CONTROL_AWB_STATE_LOCKED
+        val af = lastAf
+        val ae = lastAe
+        val awb = lastAwb
+        val afOk = af == null || af == CaptureResult.CONTROL_AF_STATE_INACTIVE ||
+            af == CaptureResult.CONTROL_AF_STATE_FOCUSED_LOCKED ||
+            af == CaptureResult.CONTROL_AF_STATE_NOT_FOCUSED_LOCKED ||
+            af == CaptureResult.CONTROL_AF_STATE_PASSIVE_FOCUSED ||
+            af == CaptureResult.CONTROL_AF_STATE_PASSIVE_UNFOCUSED
+        val aeOk = ae == null || ae == CaptureResult.CONTROL_AE_STATE_INACTIVE ||
+            ae == CaptureResult.CONTROL_AE_STATE_CONVERGED || ae == CaptureResult.CONTROL_AE_STATE_LOCKED ||
+            ae == CaptureResult.CONTROL_AE_STATE_FLASH_REQUIRED
+        val awbOk = awb == null || awb == CaptureResult.CONTROL_AWB_STATE_INACTIVE ||
+            awb == CaptureResult.CONTROL_AWB_STATE_CONVERGED || awb == CaptureResult.CONTROL_AWB_STATE_LOCKED
         return afOk && aeOk && awbOk
     }
 
     fun capabilities(): CapabilityRegistry {
-        val c = camera ?: return CapabilityRegistry(lensFacing, 1f, 1f, 0, 0, 0f, false, false, false, false, false, allowedToolIds = setOf(30,31,32,33,34,35,36,37))
+        val c = camera ?: return CapabilityRegistry(
+            lensFacing, 1f, 1f, 0, 0, 0f, false, false, false, false, false,
+            allowedToolIds = setOf(30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43)
+        )
         val zoom = c.cameraInfo.zoomState.value
         val e = c.cameraInfo.exposureState
         val characteristics = platformCharacteristicsForLens()
@@ -255,11 +417,11 @@ class CameraEngine(private val context: Context) : AutoCloseable {
         val videoModes = characteristics?.get(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES)?.toList().orEmpty()
         val ext = supportedExtensions()
         val focusSupported = focusMeteringSupported(c)
-        val ids = mutableSetOf(30,31,32,33,34,35,36,37)
+        val ids = mutableSetOf(30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43)
         if (focusSupported) ids += 1
         if (zoom != null && zoom.maxZoomRatio > zoom.minZoomRatio) ids += 2
         if (e.isExposureCompensationSupported) ids += 3
-        if (c.cameraInfo.hasFlashUnit()) ids += setOf(4,5)
+        if (c.cameraInfo.hasFlashUnit()) ids += setOf(4, 5)
         if (ext.isNotEmpty()) ids += 6
         return CapabilityRegistry(
             lensFacing = lensFacing,
@@ -298,9 +460,14 @@ class CameraEngine(private val context: Context) : AutoCloseable {
 
     private fun platformCharacteristicsForLens(): CameraCharacteristics? = runCatching {
         val manager = context.getSystemService(CameraManager::class.java)
-        val desired = if (lensFacing == CameraSelector.LENS_FACING_FRONT) CameraCharacteristics.LENS_FACING_FRONT else CameraCharacteristics.LENS_FACING_BACK
+        val desired = if (lensFacing == CameraSelector.LENS_FACING_FRONT) {
+            CameraCharacteristics.LENS_FACING_FRONT
+        } else {
+            CameraCharacteristics.LENS_FACING_BACK
+        }
         val candidates = manager.cameraIdList.mapNotNull { id ->
-            runCatching { manager.getCameraCharacteristics(id) }.getOrNull()?.takeIf { it.get(CameraCharacteristics.LENS_FACING) == desired }
+            runCatching { manager.getCameraCharacteristics(id) }.getOrNull()
+                ?.takeIf { it.get(CameraCharacteristics.LENS_FACING) == desired }
         }
         candidates.maxByOrNull { chars ->
             val caps = chars.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)?.toSet().orEmpty()
@@ -311,7 +478,10 @@ class CameraEngine(private val context: Context) : AutoCloseable {
     private fun supportedExtensions(): Set<DirectorExtension> {
         val manager = extensionsManager ?: return emptySet()
         val base = baseSelector()
-        return DirectorExtension.entries.filter { it != DirectorExtension.NONE && runCatching { manager.isExtensionAvailable(base, extensionMode(it)) }.getOrDefault(false) }.toSet()
+        return DirectorExtension.entries.filter {
+            it != DirectorExtension.NONE &&
+                runCatching { manager.isExtensionAvailable(base, extensionMode(it)) }.getOrDefault(false)
+        }.toSet()
     }
 
     fun snapshot(): CameraSnapshot {
@@ -321,12 +491,26 @@ class CameraEngine(private val context: Context) : AutoCloseable {
             ImageCapture.FLASH_MODE_ON -> StillFlashMode.ON
             else -> StillFlashMode.OFF
         }
-        return CameraSnapshot(lensFacing, c?.cameraInfo?.zoomState?.value?.zoomRatio ?: 1f, c?.cameraInfo?.exposureState?.exposureCompensationIndex ?: 0, c?.cameraInfo?.torchState?.value == 1, flash, currentExtension, boundView?.display?.rotation ?: 0)
+        return CameraSnapshot(
+            lensFacing,
+            c?.cameraInfo?.zoomState?.value?.zoomRatio ?: 1f,
+            c?.cameraInfo?.exposureState?.exposureCompensationIndex ?: 0,
+            c?.cameraInfo?.torchState?.value == 1,
+            flash,
+            currentExtension,
+            boundView?.display?.rotation ?: 0
+        )
     }
 
     fun uiState(): CameraUiState {
-        val caps = capabilities(); val s = snapshot()
-        return CameraUiState(caps.minZoom, caps.maxZoom, s.zoomRatio, caps.exposureStepEv > 0f, caps.exposureMinIndex, caps.exposureMaxIndex, s.exposureCompensationIndex, caps.exposureStepEv, caps.torchSupported, s.torchEnabled, s.flashMode, lensFacing, caps.extensions)
+        val caps = capabilities()
+        val s = snapshot()
+        return CameraUiState(
+            caps.minZoom, caps.maxZoom, s.zoomRatio,
+            caps.exposureStepEv > 0f, caps.exposureMinIndex, caps.exposureMaxIndex,
+            s.exposureCompensationIndex, caps.exposureStepEv,
+            caps.torchSupported, s.torchEnabled, s.flashMode, lensFacing, caps.extensions
+        )
     }
 
     suspend fun capturePrivate(file: File): File = captureMutex.withLock {
@@ -335,20 +519,44 @@ class CameraEngine(private val context: Context) : AutoCloseable {
     }
 
     private suspend fun captureToFile(file: File): File = suspendCancellableCoroutine { cont ->
-        val capture = imageCapture ?: return@suspendCancellableCoroutine cont.resumeWithException(IllegalStateException("Camera not ready"))
+        val capture = imageCapture ?: return@suspendCancellableCoroutine cont.resumeWithException(
+            IllegalStateException("Camera not ready")
+        )
         capture.targetRotation = boundView?.display?.rotation ?: Surface.ROTATION_0
         val options = ImageCapture.OutputFileOptions.Builder(file).build()
-        capture.takePicture(options, ContextCompat.getMainExecutor(context), object : ImageCapture.OnImageSavedCallback {
-            override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) { if (cont.isActive) cont.resume(file) else file.delete() }
-            override fun onError(exception: ImageCaptureException) { if (cont.isActive) cont.resumeWithException(exception) else file.delete() }
-        })
+        capture.takePicture(
+            options,
+            ContextCompat.getMainExecutor(context),
+            object : ImageCapture.OnImageSavedCallback {
+                override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
+                    if (cont.isActive) cont.resume(file) else file.delete()
+                }
+
+                override fun onError(exception: ImageCaptureException) {
+                    if (cont.isActive) cont.resumeWithException(exception) else file.delete()
+                }
+            }
+        )
         cont.invokeOnCancellation { if (file.exists() && file.length() == 0L) file.delete() }
     }
 
-    override fun close() { provider?.unbindAll() }
+    override fun close() {
+        clearAnalysisUseCase()
+        analysisExecutor.shutdownNow()
+        provider?.unbindAll()
+    }
 }
 
 private suspend fun <T> ListenableFuture<T>.await(): T = suspendCancellableCoroutine { cont: CancellableContinuation<T> ->
-    addListener({ try { if (cont.isActive) cont.resume(get()) } catch (t: Throwable) { if (cont.isActive) cont.resumeWithException(t) } }, Runnable::run)
+    addListener(
+        {
+            try {
+                if (cont.isActive) cont.resume(get())
+            } catch (t: Throwable) {
+                if (cont.isActive) cont.resumeWithException(t)
+            }
+        },
+        Runnable::run
+    )
     cont.invokeOnCancellation { cancel(true) }
 }
