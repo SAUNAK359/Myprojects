@@ -9,13 +9,22 @@ import com.saunak.director.processing.TechnicalQuality
 
 interface VlmRuntime {
     suspend fun load(modelPath: String, projectorPath: String): Result<Unit>
+
+    suspend fun plan(
+        image: Bitmap,
+        capabilities: CapabilityRegistry,
+        camera: CameraSnapshot,
+        skillContext: String
+    ): Result<PlanOutput>
+
     suspend fun plan(
         image: Bitmap,
         capabilities: CapabilityRegistry,
         camera: CameraSnapshot,
         skillContext: String,
-        localQuality: TechnicalQuality? = null
-    ): Result<PlanOutput>
+        localQuality: TechnicalQuality?
+    ): Result<PlanOutput> = plan(image, capabilities, camera, skillContext)
+
     suspend fun evaluate(
         image: Bitmap,
         objective: String,
@@ -25,6 +34,7 @@ interface VlmRuntime {
         evaluationContext: String,
         capabilities: CapabilityRegistry
     ): Result<EvaluationOutput>
+
     suspend fun confirmFinalCapture(captureId: String): Result<Unit> = Result.success(Unit)
     fun setMaxImageDimension(pixels: Int)
     fun cancel()
