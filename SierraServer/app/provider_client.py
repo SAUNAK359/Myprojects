@@ -170,6 +170,9 @@ async def call_provider(
         "max_tokens": provider.max_tokens,
         "stream": False,
     }
+    # Generic OpenAI-compatible providers are not required to implement response_format.
+    # Only routes explicitly marked by the administrator receive JSON Schema; every other
+    # route is constrained by the photography prompt and normalized by parse_plan().
     if provider.supports_json_schema:
         body["response_format"] = {
             "type": "json_schema",
@@ -179,8 +182,6 @@ async def call_provider(
                 "schema": SierraPlan.model_json_schema(),
             },
         }
-    else:
-        body["response_format"] = {"type": "json_object"}
 
     started = time.monotonic()
     timeout = httpx.Timeout(provider.timeout_ms / 1000.0)
