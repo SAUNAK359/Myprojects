@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     job_ready_minutes: int = Field(10, ge=2, le=60)
     max_upload_bytes: int = Field(4 * 1024 * 1024, ge=256 * 1024, le=20 * 1024 * 1024)
     max_image_dimension: int = Field(704, ge=384, le=1280)
-    min_user_age: int = Field(18, ge=13, le=21)
+    min_user_age: int = Field(0, ge=0, le=21)
     allowed_origins: str = ""
     public_base_url: str = ""
     admin_bootstrap_email: str = ""
