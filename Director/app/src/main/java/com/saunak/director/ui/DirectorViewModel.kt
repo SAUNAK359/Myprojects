@@ -20,6 +20,7 @@ import com.saunak.director.platform.ThermalMonitor
 import com.saunak.director.skills.SkillEngine
 import com.saunak.director.storage.PhotoRepository
 import com.saunak.director.storage.RecipeMemory
+import com.saunak.director.storage.SierraCropPolicy
 import com.saunak.director.tools.ToolExecutor
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -47,6 +48,8 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
     private val repository = PhotoRepository(app)
     private val preferences = app.getSharedPreferences("sierra_vision_preferences", Application.MODE_PRIVATE)
     private val initialPrivateMode = preferences.getBoolean("private_mode", false)
+    private val initialAspectRatioOverride = preferences.getString("aspect_ratio_override", null)?.takeIf(SierraCropPolicy::isSupported)
+    private val initialKeepOriginal = preferences.getBoolean("keep_original", false)
 
     private val orchestrator = DirectorOrchestrator(
         camera = camera,
@@ -66,7 +69,9 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
             showTools = current.showTools,
             gridEnabled = current.gridEnabled,
             levelEnabled = current.levelEnabled,
-            privateMode = current.privateMode
+            privateMode = current.privateMode,
+            aspectRatioOverride = current.aspectRatioOverride,
+            keepOriginal = current.keepOriginal
         )
     }
 
@@ -77,7 +82,10 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
             recipeCount = recipeMemory.count(),
             status = if (initialPrivateMode || !runtime.isReady()) "Sierra β ready" else "Sierra AI + β ready",
             sierraMode = if (initialPrivateMode || !runtime.isReady()) SierraMode.BETA else SierraMode.AI,
-            privateMode = initialPrivateMode
+            privateMode = initialPrivateMode,
+            aspectRatioOverride = initialAspectRatioOverride,
+            aspectRatio = initialAspectRatioOverride ?: "4:3",
+            keepOriginal = initialKeepOriginal
         )
     )
     val ui: StateFlow<DirectorUiState> = _ui.asStateFlow()
@@ -88,6 +96,8 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
 
     init {
         orchestrator.setCloudEnabled(!initialPrivateMode)
+        orchestrator.setAspectRatioOverride(initialAspectRatioOverride)
+        orchestrator.setKeepOriginal(initialKeepOriginal)
         viewModelScope.launch {
             val recovered = orchestrator.recoverPendingReferences()
             if (recovered.isNotEmpty()) {
@@ -208,6 +218,29 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
         )
     }
 
+    fun setAspectRatioOverride(value: String?) {
+        val safe = value?.takeIf(SierraCropPolicy::isSupported)
+        orchestrator.cancelForUserAction()
+        orchestrator.setAspectRatioOverride(safe)
+        preferences.edit().apply {
+            if (safe == null) remove("aspect_ratio_override") else putString("aspect_ratio_override", safe)
+        }.apply()
+        _ui.value = _ui.value.copy(
+            aspectRatioOverride = safe,
+            aspectRatio = safe ?: _ui.value.aspectRatio,
+            stage = DirectorStage.READY,
+            status = if (safe == null) "Aspect ratio • Sierra Auto" else "Aspect ratio • $safe",
+            error = null
+        )
+    }
+
+    fun toggleKeepOriginal() {
+        val enabled = !_ui.value.keepOriginal
+        orchestrator.setKeepOriginal(enabled)
+        preferences.edit().putBoolean("keep_original", enabled).apply()
+        _ui.value = _ui.value.copy(keepOriginal = enabled, status = if (enabled) "Originals will also be saved" else "Saving Sierra final only")
+    }
+
     fun toggleSettings() { _ui.value = _ui.value.copy(showSettings = !_ui.value.showSettings, showTools = false) }
     fun dismissSettings() { _ui.value = _ui.value.copy(showSettings = false) }
     fun toggleTools() { _ui.value = _ui.value.copy(showTools = !_ui.value.showTools, showSettings = false) }
@@ -256,10 +289,11 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
     fun clearApiKey() = clearProvider(selectedProvider().takeUnless { it == AiProviderPreset.AUTO } ?: AiProviderPreset.NVIDIA_NEMOTRON)
 
     private fun refreshCamera(status: String? = null) {
-        val privateMode = _ui.value.privateMode
+        val current = _ui.value
+        val privateMode = current.privateMode
         val aiReady = runtime.isReady() && !privateMode
-        _ui.value = _ui.value.copy(
-            camera = runCatching { camera.uiState() }.getOrDefault(_ui.value.camera),
+        _ui.value = current.copy(
+            camera = runCatching { camera.uiState() }.getOrDefault(current.camera),
             status = status ?: if (privateMode) "Sierra β Private • on-device only" else if (aiReady) "Sierra AI + β ready" else "Sierra β ready",
             hasApiKey = runtime.isReady(),
             aiAvailable = aiReady,
