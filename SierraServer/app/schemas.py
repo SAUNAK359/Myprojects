@@ -18,7 +18,18 @@ class ToolCall(BaseModel):
 class SierraPlan(BaseModel):
     scene: str = Field(min_length=1, max_length=64)
     objective: str = Field(min_length=1, max_length=180)
-    branch: Literal["general", "portrait", "landscape", "low_light", "motion", "group", "food", "architecture", "macro", "selfie"]
+    branch: Literal[
+        "general",
+        "portrait",
+        "landscape",
+        "low_light",
+        "motion",
+        "group",
+        "food",
+        "architecture",
+        "macro",
+        "selfie",
+    ]
     reference_score: float = Field(ge=0, le=1)
     reference_accept: bool = False
     calls: list[ToolCall] = Field(default_factory=list, max_length=8)
@@ -89,8 +100,6 @@ class JobView(BaseModel):
     plan: SierraPlan | None = None
     error_code: str | None = None
     error_message: str | None = None
-    provider_name: str | None = None
-    provider_model: str | None = None
     created_at: datetime
     ready_expires_at: datetime | None = None
     credits: CreditView
