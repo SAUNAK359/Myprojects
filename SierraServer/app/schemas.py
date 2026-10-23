@@ -19,16 +19,8 @@ class SierraPlan(BaseModel):
     scene: str = Field(min_length=1, max_length=64)
     objective: str = Field(min_length=1, max_length=180)
     branch: Literal[
-        "general",
-        "portrait",
-        "landscape",
-        "low_light",
-        "motion",
-        "group",
-        "food",
-        "architecture",
-        "macro",
-        "selfie",
+        "general", "portrait", "landscape", "low_light", "motion", "group",
+        "food", "architecture", "macro", "selfie",
     ]
     reference_score: float = Field(ge=0, le=1)
     reference_accept: bool = False
@@ -66,6 +58,16 @@ class RefreshRequest(BaseModel):
 
 class LogoutRequest(BaseModel):
     refresh_token: str = Field(min_length=32, max_length=300)
+
+
+class PasswordChangeRequest(BaseModel):
+    current_password: str = Field(min_length=1, max_length=200)
+    new_password: str = Field(min_length=12, max_length=200)
+
+
+class DeleteAccountRequest(BaseModel):
+    password: str = Field(min_length=1, max_length=200)
+    confirmation: Literal["DELETE"]
 
 
 class UserView(BaseModel):
