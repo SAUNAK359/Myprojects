@@ -36,10 +36,43 @@ class User(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
     jobs: Mapped[list["Job"]] = relationship(back_populates="user")
+    devices: Mapped[list["Device"]] = relationship(back_populates="user", cascade="all, delete-orphan")
 
     @property
     def available_credits(self) -> int:
         return max(0, self.credit_balance - self.credit_reserved)
+
+
+class Device(Base):
+    """Privacy-bounded app-install profile. No hardware serial/IMEI/MAC/ad ID is stored."""
+
+    __tablename__ = "devices"
+    __table_args__ = (UniqueConstraint("user_id", "install_id", name="uq_devices_user_install"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    install_id: Mapped[str] = mapped_column(String(64), index=True)
+    manufacturer: Mapped[str] = mapped_column(String(80))
+    model: Mapped[str] = mapped_column(String(120))
+    device_name: Mapped[str | None] = mapped_column(String(120))
+    android_release: Mapped[str] = mapped_column(String(32))
+    sdk_int: Mapped[int] = mapped_column(Integer)
+    app_version: Mapped[str] = mapped_column(String(40))
+    app_build: Mapped[int] = mapped_column(Integer)
+    locale: Mapped[str] = mapped_column(String(40))
+    timezone: Mapped[str] = mapped_column(String(80))
+    screen_width_px: Mapped[int | None] = mapped_column(Integer)
+    screen_height_px: Mapped[int | None] = mapped_column(Integer)
+    density_dpi: Mapped[int | None] = mapped_column(Integer)
+    is_emulator: Mapped[bool] = mapped_column(Boolean, default=False)
+    sierra_beta_version: Mapped[str | None] = mapped_column(String(40))
+    camera_capabilities: Mapped[dict | None] = mapped_column(JSON)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_ip: Mapped[str | None] = mapped_column(String(64))
+    last_user_agent: Mapped[str | None] = mapped_column(String(300))
+
+    user: Mapped[User] = relationship(back_populates="devices")
 
 
 class RefreshToken(Base):
