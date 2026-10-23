@@ -1,10 +1,12 @@
+from pathlib import Path
+
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
 from app.deps import current_user
-from app.models import RefreshToken, User
+from app.models import Job, RefreshToken, User
 from app.routers.auth import user_view
 from app.schemas import CreditView, DeleteAccountRequest, PasswordChangeRequest, UserView
 from app.security import hash_password, verify_password
@@ -33,7 +35,10 @@ async def change_password(
     db: AsyncSession = Depends(get_db),
 ) -> None:
     if not verify_password(payload.current_password, user.password_hash):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="current password is incorrect")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="current password is incorrect",
+        )
     if payload.current_password == payload.new_password:
         raise HTTPException(status_code=422, detail="new password must be different")
     user.password_hash = hash_password(payload.new_password)
@@ -48,8 +53,34 @@ async def delete_account(
     db: AsyncSession = Depends(get_db),
 ) -> None:
     if user.role == "admin":
-        raise HTTPException(status_code=409, detail="admin accounts cannot be deleted through the customer endpoint")
+        raise HTTPException(
+            status_code=409,
+            detail="admin accounts cannot be deleted through the customer endpoint",
+        )
     if not verify_password(payload.password, user.password_hash):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="password is incorrect")
-    await db.delete(user)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="password is incorrect",
+        )
+
+    analysis_paths = list(
+        (
+            await db.scalars(
+                select(Job.analysis_image_path).where(
+                    Job.user_id == user.id,
+                    Job.analysis_image_path.is_not(None),
+                )
+            )
+        ).all()
+    )
+    # Use SQL DELETE so PostgreSQL ON DELETE CASCADE owns child-row cleanup. Deleting the ORM
+    # object directly can otherwise attempt to NULL non-nullable child foreign keys first.
+    await db.execute(delete(User).where(User.id == user.id))
     await db.commit()
+
+    for value in analysis_paths:
+        if value:
+            try:
+                Path(value).unlink(missing_ok=True)
+            except OSError:
+                pass
