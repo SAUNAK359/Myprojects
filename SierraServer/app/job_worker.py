@@ -17,7 +17,11 @@ async def _claim_job() -> str | None:
     async with SessionLocal() as db:
         async with db.begin():
             job = await db.scalar(
-                select(Job).where(Job.state == "queued").order_by(Job.created_at).limit(1).with_for_update(skip_locked=True)
+                select(Job)
+                .where(Job.state == "queued")
+                .order_by(Job.created_at)
+                .limit(1)
+                .with_for_update(skip_locked=True)
             )
             if job is None:
                 return None
@@ -27,71 +31,114 @@ async def _claim_job() -> str | None:
             return str(job.id)
 
 
-async def _process(job_id: str) -> None:
+async def _job_image_path(job_id: str) -> Path | None:
     async with SessionLocal() as db:
         job = await db.get(Job, job_id)
-        if job is None or job.state != "processing":
-            return
-        path = Path(job.analysis_image_path or "")
-        try:
-            if not path.is_file():
-                raise RuntimeError("analysis image is unavailable")
-            plan, provider = await route_plan(db, path.read_bytes())
-            job.plan = plan.model_dump(mode="json")
-            job.provider_name = provider.name
-            job.provider_model = provider.model
+        if job is None or job.state != "processing" or not job.analysis_image_path:
+            return None
+        return Path(job.analysis_image_path)
+
+
+async def _mark_ready(job_id: str, plan: dict, provider_name: str, provider_model: str) -> bool:
+    async with SessionLocal() as db:
+        async with db.begin():
+            job = await db.scalar(select(Job).where(Job.id == job_id).with_for_update())
+            if job is None or job.state != "processing":
+                return False
+            job.plan = plan
+            job.provider_name = provider_name
+            job.provider_model = provider_model
             job.state = "ready"
             job.ready_expires_at = datetime.now(timezone.utc) + timedelta(minutes=settings.job_ready_minutes)
             job.error_code = None
             job.error_message = None
-            await db.commit()
-        except Exception as exc:
-            await db.rollback()
-            job = await db.get(Job, job_id)
-            if job is not None and job.state == "processing":
-                job.state = "failed"
-                job.error_code = "provider_failure"
-                job.error_message = str(exc)[:300]
-                await release_job_credit(db, job, "analysis failed")
-                await db.commit()
-        finally:
-            try:
-                path.unlink(missing_ok=True)
-            except Exception:
-                pass
-            async with SessionLocal() as clean_db:
-                clean_job = await clean_db.get(Job, job_id)
-                if clean_job and clean_job.analysis_image_path:
-                    clean_job.analysis_image_path = None
-                    await clean_db.commit()
+            return True
+
+
+async def _mark_failed(job_id: str, exc: Exception) -> None:
+    async with SessionLocal() as db:
+        async with db.begin():
+            job = await db.scalar(select(Job).where(Job.id == job_id).with_for_update())
+            if job is None or job.state != "processing":
+                return
+            job.state = "failed"
+            job.error_code = "provider_failure"
+            job.error_message = str(exc)[:300]
+            await release_job_credit(db, job, "analysis failed")
+
+
+async def _clear_analysis_reference(job_id: str) -> None:
+    async with SessionLocal() as db:
+        async with db.begin():
+            job = await db.scalar(select(Job).where(Job.id == job_id).with_for_update())
+            if job is not None:
+                job.analysis_image_path = None
+
+
+async def _process(job_id: str) -> None:
+    path = await _job_image_path(job_id)
+    if path is None:
+        return
+    try:
+        if not path.is_file():
+            raise RuntimeError("analysis image is unavailable")
+        image_bytes = path.read_bytes()
+        async with SessionLocal() as provider_db:
+            plan, provider = await route_plan(provider_db, image_bytes)
+            provider_name = provider.name
+            provider_model = provider.model
+        await _mark_ready(job_id, plan.model_dump(mode="json"), provider_name, provider_model)
+    except Exception as exc:
+        await _mark_failed(job_id, exc)
+    finally:
+        try:
+            path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        await _clear_analysis_reference(job_id)
 
 
 async def _expire_jobs() -> None:
     now = datetime.now(timezone.utc)
     async with SessionLocal() as db:
-        jobs = list((await db.scalars(select(Job).where(Job.state == "ready", Job.ready_expires_at < now))).all())
-        for job in jobs:
-            job.state = "expired"
-            await release_job_credit(db, job, "ready job expired")
-        if jobs:
-            await db.commit()
+        async with db.begin():
+            jobs = list(
+                (
+                    await db.scalars(
+                        select(Job)
+                        .where(Job.state == "ready", Job.ready_expires_at < now)
+                        .order_by(Job.ready_expires_at)
+                        .with_for_update(skip_locked=True)
+                    )
+                ).all()
+            )
+            for job in jobs:
+                job.state = "expired"
+                await release_job_credit(db, job, "ready job expired")
 
 
 async def recover_stale_processing() -> None:
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=2)
     async with SessionLocal() as db:
-        jobs = list((await db.scalars(select(Job).where(Job.state == "processing", Job.updated_at < cutoff))).all())
-        for job in jobs:
-            path_ok = bool(job.analysis_image_path and Path(job.analysis_image_path).is_file())
-            if path_ok:
-                job.state = "queued"
-            else:
-                job.state = "failed"
-                job.error_code = "restart_recovery"
-                job.error_message = "analysis frame was unavailable after server restart"
-                await release_job_credit(db, job, "restart recovery")
-        if jobs:
-            await db.commit()
+        async with db.begin():
+            jobs = list(
+                (
+                    await db.scalars(
+                        select(Job)
+                        .where(Job.state == "processing", Job.updated_at < cutoff)
+                        .with_for_update(skip_locked=True)
+                    )
+                ).all()
+            )
+            for job in jobs:
+                path_ok = bool(job.analysis_image_path and Path(job.analysis_image_path).is_file())
+                if path_ok:
+                    job.state = "queued"
+                else:
+                    job.state = "failed"
+                    job.error_code = "restart_recovery"
+                    job.error_message = "analysis frame was unavailable after server restart"
+                    await release_job_credit(db, job, "restart recovery")
 
 
 async def worker_loop(stop: asyncio.Event) -> None:
