@@ -37,8 +37,10 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -46,6 +48,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -76,6 +79,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -106,6 +110,7 @@ private val SierraError = Color(0xFFFF5D5D)
 @Composable
 fun SierraVisionApp(vm: DirectorViewModel = viewModel()) {
     val context = LocalContext.current
+    val ui by vm.ui.collectAsStateWithLifecycle()
     var granted by remember {
         mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)
     }
@@ -130,11 +135,99 @@ fun SierraVisionApp(vm: DirectorViewModel = viewModel()) {
 
     MaterialTheme(colorScheme = darkColorScheme(background = SierraInk, surface = SierraGraphite, primary = SierraGold)) {
         when {
+            ui.serverConfigured && !ui.signedIn && !ui.guestMode -> SierraAccountScreen(ui, vm)
             !explainedPermission -> SierraPermissionIntro { explainedPermission = true; launcher.launch(Manifest.permission.CAMERA) }
             !granted -> SierraPermissionDenied { launcher.launch(Manifest.permission.CAMERA) }
             else -> SierraCameraScreen(vm)
         }
     }
+}
+
+@Composable
+private fun SierraAccountScreen(ui: DirectorUiState, vm: DirectorViewModel) {
+    var signup by remember { mutableStateOf(true) }
+    var name by remember { mutableStateOf("") }
+    var email by remember { mutableStateOf("") }
+    var phone by remember { mutableStateOf("") }
+    var dob by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+
+    Box(Modifier.fillMaxSize().background(SierraInk)) {
+        Column(
+            Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().verticalScroll(rememberScrollState()).padding(horizontal = 28.dp, vertical = 34.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            SierraMark(82.dp)
+            Text("SIERRA VISION", color = SierraIvory, fontSize = 24.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 4.sp)
+            Text(if (signup) "Create your Sierra account" else "Welcome back", color = SierraSilver, fontSize = 15.sp)
+            Spacer(Modifier.height(6.dp))
+
+            if (signup) {
+                SierraAuthField(name, { name = it }, "Name")
+            }
+            SierraAuthField(email, { email = it }, "Email")
+            if (signup) {
+                SierraAuthField(phone, { phone = it }, "Phone with country code")
+                SierraAuthField(dob, { dob = it }, "Date of birth · YYYY-MM-DD")
+            }
+            OutlinedTextField(
+                value = password,
+                onValueChange = { password = it },
+                label = { Text("Password") },
+                singleLine = true,
+                visualTransformation = PasswordVisualTransformation(),
+                modifier = Modifier.fillMaxWidth().widthIn(max = 520.dp)
+            )
+
+            ui.authError?.let { Text(it, color = SierraError, fontSize = 12.sp, textAlign = TextAlign.Center) }
+
+            Button(
+                onClick = {
+                    if (signup) vm.signup(name, email, phone, dob, password) else vm.login(email, password)
+                },
+                enabled = !ui.authBusy,
+                colors = ButtonDefaults.buttonColors(containerColor = SierraGold, contentColor = Color.Black),
+                shape = RoundedCornerShape(18.dp),
+                modifier = Modifier.fillMaxWidth().widthIn(max = 520.dp).height(52.dp)
+            ) {
+                if (ui.authBusy) CircularProgressIndicator(Modifier.size(18.dp), color = Color.Black, strokeWidth = 2.dp)
+                else Text(if (signup) "Create account" else "Sign in", fontWeight = FontWeight.Bold)
+            }
+
+            TextButton(onClick = { signup = !signup }) {
+                Text(if (signup) "Already have an account? Sign in" else "New to Sierra Vision? Create account", color = SierraGold)
+            }
+
+            if (signup) {
+                Surface(color = SierraGraphite, shape = RoundedCornerShape(18.dp), modifier = Modifier.fillMaxWidth().widthIn(max = 520.dp)) {
+                    Text(
+                        "To secure your account and optimize Sierra for this phone, signup registers this Sierra Vision installation plus basic app/device details such as phone model, Android/app version, locale/timezone and camera capabilities. Sierra does not collect IMEI, hardware serial, MAC address, advertising ID, contacts, calls, SMS, installed-app inventory or precise location.",
+                        color = SierraSilver,
+                        fontSize = 11.sp,
+                        lineHeight = 17.sp,
+                        modifier = Modifier.padding(15.dp)
+                    )
+                }
+            }
+
+            TextButton(onClick = vm::continueWithBeta) {
+                Text("Continue with Sierra β · local only", color = SierraIvory)
+            }
+            Text("Sierra β remains available without an account or cloud connection.", color = SierraSilver, fontSize = 10.sp, textAlign = TextAlign.Center)
+        }
+    }
+}
+
+@Composable
+private fun SierraAuthField(value: String, onValue: (String) -> Unit, label: String) {
+    OutlinedTextField(
+        value = value,
+        onValueChange = onValue,
+        label = { Text(label) },
+        singleLine = true,
+        modifier = Modifier.fillMaxWidth().widthIn(max = 520.dp)
+    )
 }
 
 @Composable
@@ -260,8 +353,15 @@ private fun SierraTopBar(ui: DirectorUiState, onSierra: () -> Unit, onTools: () 
                 Text(if (ui.sierraMode == SierraMode.AI) "AI" else "β", color = if (ui.sierraMode == SierraMode.AI) SierraSuccess else SierraSilver, fontSize = 11.sp, fontWeight = FontWeight.Bold)
             }
         }
-        Surface(onClick = onTools, color = SierraGraphite.copy(alpha = .78f), shape = CircleShape, modifier = Modifier.size(44.dp)) {
-            Box(contentAlignment = Alignment.Center) { Text("•••", color = SierraIvory, fontSize = 16.sp, letterSpacing = 1.sp) }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            if (ui.signedIn && ui.creditsAvailable != null) {
+                Surface(onClick = onSierra, color = SierraGraphite.copy(alpha = .78f), shape = RoundedCornerShape(18.dp)) {
+                    Text("${ui.creditsAvailable} ◉", color = SierraSoftGold, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp))
+                }
+            }
+            Surface(onClick = onTools, color = SierraGraphite.copy(alpha = .78f), shape = CircleShape, modifier = Modifier.size(44.dp)) {
+                Box(contentAlignment = Alignment.Center) { Text("•••", color = SierraIvory, fontSize = 16.sp, letterSpacing = 1.sp) }
+            }
         }
     }
 }
@@ -419,6 +519,12 @@ private fun SierraStatusSheet(ui: DirectorUiState, vm: DirectorViewModel, onClos
                     Text("SIERRA", color = SierraIvory, letterSpacing = 3.sp, fontWeight = FontWeight.Bold)
                     Text("✕", color = SierraIvory, modifier = Modifier.clickable { onClose() }.padding(8.dp))
                 }
+                if (ui.signedIn) {
+                    SierraStatusRow("Account", ui.accountName ?: "Signed in")
+                    SierraStatusRow("AI credits", ui.creditsAvailable?.toString() ?: "Syncing")
+                } else {
+                    SierraStatusRow("Account", if (ui.guestMode) "Sierra β guest" else "Not signed in")
+                }
                 SierraStatusRow("Sierra AI", if (ui.aiAvailable && !ui.privateMode) "Available" else if (ui.privateMode) "Disabled by Private Photography" else "Unavailable")
                 SierraStatusRow("Sierra β", "Active")
                 SierraStatusRow("Current intelligence", if (ui.sierraMode == SierraMode.AI) "Sierra AI + Sierra β" else "Sierra β")
@@ -428,6 +534,7 @@ private fun SierraStatusSheet(ui: DirectorUiState, vm: DirectorViewModel, onClos
                 Text("Sierra AI directs the photograph when available. Sierra β always validates and executes camera controls locally, and takes over planning automatically when cloud intelligence is unavailable or too slow.", color = SierraSilver, fontSize = 12.sp, lineHeight = 18.sp)
                 if (ui.privateMode) Text("Private Photography is active. No cloud analysis will be attempted.", color = SierraSoftGold, fontSize = 12.sp)
                 TextButton(onClick = { vm.togglePrivateMode() }) { Text(if (ui.privateMode) "Disable Private Photography" else "Use Sierra β privately", color = SierraGold) }
+                if (ui.signedIn) TextButton(onClick = { onClose(); vm.signOut() }) { Text("Sign out", color = SierraSilver) }
             }
         }
     }
@@ -462,9 +569,7 @@ private fun SierraGallery(ui: DirectorUiState, vm: DirectorViewModel) {
                     horizontalArrangement = Arrangement.spacedBy(3.dp),
                     verticalArrangement = Arrangement.spacedBy(3.dp)
                 ) {
-                    items(ui.galleryItems, key = { it }) { value ->
-                        SierraGalleryThumbnail(value) { selected = value }
-                    }
+                    items(ui.galleryItems, key = { it }) { value -> SierraGalleryThumbnail(value) { selected = value } }
                 }
             }
         }
