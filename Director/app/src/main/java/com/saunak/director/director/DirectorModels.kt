@@ -72,6 +72,7 @@ data class DirectorUiState(
     val keepOriginal: Boolean = false,
     val serverConfigured: Boolean = false,
     val signedIn: Boolean = false,
+    val guestMode: Boolean = false,
     val accountName: String? = null,
     val creditsAvailable: Int? = null,
     val authBusy: Boolean = false,
