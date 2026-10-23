@@ -15,8 +15,8 @@ jobs:
 
       - restore_cache:
           keys:
-            - director-gradle-v2-{{ checksum "Director/gradle.properties" }}
-            - director-gradle-v2-
+            - director-gradle-v3-{{ checksum "Director/gradle.properties" }}
+            - director-gradle-v3-
 
       - run:
           name: Prepare Java 17 and Android SDK 36
@@ -43,18 +43,64 @@ jobs:
             ./gradlew --version
 
       - run:
+          name: Compile Kotlin first
+          command: |
+            set -euo pipefail
+            source "$BASH_ENV"
+            cd Director
+            mkdir -p /tmp/director-diagnostics
+
+            set +e
+            ./gradlew \
+              --no-daemon \
+              --stacktrace \
+              --max-workers=2 \
+              compileDebugKotlin \
+              2>&1 | tee /tmp/director-diagnostics/compile.log
+            RC=${PIPESTATUS[0]}
+            set -e
+
+            if [ "$RC" -ne 0 ]; then
+              echo
+              echo '================ EXACT KOTLIN FAILURE ================'
+              grep -nE '^e: |error:|Unresolved reference|Syntax error|Compilation error|Caused by:|Execution failed|FAILED' \
+                /tmp/director-diagnostics/compile.log | tail -n 160 || true
+              echo '================ LAST 220 LOG LINES =================='
+              tail -n 220 /tmp/director-diagnostics/compile.log || true
+              echo '======================================================'
+              exit "$RC"
+            fi
+
+      - run:
           name: Unit tests, lint and build APK
           command: |
             set -euo pipefail
             source "$BASH_ENV"
             cd Director
+            mkdir -p /tmp/director-diagnostics
+
+            set +e
             ./gradlew \
               --no-daemon \
               --stacktrace \
               --max-workers=2 \
               testDebugUnitTest \
               lintDebug \
-              assembleDebug
+              assembleDebug \
+              2>&1 | tee /tmp/director-diagnostics/build.log
+            RC=${PIPESTATUS[0]}
+            set -e
+
+            if [ "$RC" -ne 0 ]; then
+              echo
+              echo '================ EXACT GRADLE FAILURE ================'
+              grep -nE '^e: |error:|Lint found|Unresolved reference|Syntax error|Compilation error|Caused by:|Execution failed|FAILED' \
+                /tmp/director-diagnostics/build.log | tail -n 180 || true
+              echo '================ LAST 250 LOG LINES =================='
+              tail -n 250 /tmp/director-diagnostics/build.log || true
+              echo '======================================================'
+              exit "$RC"
+            fi
 
       - run:
           name: Verify and package APK
@@ -78,8 +124,20 @@ jobs:
             sha256sum /tmp/director-artifacts/Director-debug.apk \
               | tee /tmp/director-artifacts/Director-debug.apk.sha256
 
+      - run:
+          name: Preserve diagnostics
+          when: always
+          command: |
+            mkdir -p /tmp/director-diagnostics
+            if [ -d Director/app/build/reports ]; then
+              cp -R Director/app/build/reports /tmp/director-diagnostics/reports || true
+            fi
+            if [ -d Director/app/build/test-results ]; then
+              cp -R Director/app/build/test-results /tmp/director-diagnostics/test-results || true
+            fi
+
       - save_cache:
-          key: director-gradle-v2-{{ checksum "Director/gradle.properties" }}
+          key: director-gradle-v3-{{ checksum "Director/gradle.properties" }}
           paths:
             - ~/.gradle/caches
             - ~/.gradle/wrapper
@@ -93,8 +151,8 @@ jobs:
           destination: director-apk
 
       - store_artifacts:
-          path: Director/app/build/reports
-          destination: reports
+          path: /tmp/director-diagnostics
+          destination: diagnostics
 
 workflows:
   director-build:
