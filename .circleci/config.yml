@@ -211,6 +211,54 @@ jobs:
           path: /tmp/director-diagnostics
           destination: diagnostics
 
+  test-sierra-server:
+    docker:
+      - image: cimg/python:3.12
+    resource_class: medium
+    working_directory: ~/project
+    environment:
+      SIERRA_JWT_SECRET: 0123456789012345678901234567890123456789
+      SIERRA_PROVIDER_MASTER_KEY: j9fYzPzGZRXnZN4oWg_2-ZE6fAKh4CrJz8X3rOMbTgI=
+
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - sierra-server-pip-v1-{{ checksum "SierraServer/pyproject.toml" }}
+            - sierra-server-pip-v1-
+      - run:
+          name: Install Sierra server
+          command: |
+            set -euo pipefail
+            cd SierraServer
+            python -m pip install --upgrade pip
+            pip install '.[dev]'
+      - run:
+          name: Static validation
+          command: |
+            set -euo pipefail
+            cd SierraServer
+            python -m compileall -q app tests scripts
+            ruff check app tests scripts
+      - run:
+          name: Unit tests
+          command: |
+            set -euo pipefail
+            cd SierraServer
+            pytest -q --junitxml=/tmp/sierra-test-results/results.xml
+      - run:
+          name: Docker build
+          command: |
+            set -euo pipefail
+            cd SierraServer
+            docker build -t sierra-vision-server:ci .
+      - save_cache:
+          key: sierra-server-pip-v1-{{ checksum "SierraServer/pyproject.toml" }}
+          paths:
+            - ~/.cache/pip
+      - store_test_results:
+          path: /tmp/sierra-test-results
+
 workflows:
   director-build:
     jobs:
@@ -219,3 +267,10 @@ workflows:
             branches:
               only:
                 - director-gemini-v1
+  sierra-server-build:
+    jobs:
+      - test-sierra-server:
+          filters:
+            branches:
+              only:
+                - sierra-vision-server-v1
