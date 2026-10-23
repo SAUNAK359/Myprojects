@@ -21,6 +21,8 @@ import com.saunak.director.storage.PhotoRepository
 import com.saunak.director.storage.RecipeMemory
 import com.saunak.director.storage.SierraCropPolicy
 import com.saunak.director.tools.ToolExecutor
+import java.util.Locale
+import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -29,7 +31,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.util.Locale
 
 class DirectorViewModel(app: Application) : AndroidViewModel(app) {
     private val camera = CameraEngine(app)
@@ -76,10 +77,7 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
             authBusy = current.authBusy,
             authError = current.authError
         )
-        if (state.lastSavedUri != null && state.stage == DirectorStage.READY) {
-            refreshGallery()
-            refreshCredits()
-        }
+        if (state.lastSavedUri != null && state.stage == DirectorStage.READY) refreshGallery()
     }
 
     private val _ui = MutableStateFlow(
@@ -111,6 +109,7 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
         orchestrator.setKeepOriginal(initialKeepOriginal)
         refreshGallery()
         refreshCredits()
+        retryPendingSettlement()
         viewModelScope.launch {
             val recovered = orchestrator.recoverPendingReferences()
             if (recovered.isNotEmpty()) {
@@ -229,16 +228,39 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun primaryCapture() {
         viewModelScope.launch {
+            val preparedBeforePress = orchestrator.isPrepared()
             try {
-                orchestrator.onPrimaryPressed()
+                val saved = orchestrator.onPrimaryPressed()
+                if (preparedBeforePress) {
+                    if (saved != null) {
+                        val captureId = "capture-${UUID.randomUUID()}"
+                        runtime.completeFinalCapture(captureId)
+                            .onSuccess { refreshCredits() }
+                            .onFailure {
+                                _ui.value = _ui.value.copy(status = "Sierra photo saved • account sync pending")
+                            }
+                    } else {
+                        runtime.cancelCloudJob()
+                    }
+                }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (oom: OutOfMemoryError) {
                 runtime.cancel()
-                _ui.value = _ui.value.copy(stage = DirectorStage.ERROR, aiAvailable = runtime.isReady() && !_ui.value.privateMode, status = "Sierra memory pressure • try again", error = "Analysis used too much memory")
+                _ui.value = _ui.value.copy(
+                    stage = DirectorStage.ERROR,
+                    aiAvailable = runtime.isReady() && !_ui.value.privateMode,
+                    status = "Sierra memory pressure • try again",
+                    error = "Analysis used too much memory"
+                )
             } catch (t: Throwable) {
                 runtime.cancel()
-                _ui.value = _ui.value.copy(stage = DirectorStage.ERROR, aiAvailable = runtime.isReady() && !_ui.value.privateMode, status = "Sierra could not prepare the shot", error = t.message ?: t::class.java.simpleName)
+                _ui.value = _ui.value.copy(
+                    stage = DirectorStage.ERROR,
+                    aiAvailable = runtime.isReady() && !_ui.value.privateMode,
+                    status = "Sierra could not prepare the shot",
+                    error = t.message ?: t::class.java.simpleName
+                )
             }
         }
     }
@@ -250,15 +272,21 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun zoom(value: Float) {
-        orchestrator.cancelForUserAction(); camera.userSetZoom(value); refreshCameraSoon("Zoom ${String.format(Locale.US, "%.1f", value)}×")
+        orchestrator.cancelForUserAction()
+        camera.userSetZoom(value)
+        refreshCameraSoon("Zoom ${String.format(Locale.US, "%.1f", value)}×")
     }
 
     fun exposure(index: Int) {
-        orchestrator.cancelForUserAction(); camera.userSetExposureIndex(index); refreshCameraSoon("Exposure adjusted")
+        orchestrator.cancelForUserAction()
+        camera.userSetExposureIndex(index)
+        refreshCameraSoon("Exposure adjusted")
     }
 
     fun torch(enabled: Boolean) {
-        orchestrator.cancelForUserAction(); camera.userSetTorch(enabled); refreshCameraSoon(if (enabled) "Torch on" else "Torch off")
+        orchestrator.cancelForUserAction()
+        camera.userSetTorch(enabled)
+        refreshCameraSoon(if (enabled) "Torch on" else "Torch off")
     }
 
     fun cycleFlash() {
@@ -268,7 +296,8 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
             StillFlashMode.AUTO -> StillFlashMode.ON
             StillFlashMode.ON -> StillFlashMode.OFF
         }
-        camera.userSetFlash(next); refreshCameraSoon("Flash ${next.wireName}")
+        camera.userSetFlash(next)
+        refreshCameraSoon("Flash ${next.wireName}")
     }
 
     fun switchCamera() {
@@ -276,7 +305,9 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
         runCatching { camera.switchLens() }
             .onSuccess { switched ->
                 if (switched) {
-                    viewModelScope.launch(Dispatchers.IO) { runCatching { deviceConfigSkill.refresh(camera.capabilities(), camera.snapshot()) } }
+                    viewModelScope.launch(Dispatchers.IO) {
+                        runCatching { deviceConfigSkill.refresh(camera.capabilities(), camera.snapshot()) }
+                    }
                     syncDeviceProfile()
                 }
                 refreshCamera(if (switched) "Camera switched" else "Other camera unavailable")
@@ -302,18 +333,34 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setAspectRatioOverride(value: String?) {
         val safe = value?.takeIf(SierraCropPolicy::isSupported)
-        orchestrator.cancelForUserAction(); orchestrator.setAspectRatioOverride(safe)
-        preferences.edit().apply { if (safe == null) remove("aspect_ratio_override") else putString("aspect_ratio_override", safe) }.apply()
-        _ui.value = _ui.value.copy(aspectRatioOverride = safe, aspectRatio = safe ?: _ui.value.aspectRatio, stage = DirectorStage.READY, status = if (safe == null) "Aspect ratio • Sierra Auto" else "Aspect ratio • $safe", error = null)
+        orchestrator.cancelForUserAction()
+        orchestrator.setAspectRatioOverride(safe)
+        preferences.edit().apply {
+            if (safe == null) remove("aspect_ratio_override") else putString("aspect_ratio_override", safe)
+        }.apply()
+        _ui.value = _ui.value.copy(
+            aspectRatioOverride = safe,
+            aspectRatio = safe ?: _ui.value.aspectRatio,
+            stage = DirectorStage.READY,
+            status = if (safe == null) "Aspect ratio • Sierra Auto" else "Aspect ratio • $safe",
+            error = null
+        )
     }
 
     fun toggleKeepOriginal() {
         val enabled = !_ui.value.keepOriginal
-        orchestrator.setKeepOriginal(enabled); preferences.edit().putBoolean("keep_original", enabled).apply()
-        _ui.value = _ui.value.copy(keepOriginal = enabled, status = if (enabled) "Originals will also be saved" else "Saving Sierra final only")
+        orchestrator.setKeepOriginal(enabled)
+        preferences.edit().putBoolean("keep_original", enabled).apply()
+        _ui.value = _ui.value.copy(
+            keepOriginal = enabled,
+            status = if (enabled) "Originals will also be saved" else "Saving Sierra final only"
+        )
     }
 
-    fun openGallery() { refreshGallery(); _ui.value = _ui.value.copy(showGallery = true, showTools = false, showSettings = false) }
+    fun openGallery() {
+        refreshGallery()
+        _ui.value = _ui.value.copy(showGallery = true, showTools = false, showSettings = false)
+    }
     fun closeGallery() { _ui.value = _ui.value.copy(showGallery = false) }
 
     fun refreshGallery() {
@@ -351,6 +398,13 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    private fun retryPendingSettlement() {
+        if (!server.authenticated) return
+        viewModelScope.launch {
+            runtime.retryPendingSettlement().onSuccess { refreshCredits() }
+        }
+    }
+
     private fun syncDeviceProfile() {
         if (!server.authenticated) return
         viewModelScope.launch {
@@ -375,12 +429,23 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun refreshCameraSoon(status: String) { viewModelScope.launch { delay(80); refreshCamera(status) } }
+    private fun refreshCameraSoon(status: String) {
+        viewModelScope.launch { delay(80); refreshCamera(status) }
+    }
 
     fun onAppBackgrounded() { orchestrator.cancelForUserAction() }
-    fun onAppForegrounded() { refreshCamera(); refreshGallery(); refreshCredits(); syncDeviceProfile() }
+    fun onAppForegrounded() {
+        refreshCamera()
+        refreshGallery()
+        refreshCredits()
+        retryPendingSettlement()
+        syncDeviceProfile()
+    }
 
     override fun onCleared() {
-        orchestrator.cancelForUserAction(); runtime.close(); camera.close(); super.onCleared()
+        orchestrator.cancelForUserAction()
+        runtime.close()
+        camera.close()
+        super.onCleared()
     }
 }
