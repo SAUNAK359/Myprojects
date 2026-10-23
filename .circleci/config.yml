@@ -4,7 +4,7 @@ jobs:
   build-director-apk:
     docker:
       - image: cimg/android:2026.08
-    resource_class: small
+    resource_class: medium
     working_directory: ~/project
     environment:
       GRADLE_USER_HOME: /home/circleci/.gradle
@@ -15,11 +15,11 @@ jobs:
 
       - restore_cache:
           keys:
-            - director-gradle-v3-{{ checksum "Director/gradle.properties" }}
-            - director-gradle-v3-
+            - director-gradle-v4-{{ checksum "Director/gradle.properties" }}
+            - director-gradle-v4-
 
       - run:
-          name: Prepare Java 17 and Android SDK 36
+          name: Prepare Java 17, Android SDK 36 and CI memory profile
           command: |
             set -euo pipefail
             sudo apt-get update -qq
@@ -30,7 +30,20 @@ jobs:
             echo 'export PATH=$JAVA_HOME/bin:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH' >> "$BASH_ENV"
             source "$BASH_ENV"
 
+            mkdir -p "$GRADLE_USER_HOME"
+            cat > "$GRADLE_USER_HOME/gradle.properties" <<'EOF'
+            org.gradle.jvmargs=-Xmx2304m -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8 -XX:+UseParallelGC
+            org.gradle.workers.max=1
+            org.gradle.parallel=false
+            org.gradle.caching=true
+            kotlin.compiler.execution.strategy=in-process
+            EOF
+
+            echo '--- CI Gradle memory profile ---'
+            cat "$GRADLE_USER_HOME/gradle.properties"
+            echo '--------------------------------'
             java -version
+
             yes | sdkmanager --licenses >/dev/null || true
             sdkmanager \
               'platform-tools' \
@@ -54,7 +67,7 @@ jobs:
             ./gradlew \
               --no-daemon \
               --stacktrace \
-              --max-workers=2 \
+              --max-workers=1 \
               compileDebugKotlin \
               2>&1 | tee /tmp/director-diagnostics/compile.log
             RC=${PIPESTATUS[0]}
@@ -63,10 +76,10 @@ jobs:
             if [ "$RC" -ne 0 ]; then
               echo
               echo '================ EXACT KOTLIN FAILURE ================'
-              grep -nE '^e: |error:|Unresolved reference|Syntax error|Compilation error|Caused by:|Execution failed|FAILED' \
-                /tmp/director-diagnostics/compile.log | tail -n 160 || true
-              echo '================ LAST 220 LOG LINES =================='
-              tail -n 220 /tmp/director-diagnostics/compile.log || true
+              grep -nE '^e: |error:|Unresolved reference|Syntax error|Compilation error|OutOfMemory|daemon disappeared|Caused by:|Execution failed|FAILED' \
+                /tmp/director-diagnostics/compile.log | tail -n 180 || true
+              echo '================ LAST 240 LOG LINES =================='
+              tail -n 240 /tmp/director-diagnostics/compile.log || true
               echo '======================================================'
               exit "$RC"
             fi
@@ -83,7 +96,7 @@ jobs:
             ./gradlew \
               --no-daemon \
               --stacktrace \
-              --max-workers=2 \
+              --max-workers=1 \
               testDebugUnitTest \
               lintDebug \
               assembleDebug \
@@ -94,10 +107,10 @@ jobs:
             if [ "$RC" -ne 0 ]; then
               echo
               echo '================ EXACT GRADLE FAILURE ================'
-              grep -nE '^e: |error:|Lint found|Unresolved reference|Syntax error|Compilation error|Caused by:|Execution failed|FAILED' \
-                /tmp/director-diagnostics/build.log | tail -n 180 || true
-              echo '================ LAST 250 LOG LINES =================='
-              tail -n 250 /tmp/director-diagnostics/build.log || true
+              grep -nE '^e: |error:|Lint found|Unresolved reference|Syntax error|Compilation error|OutOfMemory|daemon disappeared|Caused by:|Execution failed|FAILED' \
+                /tmp/director-diagnostics/build.log | tail -n 200 || true
+              echo '================ LAST 280 LOG LINES =================='
+              tail -n 280 /tmp/director-diagnostics/build.log || true
               echo '======================================================'
               exit "$RC"
             fi
@@ -129,6 +142,7 @@ jobs:
           when: always
           command: |
             mkdir -p /tmp/director-diagnostics
+            cp -R "$GRADLE_USER_HOME/daemon" /tmp/director-diagnostics/gradle-daemon-logs 2>/dev/null || true
             if [ -d Director/app/build/reports ]; then
               cp -R Director/app/build/reports /tmp/director-diagnostics/reports || true
             fi
@@ -137,7 +151,7 @@ jobs:
             fi
 
       - save_cache:
-          key: director-gradle-v3-{{ checksum "Director/gradle.properties" }}
+          key: director-gradle-v4-{{ checksum "Director/gradle.properties" }}
           paths:
             - ~/.gradle/caches
             - ~/.gradle/wrapper
