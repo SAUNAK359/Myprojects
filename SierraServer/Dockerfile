@@ -5,7 +5,7 @@ WORKDIR /srv/sierra
 
 RUN useradd --create-home --uid 10001 sierra
 COPY pyproject.toml ./
-RUN pip install --upgrade pip && pip install '.[dev]'
+RUN pip install --upgrade pip && pip install .
 
 COPY . .
 RUN mkdir -p /srv/sierra/runtime && chown -R sierra:sierra /srv/sierra
