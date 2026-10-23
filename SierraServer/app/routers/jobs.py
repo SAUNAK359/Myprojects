@@ -1,9 +1,10 @@
+import json
 import secrets
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Header, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,6 +19,8 @@ from app.schemas import CompleteJobRequest, CreditView, JobView, SierraPlan
 router = APIRouter(prefix="/v1/jobs", tags=["jobs"])
 ALLOWED_TYPES = {"image/jpeg", "image/png", "image/webp"}
 TERMINAL = {"completed", "failed", "cancelled", "expired"}
+MAX_CONTEXT_CHARS = 96_000
+MAX_SKILL_CHARS = 24_000
 
 
 def _view(job: Job, user: User) -> JobView:
@@ -43,9 +46,26 @@ async def _existing_job(db: AsyncSession, user_id: uuid.UUID, key: str) -> Job |
     return await db.scalar(select(Job).where(Job.user_id == user_id, Job.idempotency_key == key))
 
 
+def _validated_json_context(value: str, label: str) -> str:
+    clean = value.strip() or "{}"
+    if len(clean) > MAX_CONTEXT_CHARS:
+        raise HTTPException(status_code=413, detail=f"{label} is too large")
+    try:
+        parsed = json.loads(clean)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=422, detail=f"{label} must be valid JSON") from exc
+    if not isinstance(parsed, dict):
+        raise HTTPException(status_code=422, detail=f"{label} must be a JSON object")
+    return json.dumps(parsed, separators=(",", ":"), ensure_ascii=False)
+
+
 @router.post("", response_model=JobView, status_code=status.HTTP_202_ACCEPTED)
 async def create_job(
     image: UploadFile = File(...),
+    camera_context_json: str = Form("{}"),
+    device_capabilities_json: str = Form("{}"),
+    local_quality_json: str = Form("{}"),
+    skill_context: str = Form(""),
     idempotency_key: str = Header(..., alias="Idempotency-Key", min_length=8, max_length=100),
     user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
@@ -67,7 +87,22 @@ async def create_job(
     if not (is_jpeg or is_png or is_webp):
         raise HTTPException(status_code=415, detail="analysis payload is not a recognized image")
 
-    job = Job(user_id=user.id, idempotency_key=idempotency_key, state="queued")
+    camera_context = _validated_json_context(camera_context_json, "camera_context_json")
+    device_context = _validated_json_context(device_capabilities_json, "device_capabilities_json")
+    quality_context = _validated_json_context(local_quality_json, "local_quality_json")
+    clean_skill_context = skill_context.strip()
+    if len(clean_skill_context) > MAX_SKILL_CHARS:
+        raise HTTPException(status_code=413, detail="skill_context is too large")
+
+    job = Job(
+        user_id=user.id,
+        idempotency_key=idempotency_key,
+        state="queued",
+        camera_context_json=camera_context,
+        device_capabilities_json=device_context,
+        local_quality_json=quality_context,
+        skill_context=clean_skill_context or None,
+    )
     db.add(job)
     try:
         await db.flush()
@@ -161,6 +196,10 @@ async def cancel_job(
     user = await release_job_credit(db, job, "client cancelled")
     image_path = job.analysis_image_path
     job.analysis_image_path = None
+    job.camera_context_json = None
+    job.device_capabilities_json = None
+    job.local_quality_json = None
+    job.skill_context = None
     await db.commit()
     if image_path:
         Path(image_path).unlink(missing_ok=True)
