@@ -234,12 +234,15 @@ private fun TopChrome(ui: com.saunak.director.director.DirectorUiState, onSettin
             GlassButton("⚙", onSettings)
         }
         Spacer(Modifier.height(10.dp))
-        StatusPill(ui)
+        StatusPill(ui, Modifier.align(Alignment.CenterHorizontally))
     }
 }
 
 @Composable
-private fun StatusPill(ui: com.saunak.director.director.DirectorUiState) {
+private fun StatusPill(
+    ui: com.saunak.director.director.DirectorUiState,
+    modifier: Modifier = Modifier
+) {
     val busy = ui.stage in setOf(
         DirectorStage.CAPTURING, DirectorStage.ANALYZING, DirectorStage.PLANNING,
         DirectorStage.APPLYING, DirectorStage.RECAPTURING, DirectorStage.CHECKING,
@@ -250,7 +253,7 @@ private fun StatusPill(ui: com.saunak.director.director.DirectorUiState) {
         DirectorStage.ERROR -> Color(0xFFFF8A80)
         else -> Color.White
     }
-    Surface(color = Glass, shape = RoundedCornerShape(22.dp), modifier = Modifier.align(Alignment.CenterHorizontally)) {
+    Surface(color = Glass, shape = RoundedCornerShape(22.dp), modifier = modifier) {
         Row(Modifier.padding(horizontal = 14.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
             if (busy) CircularProgressIndicator(Modifier.size(13.dp), strokeWidth = 1.8.dp, color = DirectorYellow)
             else Box(Modifier.size(7.dp).background(tint, CircleShape))
