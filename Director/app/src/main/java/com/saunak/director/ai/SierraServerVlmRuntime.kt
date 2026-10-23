@@ -24,6 +24,7 @@ import org.json.JSONObject
 
 interface SierraCloudJobRuntime {
     suspend fun completeFinalCapture(captureId: String): Result<Unit>
+    suspend fun retryPendingSettlement(): Result<Unit>
     fun cancelCloudJob()
 }
 
@@ -37,6 +38,7 @@ class SierraServerVlmRuntime(
     private val deviceSkill: DeviceConfigSkill = DeviceConfigSkill(context)
 ) : VlmRuntime, SierraCloudJobRuntime {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val settlementPrefs = context.getSharedPreferences("sierra_ai_settlement_v1", Context.MODE_PRIVATE)
     @Volatile private var maxImageDimension = 704
     @Volatile private var activeJobId: String? = null
 
@@ -101,8 +103,14 @@ class SierraServerVlmRuntime(
                     )
                     return@runCatching VlmContractValidator.plan(plan)
                 }
-                "failed", "cancelled", "expired" -> error(job.error_message ?: "Sierra AI job ${job.state}")
-                "completed" -> error("Sierra AI job completed before camera capture")
+                "failed", "cancelled", "expired" -> {
+                    activeJobId = null
+                    error(job.error_message ?: "Sierra AI job ${job.state}")
+                }
+                "completed" -> {
+                    activeJobId = null
+                    error("Sierra AI job completed before camera capture")
+                }
             }
             delay(120)
             job = server.job(created.id).getOrThrow()
@@ -123,10 +131,28 @@ class SierraServerVlmRuntime(
 
     override suspend fun completeFinalCapture(captureId: String): Result<Unit> {
         val jobId = activeJobId ?: return Result.success(Unit)
-        return server.complete(jobId, captureId).map {
-            activeJobId = null
-            Unit
+        activeJobId = null
+        settlementPrefs.edit()
+            .putString(KEY_PENDING_JOB, jobId)
+            .putString(KEY_PENDING_CAPTURE, captureId)
+            .apply()
+        return retryPendingSettlement()
+    }
+
+    override suspend fun retryPendingSettlement(): Result<Unit> = runCatching {
+        val jobId = settlementPrefs.getString(KEY_PENDING_JOB, null) ?: return@runCatching Unit
+        val captureId = settlementPrefs.getString(KEY_PENDING_CAPTURE, null) ?: return@runCatching Unit
+        var last: Throwable? = null
+        repeat(3) { attempt ->
+            val result = server.complete(jobId, captureId)
+            if (result.isSuccess) {
+                settlementPrefs.edit().remove(KEY_PENDING_JOB).remove(KEY_PENDING_CAPTURE).apply()
+                return@runCatching Unit
+            }
+            last = result.exceptionOrNull()
+            delay(250L * (1 shl attempt))
         }
+        throw last ?: IllegalStateException("Sierra credit settlement is pending")
     }
 
     override fun cancelCloudJob() {
@@ -166,5 +192,10 @@ class SierraServerVlmRuntime(
         } finally {
             if (output !== source && !output.isRecycled) output.recycle()
         }
+    }
+
+    companion object {
+        private const val KEY_PENDING_JOB = "pending_job_id"
+        private const val KEY_PENDING_CAPTURE = "pending_capture_id"
     }
 }
