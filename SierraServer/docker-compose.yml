@@ -30,6 +30,17 @@ services:
       - "127.0.0.1:8080:8080"
     networks: [backend, edge]
 
+  # Preferred home/laptop public path: outbound-only tunnel. Configure the public hostname
+  # in Cloudflare Zero Trust to target http://api:8080 and keep router ports closed.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    profiles: ["tunnel"]
+    command: tunnel --no-autoupdate run --token ${SIERRA_CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on: [api]
+    networks: [edge]
+
+  # Alternative when the laptop has normal public ingress and ports 80/443 are forwarded.
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
