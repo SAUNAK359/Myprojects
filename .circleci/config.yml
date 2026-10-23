@@ -1,28 +1,20 @@
 version: 2.1
 
-server_env: &server_env
-  SIERRA_JWT_SECRET: 0123456789012345678901234567890123456789
-  SIERRA_PROVIDER_MASTER_KEY: j9fYzPzGZRXnZN4oWg_2-ZE6fAKh4CrJz8X3rOMbTgI=
-
-install_steps: &install_steps
-  - checkout
-  - run:
-      name: Install Sierra server
-      command: |
-        set -euo pipefail
-        cd SierraServer
-        python -m pip install --upgrade pip
-        pip install '.[dev]'
-
 jobs:
   sierra-import:
     docker:
       - image: cimg/python:3.12
     resource_class: medium
     working_directory: ~/project
-    environment: *server_env
     steps:
-      - *install_steps
+      - checkout
+      - run:
+          name: Install Sierra server
+          command: |
+            set -euo pipefail
+            cd SierraServer
+            python -m pip install --upgrade pip
+            pip install '.[dev]'
       - run:
           name: Compile and import
           command: |
@@ -36,9 +28,15 @@ jobs:
       - image: cimg/python:3.12
     resource_class: medium
     working_directory: ~/project
-    environment: *server_env
     steps:
-      - *install_steps
+      - checkout
+      - run:
+          name: Install Sierra server
+          command: |
+            set -euo pipefail
+            cd SierraServer
+            python -m pip install --upgrade pip
+            pip install '.[dev]'
       - run:
           name: Static correctness
           command: |
@@ -51,9 +49,15 @@ jobs:
       - image: cimg/python:3.12
     resource_class: medium
     working_directory: ~/project
-    environment: *server_env
     steps:
-      - *install_steps
+      - checkout
+      - run:
+          name: Install Sierra server
+          command: |
+            set -euo pipefail
+            cd SierraServer
+            python -m pip install --upgrade pip
+            pip install '.[dev]'
       - run:
           name: Unit tests
           command: |
