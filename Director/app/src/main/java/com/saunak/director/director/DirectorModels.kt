@@ -36,7 +36,22 @@ data class EvaluationOutput(
     @SerialName("delta") val deltaCalls: List<ToolCall> = emptyList()
 )
 
-enum class DirectorStage { CAMERA_ONLY, AI_DOWNLOAD_REQUIRED, LOADING_AI, READY, CAPTURING, ANALYZING, PLANNING, APPLYING, RECAPTURING, CHECKING, CORRECTING, SAVING, ERROR, OBSERVING }
+enum class DirectorStage {
+    CAMERA_ONLY,
+    READY,
+    CAPTURING,
+    ANALYZING,
+    PLANNING,
+    APPLYING,
+    RECAPTURING,
+    CHECKING,
+    CORRECTING,
+    PREPARED,
+    FINAL_CAPTURING,
+    SAVING,
+    ERROR,
+    OBSERVING
+}
 
 data class DirectorUiState(
     val stage: DirectorStage = DirectorStage.CAMERA_ONLY,
@@ -44,9 +59,13 @@ data class DirectorUiState(
     val status: String = "Camera ready",
     val attempt: Int = 0,
     val lastScore: Double? = null,
-    val modelProgress: Float? = null,
-    val requestModelDownload: Boolean = false,
     val error: String? = null,
     val camera: CameraUiState = CameraUiState(),
-    val lastSavedUri: String? = null
+    val lastSavedUri: String? = null,
+    val hasApiKey: Boolean = false,
+    val recipeCount: Int = 0,
+    val showSettings: Boolean = false,
+    val showTools: Boolean = false,
+    val gridEnabled: Boolean = false,
+    val levelEnabled: Boolean = false
 )
