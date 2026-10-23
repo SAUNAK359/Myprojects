@@ -71,7 +71,7 @@ class DirectorOrchestrator(
         try {
             tools.restoreUserState()
             if (!vlm.isReady()) {
-                emit(session, DirectorUiState(DirectorStage.CAMERA_ONLY, false, "Add Gemini API key in Settings", camera = camera.uiState()))
+                emit(session, DirectorUiState(DirectorStage.CAMERA_ONLY, false, "Add NVIDIA API key in Settings", camera = camera.uiState()))
                 return null
             }
             val thermalPolicy = thermal.policy()
@@ -207,13 +207,14 @@ class DirectorOrchestrator(
         val message = t.message.orEmpty().trim()
         val lower = message.lowercase()
         return when {
-            "401" in lower || "invalid" in lower && "key" in lower -> "Gemini key invalid • update it in Settings"
-            "403" in lower || "blocked" in lower && "key" in lower -> "Gemini access blocked • check API key/project"
-            "404" in lower || "model is unavailable" in lower -> "Gemini model unavailable for this key"
-            "429" in lower || "quota" in lower || "rate limit" in lower -> "Gemini quota reached • try again shortly"
-            "timeout" in lower || "timed out" in lower -> "Gemini response timed out • try again"
-            "no candidate" in lower || "no content" in lower || "empty output" in lower -> "Gemini returned no usable analysis • try again"
-            "blocked the request" in lower -> "Gemini blocked this image request"
+            "401" in lower || "invalid" in lower && ("key" in lower || "credential" in lower) -> "AI key invalid • update it in Settings"
+            "402" in lower || "credits" in lower || "billing" in lower -> "AI endpoint requires credits or billing"
+            "403" in lower || "blocked" in lower || "access denied" in lower -> "AI access blocked • check API key/project"
+            "404" in lower || "model" in lower && "unavailable" in lower || "endpoint unavailable" in lower -> "AI model endpoint unavailable"
+            "429" in lower || "quota" in lower || "rate limit" in lower || "throttled" in lower -> "AI rate limit reached • try again shortly"
+            "timeout" in lower || "timed out" in lower -> "AI response timed out • try again"
+            "no candidate" in lower || "no choices" in lower || "no content" in lower || "empty output" in lower -> "AI returned no usable analysis • try again"
+            "non-json" in lower || "unreadable" in lower -> "AI returned an invalid analysis response • try again"
             message.isNotBlank() -> "Director AI error • ${message.take(96)}"
             else -> "Director analysis failed • try again"
         }
