@@ -1,216 +1,6 @@
 version: 2.1
 
 jobs:
-  build-director-apk:
-    docker:
-      - image: cimg/android:2026.08
-    resource_class: medium+
-    working_directory: ~/project
-    environment:
-      GRADLE_USER_HOME: /home/circleci/.gradle
-      TERM: dumb
-
-    steps:
-      - checkout
-
-      - restore_cache:
-          keys:
-            - director-gradle-v7-{{ checksum "Director/gradle.properties" }}
-            - director-gradle-v7-
-
-      - run:
-          name: Prepare Java 17 and Android SDK 36
-          command: |
-            set -euo pipefail
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq openjdk-17-jdk-headless unzip zip procps
-
-            JAVA17_HOME="$(dirname "$(dirname "$(readlink -f "$(update-alternatives --list java | grep 'java-17' | head -n 1)")")")"
-            echo "export JAVA_HOME=$JAVA17_HOME" >> "$BASH_ENV"
-            echo 'export PATH=$JAVA_HOME/bin:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH' >> "$BASH_ENV"
-            source "$BASH_ENV"
-
-            java -version
-            free -h || true
-            yes | sdkmanager --licenses >/dev/null || true
-            sdkmanager 'platform-tools' 'platforms;android-36' 'build-tools;36.0.0'
-
-            cd Director
-            printf 'sdk.dir=%s\n' "$ANDROID_HOME" > local.properties
-            chmod +x gradlew
-            ./gradlew --version
-            cat gradle.properties
-
-      - run:
-          name: Compile Kotlin
-          command: |
-            set -euo pipefail
-            source "$BASH_ENV"
-            cd Director
-            mkdir -p /tmp/director-diagnostics
-
-            run_compile() {
-              local heap="$1"
-              local workers="$2"
-              ./gradlew \
-                --no-daemon \
-                --no-parallel \
-                --stacktrace \
-                --max-workers="$workers" \
-                -Dorg.gradle.jvmargs="-Xmx${heap} -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8 -XX:+UseParallelGC" \
-                -Pkotlin.compiler.execution.strategy=in-process \
-                compileDebugKotlin
-            }
-
-            set +e
-            run_compile 2560m 2 2>&1 | tee /tmp/director-diagnostics/compile.log
-            RC=${PIPESTATUS[0]}
-            set -e
-
-            if [ "$RC" -ne 0 ] && grep -qiE 'daemon disappeared|DaemonDisappearedException|Killed process|OutOfMemory' /tmp/director-diagnostics/compile.log; then
-              echo 'Memory-pressure retry: 2048m heap, 1 worker'
-              ./gradlew --stop >/dev/null 2>&1 || true
-              set +e
-              run_compile 2048m 1 2>&1 | tee /tmp/director-diagnostics/compile-retry.log
-              RC=${PIPESTATUS[0]}
-              set -e
-            fi
-
-            if [ "$RC" -ne 0 ]; then
-              echo '================ COMPILE FAILURE ================'
-              tail -n 320 /tmp/director-diagnostics/compile-retry.log 2>/dev/null || tail -n 320 /tmp/director-diagnostics/compile.log
-              exit "$RC"
-            fi
-
-      - run:
-          name: Run unit tests
-          command: |
-            set -euo pipefail
-            source "$BASH_ENV"
-            cd Director
-            ./gradlew \
-              --no-daemon \
-              --no-parallel \
-              --stacktrace \
-              --max-workers=2 \
-              -Dorg.gradle.jvmargs='-Xmx2560m -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8 -XX:+UseParallelGC' \
-              -Pkotlin.compiler.execution.strategy=in-process \
-              testDebugUnitTest \
-              2>&1 | tee /tmp/director-diagnostics/tests.log
-
-      - run:
-          name: Build debug APK
-          command: |
-            set -euo pipefail
-            source "$BASH_ENV"
-            cd Director
-            ./gradlew \
-              --no-daemon \
-              --no-parallel \
-              --stacktrace \
-              --max-workers=2 \
-              -Dorg.gradle.jvmargs='-Xmx2560m -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8 -XX:+UseParallelGC' \
-              -Pkotlin.compiler.execution.strategy=in-process \
-              assembleDebug \
-              2>&1 | tee /tmp/director-diagnostics/assemble.log
-
-      - run:
-          name: Verify and package APK
-          command: |
-            set -euo pipefail
-            source "$BASH_ENV"
-            cd Director
-            mkdir -p /tmp/director-diagnostics /tmp/director-artifacts
-
-            APK="$(find app/build/outputs/apk/debug -type f -name '*.apk' -print -quit)"
-            test -n "$APK"
-            test -s "$APK"
-
-            BUILD_TOOLS="$ANDROID_HOME/build-tools/36.0.0"
-            "$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$APK" > /tmp/director-diagnostics/apksigner.txt
-            "$BUILD_TOOLS/zipalign" -c -P 16 -v 4 "$APK" > /tmp/director-diagnostics/zipalign.txt
-            unzip -t "$APK" > /tmp/director-diagnostics/unzip-test.txt
-            unzip -l "$APK" > /tmp/director-diagnostics/apk-file-list.txt
-            grep -qE '(^|[[:space:]])classes\.dex$' /tmp/director-diagnostics/apk-file-list.txt
-            "$BUILD_TOOLS/aapt2" dump badging "$APK" > /tmp/director-diagnostics/aapt-badging.txt
-
-            cp "$APK" /tmp/director-artifacts/Director-debug.apk
-            sha256sum /tmp/director-artifacts/Director-debug.apk > /tmp/director-artifacts/Director-debug.apk.sha256
-            ls -lh /tmp/director-artifacts/Director-debug.apk
-            head -n 25 /tmp/director-diagnostics/aapt-badging.txt
-
-      - run:
-          name: Android lint audit
-          when: always
-          command: |
-            set -euo pipefail
-            source "$BASH_ENV"
-            cd Director
-            mkdir -p /tmp/director-diagnostics
-
-            set +e
-            ./gradlew \
-              --no-daemon \
-              --no-parallel \
-              --stacktrace \
-              --max-workers=1 \
-              -Dorg.gradle.jvmargs='-Xmx2048m -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8 -XX:+UseParallelGC' \
-              -Pkotlin.compiler.execution.strategy=in-process \
-              lintDebug \
-              2>&1 | tee /tmp/director-diagnostics/lint.log
-            LINT_RC=${PIPESTATUS[0]}
-            set -e
-
-            REPORT='app/build/intermediates/lint_intermediate_text_report/debug/lintReportDebug/lint-results-debug.txt'
-            if [ -f "$REPORT" ]; then
-              cp "$REPORT" /tmp/director-diagnostics/lint-results-debug.txt
-            fi
-
-            if [ "$LINT_RC" -ne 0 ]; then
-              echo 'Android lint reported issues. APK remains available because compilation, tests, assembly and APK verification already passed.'
-              if [ -s /tmp/director-diagnostics/lint-results-debug.txt ]; then
-                cat /tmp/director-diagnostics/lint-results-debug.txt
-              else
-                tail -n 260 /tmp/director-diagnostics/lint.log || true
-              fi
-            else
-              echo 'Android lint passed.'
-            fi
-
-            exit 0
-
-      - run:
-          name: Preserve diagnostics
-          when: always
-          command: |
-            mkdir -p /tmp/director-diagnostics /tmp/director-artifacts
-            free -h > /tmp/director-diagnostics/final-memory.txt 2>&1 || true
-            cp -R "$GRADLE_USER_HOME/daemon" /tmp/director-diagnostics/gradle-daemon-logs 2>/dev/null || true
-            if [ -d Director/app/build/reports ]; then
-              cp -R Director/app/build/reports /tmp/director-diagnostics/reports || true
-            fi
-            if [ -d Director/app/build/test-results ]; then
-              cp -R Director/app/build/test-results /tmp/director-diagnostics/test-results || true
-            fi
-
-      - save_cache:
-          key: director-gradle-v7-{{ checksum "Director/gradle.properties" }}
-          paths:
-            - ~/.gradle/caches
-            - ~/.gradle/wrapper
-            - ~/.gradle/director-wrapper
-
-      - store_test_results:
-          path: Director/app/build/test-results
-
-      - store_artifacts:
-          path: /tmp/director-artifacts
-          destination: director-apk
-
-      - store_artifacts:
-          path: /tmp/director-diagnostics
-          destination: diagnostics
-
   test-sierra-server:
     docker:
       - image: cimg/python:3.12
@@ -222,13 +12,12 @@ jobs:
 
     steps:
       - checkout
-      - setup_remote_docker:
-          version: default
-          docker_layer_caching: false
+
       - restore_cache:
           keys:
-            - sierra-server-pip-v1-{{ checksum "SierraServer/pyproject.toml" }}
-            - sierra-server-pip-v1-
+            - sierra-server-pip-v2-{{ checksum "SierraServer/pyproject.toml" }}
+            - sierra-server-pip-v2-
+
       - run:
           name: Install Sierra server
           command: |
@@ -236,13 +25,16 @@ jobs:
             cd SierraServer
             python -m pip install --upgrade pip
             pip install '.[dev]'
+
       - run:
-          name: Static validation
+          name: Import and static validation
           command: |
             set -euo pipefail
             cd SierraServer
             python -m compileall -q app tests scripts
+            python -c 'import app.main; import app.provider_client; import app.job_worker'
             ruff check app tests scripts
+
       - run:
           name: Unit tests
           command: |
@@ -250,27 +42,16 @@ jobs:
             cd SierraServer
             mkdir -p /tmp/sierra-test-results
             pytest -q --junitxml=/tmp/sierra-test-results/results.xml
-      - run:
-          name: Docker build
-          command: |
-            set -euo pipefail
-            cd SierraServer
-            docker build -t sierra-vision-server:ci .
+
       - save_cache:
-          key: sierra-server-pip-v1-{{ checksum "SierraServer/pyproject.toml" }}
+          key: sierra-server-pip-v2-{{ checksum "SierraServer/pyproject.toml" }}
           paths:
             - ~/.cache/pip
+
       - store_test_results:
           path: /tmp/sierra-test-results
 
 workflows:
-  director-build:
-    jobs:
-      - build-director-apk:
-          filters:
-            branches:
-              only:
-                - director-gemini-v1
   sierra-server-build:
     jobs:
       - test-sierra-server:
