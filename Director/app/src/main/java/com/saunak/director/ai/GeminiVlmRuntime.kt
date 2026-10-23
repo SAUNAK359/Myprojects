@@ -8,6 +8,7 @@ import com.saunak.director.camera.CapabilityRegistry
 import com.saunak.director.director.EvaluationOutput
 import com.saunak.director.director.PlanOutput
 import com.saunak.director.storage.RecipeMemory
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
@@ -53,7 +54,7 @@ class GeminiVlmRuntime(
         capabilities: CapabilityRegistry,
         camera: CameraSnapshot,
         skillContext: String
-    ): Result<PlanOutput> = runCatching {
+    ): Result<PlanOutput> = preservingCancellation {
         val config = deviceSkill.readOrGenerate(capabilities, camera)
         val prompt = """
             You are Director, an elite computational-photography agent. Understand the scene, context, subject, lighting, motion, depth, composition, mood and probable user intent. Design the best achievable photograph using ONLY the device controls listed below. Prefer natural, professional photographic results. Reuse a cached recipe only when it fits, then adapt it to the current scene. Never invent a control.
@@ -85,7 +86,7 @@ class GeminiVlmRuntime(
         previousIssues: List<String>,
         evaluationContext: String,
         capabilities: CapabilityRegistry
-    ): Result<EvaluationOutput> = runCatching {
+    ): Result<EvaluationOutput> = preservingCancellation {
         val config = deviceSkill.readOrGenerate(capabilities, camera)
         val prompt = """
             You are now Director's strict photography critic. Compare this intermediate result with the target objective. Judge technical quality, subject rendering, composition, lighting, color, mood and aesthetic quality. Approve when the photograph is genuinely professional and no material camera correction is needed. Otherwise return only small corrective deltas that are legal under config.md. This is attempt $attempt of maximum 3.
@@ -103,6 +104,14 @@ class GeminiVlmRuntime(
             Scores must be 0..1, issues max 8, delta max 8. If approved, set accept=true and delta=[].
         """.trimIndent()
         VlmContractValidator.evaluation(json.decodeFromString(generate(prompt, image)))
+    }
+
+    private suspend fun <T> preservingCancellation(block: suspend () -> T): Result<T> = try {
+        Result.success(block())
+    } catch (t: CancellationException) {
+        throw t
+    } catch (t: Throwable) {
+        Result.failure(t)
     }
 
     private suspend fun generate(prompt: String, bitmap: Bitmap): String {
