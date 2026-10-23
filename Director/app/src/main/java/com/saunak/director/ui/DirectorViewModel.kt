@@ -5,11 +5,18 @@ import androidx.camera.view.PreviewView
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.viewModelScope
+import com.saunak.director.BuildConfig
 import com.saunak.director.ai.AiProviderPreset
 import com.saunak.director.ai.AiProviderSettings
 import com.saunak.director.ai.DeviceConfigSkill
 import com.saunak.director.ai.MultiProviderVlmRuntime
 import com.saunak.director.ai.SecureApiKeyStore
+import com.saunak.director.ai.VlmRuntime
+import com.saunak.director.backend.SierraBackendClient
+import com.saunak.director.backend.SierraServerVlmRuntime
+import com.saunak.director.backend.SierraSignInRequest
+import com.saunak.director.backend.SierraSignUpRequest
+import com.saunak.director.backend.SierraUserView
 import com.saunak.director.camera.CameraEngine
 import com.saunak.director.camera.StillFlashMode
 import com.saunak.director.director.DirectorOrchestrator
@@ -38,18 +45,23 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
     private val providerSettings = AiProviderSettings(app)
     private val recipeMemory = RecipeMemory(app)
     private val deviceConfigSkill = DeviceConfigSkill(app)
-    private val runtime = MultiProviderVlmRuntime(
+    private val directRuntime = MultiProviderVlmRuntime(
         app,
         keyStore = keyStore,
         settings = providerSettings,
         deviceSkill = deviceConfigSkill,
         recipeMemory = recipeMemory
     )
+    private val backend = SierraBackendClient(app, BuildConfig.SIERRA_SERVER_BASE_URL)
+    private val serverRuntime = SierraServerVlmRuntime(app, backend)
+    private val runtime: VlmRuntime = if (backend.configured) serverRuntime else directRuntime
     private val repository = PhotoRepository(app)
     private val preferences = app.getSharedPreferences("sierra_vision_preferences", Application.MODE_PRIVATE)
     private val initialPrivateMode = preferences.getBoolean("private_mode", false)
-    private val initialAspectRatioOverride = preferences.getString("aspect_ratio_override", null)?.takeIf(SierraCropPolicy::isSupported)
+    private val initialAspectRatioOverride = preferences.getString("aspect_ratio_override", null)
+        ?.takeIf(SierraCropPolicy::isSupported)
     private val initialKeepOriginal = preferences.getBoolean("keep_original", false)
+    private val cachedAccount = backend.cachedUser()
 
     private val orchestrator = DirectorOrchestrator(
         camera = camera,
@@ -68,14 +80,26 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
             showSettings = current.showSettings,
             showTools = current.showTools,
             showGallery = current.showGallery,
+            showAccount = current.showAccount,
             galleryItems = current.galleryItems,
             gridEnabled = current.gridEnabled,
             levelEnabled = current.levelEnabled,
             privateMode = current.privateMode,
             aspectRatioOverride = current.aspectRatioOverride,
-            keepOriginal = current.keepOriginal
+            keepOriginal = current.keepOriginal,
+            serverConfigured = current.serverConfigured,
+            signedIn = current.signedIn,
+            accountBusy = current.accountBusy,
+            accountError = current.accountError,
+            userDisplayName = current.userDisplayName,
+            userEmail = current.userEmail,
+            creditsAvailable = current.creditsAvailable,
+            creditsReserved = current.creditsReserved
         )
-        if (state.lastSavedUri != null && state.stage == DirectorStage.READY) refreshGallery()
+        if (state.lastSavedUri != null && state.stage == DirectorStage.READY) {
+            refreshGallery()
+            if (backend.configured && backend.authenticated) refreshAccount()
+        }
     }
 
     private val _ui = MutableStateFlow(
@@ -83,12 +107,18 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
             hasApiKey = runtime.isReady(),
             aiAvailable = runtime.isReady() && !initialPrivateMode,
             recipeCount = recipeMemory.count(),
-            status = if (initialPrivateMode || !runtime.isReady()) "Sierra β ready" else "Sierra AI + β ready",
+            status = initialStatus(initialPrivateMode),
             sierraMode = if (initialPrivateMode || !runtime.isReady()) SierraMode.BETA else SierraMode.AI,
             privateMode = initialPrivateMode,
             aspectRatioOverride = initialAspectRatioOverride,
             aspectRatio = initialAspectRatioOverride ?: "4:3",
-            keepOriginal = initialKeepOriginal
+            keepOriginal = initialKeepOriginal,
+            serverConfigured = backend.configured,
+            signedIn = backend.authenticated,
+            userDisplayName = cachedAccount?.displayName,
+            userEmail = cachedAccount?.email,
+            creditsAvailable = cachedAccount?.availableCredits,
+            creditsReserved = cachedAccount?.creditReserved ?: 0
         )
     )
     val ui: StateFlow<DirectorUiState> = _ui.asStateFlow()
@@ -103,6 +133,10 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
         orchestrator.setKeepOriginal(initialKeepOriginal)
         refreshGallery()
         viewModelScope.launch {
+            if (backend.configured && backend.authenticated) {
+                serverRuntime.retryPendingCompletion()
+                refreshAccountInternal()
+            }
             val recovered = orchestrator.recoverPendingReferences()
             if (recovered.isNotEmpty()) {
                 _ui.value = _ui.value.copy(
@@ -128,7 +162,11 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
                     refreshCamera()
                 }
                 .onFailure {
-                    _ui.value = _ui.value.copy(stage = DirectorStage.ERROR, status = "Camera unavailable", error = it.message)
+                    _ui.value = _ui.value.copy(
+                        stage = DirectorStage.ERROR,
+                        status = "Camera unavailable",
+                        error = it.message
+                    )
                 }
         }
     }
@@ -218,7 +256,7 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
             aiAvailable = !enabled && runtime.isReady(),
             sierraMode = if (!enabled && runtime.isReady()) SierraMode.AI else SierraMode.BETA,
             stage = DirectorStage.READY,
-            status = if (enabled) "Sierra β Private • on-device only" else if (runtime.isReady()) "Sierra AI + β ready" else "Sierra β ready",
+            status = if (enabled) "Sierra β Private • on-device only" else readyStatus(),
             error = null
         )
     }
@@ -243,69 +281,213 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
         val enabled = !_ui.value.keepOriginal
         orchestrator.setKeepOriginal(enabled)
         preferences.edit().putBoolean("keep_original", enabled).apply()
-        _ui.value = _ui.value.copy(keepOriginal = enabled, status = if (enabled) "Originals will also be saved" else "Saving Sierra final only")
+        _ui.value = _ui.value.copy(
+            keepOriginal = enabled,
+            status = if (enabled) "Originals will also be saved" else "Saving Sierra final only"
+        )
     }
 
     fun openGallery() {
         refreshGallery()
-        _ui.value = _ui.value.copy(showGallery = true, showTools = false, showSettings = false)
+        _ui.value = _ui.value.copy(
+            showGallery = true,
+            showTools = false,
+            showSettings = false,
+            showAccount = false
+        )
     }
 
     fun closeGallery() { _ui.value = _ui.value.copy(showGallery = false) }
 
     fun refreshGallery() {
         viewModelScope.launch(Dispatchers.IO) {
-            val items = runCatching { repository.recentFinals() }.getOrDefault(emptyList()).map { it.toString() }
+            val items = runCatching { repository.recentFinals() }
+                .getOrDefault(emptyList())
+                .map { it.toString() }
             withContext(Dispatchers.Main) { _ui.value = _ui.value.copy(galleryItems = items) }
         }
     }
 
-    fun toggleSettings() { _ui.value = _ui.value.copy(showSettings = !_ui.value.showSettings, showTools = false) }
+    fun openAccount() {
+        _ui.value = _ui.value.copy(showAccount = true, showTools = false, showGallery = false)
+        if (backend.configured && backend.authenticated) refreshAccount()
+    }
+
+    fun closeAccount() { _ui.value = _ui.value.copy(showAccount = false, accountError = null) }
+
+    fun signIn(email: String, password: String) {
+        if (!backend.configured) {
+            _ui.value = _ui.value.copy(accountError = "This APK was not built with a Sierra server URL")
+            return
+        }
+        viewModelScope.launch {
+            setAccountBusy(true)
+            backend.signIn(SierraSignInRequest(email.trim(), password))
+                .onSuccess { pair -> applyAccount(pair.user, null) }
+                .onFailure { applyAccountFailure(it) }
+            setAccountBusy(false)
+            refreshCamera()
+        }
+    }
+
+    fun signUp(name: String, email: String, phone: String, dob: String, password: String) {
+        if (!backend.configured) {
+            _ui.value = _ui.value.copy(accountError = "This APK was not built with a Sierra server URL")
+            return
+        }
+        viewModelScope.launch {
+            setAccountBusy(true)
+            backend.signUp(
+                SierraSignUpRequest(
+                    displayName = name.trim(),
+                    email = email.trim(),
+                    phone = phone.trim(),
+                    dob = dob.trim(),
+                    password = password
+                )
+            ).onSuccess { pair -> applyAccount(pair.user, null) }
+                .onFailure { applyAccountFailure(it) }
+            setAccountBusy(false)
+            refreshCamera()
+        }
+    }
+
+    fun signOut() {
+        orchestrator.cancelForUserAction()
+        viewModelScope.launch {
+            setAccountBusy(true)
+            backend.signOut()
+            _ui.value = _ui.value.copy(
+                signedIn = false,
+                userDisplayName = null,
+                userEmail = null,
+                creditsAvailable = null,
+                creditsReserved = 0,
+                accountError = null,
+                sierraMode = SierraMode.BETA,
+                aiAvailable = false
+            )
+            setAccountBusy(false)
+            refreshCamera("Signed out • Sierra β ready")
+        }
+    }
+
+    fun refreshAccount() {
+        if (!backend.configured || !backend.authenticated) return
+        viewModelScope.launch { refreshAccountInternal() }
+    }
+
+    private suspend fun refreshAccountInternal() {
+        backend.session()
+            .onSuccess { applyAccount(it, null) }
+            .onFailure { throwable ->
+                _ui.value = _ui.value.copy(
+                    signedIn = backend.authenticated,
+                    accountError = throwable.message ?: "Could not reach Sierra server"
+                )
+            }
+    }
+
+    private fun applyAccount(user: SierraUserView, error: String?) {
+        val current = _ui.value
+        _ui.value = current.copy(
+            signedIn = true,
+            accountError = error,
+            userDisplayName = user.displayName,
+            userEmail = user.email,
+            creditsAvailable = user.availableCredits,
+            creditsReserved = user.creditReserved,
+            aiAvailable = !current.privateMode && runtime.isReady(),
+            sierraMode = if (!current.privateMode && runtime.isReady()) SierraMode.AI else SierraMode.BETA
+        )
+    }
+
+    private fun applyAccountFailure(t: Throwable) {
+        _ui.value = _ui.value.copy(
+            signedIn = backend.authenticated,
+            accountError = t.message ?: "Sierra account request failed"
+        )
+    }
+
+    private fun setAccountBusy(value: Boolean) {
+        _ui.value = _ui.value.copy(accountBusy = value, accountError = if (value) null else _ui.value.accountError)
+    }
+
+    fun toggleSettings() {
+        _ui.value = _ui.value.copy(
+            showSettings = !_ui.value.showSettings,
+            showTools = false,
+            showAccount = false
+        )
+    }
     fun dismissSettings() { _ui.value = _ui.value.copy(showSettings = false) }
-    fun toggleTools() { _ui.value = _ui.value.copy(showTools = !_ui.value.showTools, showSettings = false) }
+    fun toggleTools() {
+        _ui.value = _ui.value.copy(
+            showTools = !_ui.value.showTools,
+            showSettings = false,
+            showAccount = false
+        )
+    }
     fun dismissTools() { _ui.value = _ui.value.copy(showTools = false) }
     fun toggleGrid() { _ui.value = _ui.value.copy(gridEnabled = !_ui.value.gridEnabled) }
     fun toggleLevel() { _ui.value = _ui.value.copy(levelEnabled = !_ui.value.levelEnabled) }
 
-    // Development-only provider hooks retained until the Sierra laptop gateway replaces direct
-    // provider access. The customer Sierra Vision surface does not expose these controls.
-    fun providerPresets(): List<AiProviderPreset> = runtime.presets()
-    fun selectedProvider(): AiProviderPreset = runtime.selectedPreset()
-    fun providerHasCredential(preset: AiProviderPreset): Boolean = runtime.hasCredential(preset)
-    fun openRouterCustomModel(): String = runtime.openRouterCustomModel()
-    fun customEndpoint(): String = runtime.customEndpoint()
-    fun customModel(): String = runtime.customModel()
+    // Development-only direct-provider controls are intentionally disconnected from customer
+    // Sierra builds whenever SIERRA_SERVER_BASE_URL is configured.
+    fun providerPresets(): List<AiProviderPreset> = directRuntime.presets()
+    fun selectedProvider(): AiProviderPreset = directRuntime.selectedPreset()
+    fun providerHasCredential(preset: AiProviderPreset): Boolean = directRuntime.hasCredential(preset)
+    fun openRouterCustomModel(): String = directRuntime.openRouterCustomModel()
+    fun customEndpoint(): String = directRuntime.customEndpoint()
+    fun customModel(): String = directRuntime.customModel()
 
     fun selectProvider(preset: AiProviderPreset) {
+        if (backend.configured) return
         orchestrator.cancelForUserAction()
-        runtime.selectPreset(preset)
+        directRuntime.selectPreset(preset)
         refreshCamera()
     }
 
-    fun saveProvider(preset: AiProviderPreset, apiKey: String, endpoint: String = "", model: String = ""): String? = runCatching {
+    fun saveProvider(
+        preset: AiProviderPreset,
+        apiKey: String,
+        endpoint: String = "",
+        model: String = ""
+    ): String? = runCatching {
+        require(!backend.configured) { "Provider routing is managed by the Sierra laptop server" }
         require(preset != AiProviderPreset.AUTO) { "Choose a provider before adding a key" }
         if (preset == AiProviderPreset.CUSTOM_OPENAI) {
             require(endpoint.trim().startsWith("https://")) { "Custom endpoint must use HTTPS" }
             require(model.isNotBlank()) { "Custom model ID is required" }
-            runtime.saveCustomRoute(endpoint, model)
+            directRuntime.saveCustomRoute(endpoint, model)
         }
         if (preset == AiProviderPreset.OPENROUTER_CUSTOM) {
             require(model.isNotBlank()) { "OpenRouter model ID is required" }
-            runtime.saveOpenRouterCustomModel(model)
+            directRuntime.saveOpenRouterCustomModel(model)
         }
-        if (apiKey.isNotBlank()) runtime.saveCredential(preset, apiKey)
-        require(runtime.hasCredential(preset)) { "API key is required" }
-        runtime.selectPreset(preset)
+        if (apiKey.isNotBlank()) directRuntime.saveCredential(preset, apiKey)
+        require(directRuntime.hasCredential(preset)) { "API key is required" }
+        directRuntime.selectPreset(preset)
         viewModelScope.launch {
-            runtime.validateConnection(preset).onSuccess { refreshCamera("Sierra AI route connected") }
+            directRuntime.validateConnection(preset)
+                .onSuccess { refreshCamera("Sierra AI route connected") }
                 .onFailure { refreshCamera("Sierra β ready • cloud route unavailable") }
         }
         null
     }.getOrElse { it.message ?: "Could not save provider" }
 
-    fun clearProvider(preset: AiProviderPreset) { runtime.clearCredential(preset); refreshCamera() }
-    fun saveApiKey(value: String): String? = saveProvider(selectedProvider().takeUnless { it == AiProviderPreset.AUTO } ?: AiProviderPreset.NVIDIA_NEMOTRON, value)
-    fun clearApiKey() = clearProvider(selectedProvider().takeUnless { it == AiProviderPreset.AUTO } ?: AiProviderPreset.NVIDIA_NEMOTRON)
+    fun clearProvider(preset: AiProviderPreset) {
+        if (backend.configured) return
+        directRuntime.clearCredential(preset)
+        refreshCamera()
+    }
+    fun saveApiKey(value: String): String? = saveProvider(
+        selectedProvider().takeUnless { it == AiProviderPreset.AUTO } ?: AiProviderPreset.NVIDIA_NEMOTRON,
+        value
+    )
+    fun clearApiKey() = clearProvider(
+        selectedProvider().takeUnless { it == AiProviderPreset.AUTO } ?: AiProviderPreset.NVIDIA_NEMOTRON
+    )
 
     private fun refreshCamera(status: String? = null) {
         val current = _ui.value
@@ -313,13 +495,28 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
         val aiReady = runtime.isReady() && !privateMode
         _ui.value = current.copy(
             camera = runCatching { camera.uiState() }.getOrDefault(current.camera),
-            status = status ?: if (privateMode) "Sierra β Private • on-device only" else if (aiReady) "Sierra AI + β ready" else "Sierra β ready",
+            status = status ?: if (privateMode) "Sierra β Private • on-device only" else readyStatus(),
             hasApiKey = runtime.isReady(),
             aiAvailable = aiReady,
             recipeCount = recipeMemory.count(),
             sierraMode = if (aiReady) SierraMode.AI else SierraMode.BETA,
-            stage = DirectorStage.READY
+            stage = DirectorStage.READY,
+            serverConfigured = backend.configured,
+            signedIn = if (backend.configured) backend.authenticated else current.signedIn
         )
+    }
+
+    private fun readyStatus(): String = when {
+        backend.configured && !backend.authenticated -> "Sierra β ready • sign in for Sierra AI"
+        runtime.isReady() -> "Sierra AI + β ready"
+        else -> "Sierra β ready"
+    }
+
+    private fun initialStatus(privateMode: Boolean): String = when {
+        privateMode -> "Sierra β Private • on-device only"
+        backend.configured && !backend.authenticated -> "Sierra β ready • sign in for Sierra AI"
+        runtime.isReady() -> "Sierra AI + β ready"
+        else -> "Sierra β ready"
     }
 
     private fun refreshCameraSoon(status: String) {
@@ -327,11 +524,16 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun onAppBackgrounded() { orchestrator.cancelForUserAction() }
-    fun onAppForegrounded() { refreshCamera(); refreshGallery() }
+    fun onAppForegrounded() {
+        refreshCamera()
+        refreshGallery()
+        if (backend.configured && backend.authenticated) refreshAccount()
+    }
 
     override fun onCleared() {
         orchestrator.cancelForUserAction()
         runtime.close()
+        if (runtime !== serverRuntime) backend.close()
         camera.close()
         super.onCleared()
     }
