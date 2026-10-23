@@ -5,20 +5,38 @@ import com.saunak.director.director.PlanOutput
 
 object VlmContractValidator {
     fun plan(value: PlanOutput): PlanOutput {
-        require(value.scene.isNotBlank() && value.scene.length <= 64) { "Invalid scene" }
-        require(value.objective.isNotBlank() && value.objective.length <= 180) { "Invalid objective" }
-        require(value.skillBranch.isNotBlank() && value.skillBranch.length <= 48) { "Invalid branch" }
-        require(value.referenceScore.isFinite() && value.referenceScore in 0.0..1.0) { "Invalid reference score" }
-        require(value.toolCalls.size <= 8) { "Too many tool calls" }
-        return value.copy(scene = clean(value.scene), objective = clean(value.objective), skillBranch = clean(value.skillBranch))
+        val scene = clean(value.scene)
+        val objective = clean(value.objective)
+        val branch = clean(value.skillBranch)
+        require(scene.isNotBlank()) { "Invalid scene" }
+        require(objective.isNotBlank()) { "Invalid objective" }
+        require(branch.isNotBlank()) { "Invalid branch" }
+        require(value.referenceScore.isFinite()) { "Invalid reference score" }
+
+        // Provider models sometimes exceed our presentation limits by a few characters or
+        // return more suggestions than Director can use. Normalize those harmless differences
+        // here; ToolValidator remains the hard safety boundary for every camera operation.
+        return value.copy(
+            scene = scene.take(64),
+            objective = objective.take(180),
+            skillBranch = branch.take(48),
+            referenceScore = value.referenceScore.coerceIn(0.0, 1.0),
+            toolCalls = value.toolCalls.take(8)
+        )
     }
 
     fun evaluation(value: EvaluationOutput): EvaluationOutput {
         val scores = listOf(value.score, value.technical, value.composition, value.subject, value.aesthetic)
-        require(scores.all { it.isFinite() && it in 0.0..1.0 }) { "Invalid evaluation score" }
-        require(value.issues.size <= 8 && value.issues.all { it.length <= 96 }) { "Invalid issue list" }
-        require(value.deltaCalls.size <= 8) { "Too many delta calls" }
-        return value.copy(issues = value.issues.map(::clean))
+        require(scores.all { it.isFinite() }) { "Invalid evaluation score" }
+        return value.copy(
+            score = value.score.coerceIn(0.0, 1.0),
+            technical = value.technical.coerceIn(0.0, 1.0),
+            composition = value.composition.coerceIn(0.0, 1.0),
+            subject = value.subject.coerceIn(0.0, 1.0),
+            aesthetic = value.aesthetic.coerceIn(0.0, 1.0),
+            issues = value.issues.take(8).map { clean(it).take(96) },
+            deltaCalls = value.deltaCalls.take(8)
+        )
     }
 
     private fun clean(value: String): String = value.filter { it >= ' ' && it != '\u007f' }.trim()
