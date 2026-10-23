@@ -117,27 +117,36 @@ class GeminiVlmRuntime(
     private suspend fun generate(prompt: String, bitmap: Bitmap): String {
         val key = keyStore.read() ?: error("Gemini API key is not configured")
         val imageBytes = encodeForAi(bitmap)
-        val root = JSONObject().apply {
-            put("contents", JSONArray().put(JSONObject().apply {
-                put("role", "user")
-                put("parts", JSONArray()
-                    .put(JSONObject().put("text", prompt))
-                    .put(JSONObject().put("inline_data", JSONObject()
-                        .put("mime_type", "image/jpeg")
-                        .put("data", Base64.encodeToString(imageBytes, Base64.NO_WRAP))))
-            }))
-            put("generationConfig", JSONObject()
-                .put("temperature", 0.25)
-                .put("topP", 0.9)
-                .put("maxOutputTokens", 900)
-                .put("responseMimeType", "application/json"))
-        }
+
+        val imageData = JSONObject()
+            .put("mime_type", "image/jpeg")
+            .put("data", Base64.encodeToString(imageBytes, Base64.NO_WRAP))
+
+        val parts = JSONArray()
+            .put(JSONObject().put("text", prompt))
+            .put(JSONObject().put("inline_data", imageData))
+
+        val content = JSONObject()
+            .put("role", "user")
+            .put("parts", parts)
+
+        val generationConfig = JSONObject()
+            .put("temperature", 0.25)
+            .put("topP", 0.9)
+            .put("maxOutputTokens", 900)
+            .put("responseMimeType", "application/json")
+
+        val root = JSONObject()
+            .put("contents", JSONArray().put(content))
+            .put("generationConfig", generationConfig)
+
         val request = Request.Builder()
             .url("https://generativelanguage.googleapis.com/v1beta/models/$MODEL:generateContent")
             .header("x-goog-api-key", key)
             .header("Content-Type", "application/json")
             .post(root.toString().toRequestBody(JSON_MEDIA))
             .build()
+
         val call = client.newCall(request)
         activeCall = call
         try {
@@ -146,10 +155,21 @@ class GeminiVlmRuntime(
                 if (!response.isSuccessful) error("Gemini request failed (${response.code})")
                 val parsed = JSONObject(body)
                 val candidates = parsed.optJSONArray("candidates") ?: error("Gemini returned no candidate")
-                val parts = candidates.getJSONObject(0).getJSONObject("content").getJSONArray("parts")
+                val partsArray = candidates
+                    .getJSONObject(0)
+                    .getJSONObject("content")
+                    .getJSONArray("parts")
+
                 return buildString {
-                    for (i in 0 until parts.length()) append(parts.getJSONObject(i).optString("text"))
-                }.trim().removePrefix("```json").removePrefix("```").removeSuffix("```").trim()
+                    for (i in 0 until partsArray.length()) {
+                        append(partsArray.getJSONObject(i).optString("text"))
+                    }
+                }
+                    .trim()
+                    .removePrefix("```json")
+                    .removePrefix("```")
+                    .removeSuffix("```")
+                    .trim()
             }
         } finally {
             if (activeCall === call) activeCall = null
@@ -173,8 +193,16 @@ class GeminiVlmRuntime(
         val longest = max(source.width, source.height)
         val prepared = if (longest > maxImageDimension) {
             val scale = maxImageDimension.toFloat() / longest.toFloat()
-            Bitmap.createScaledBitmap(source, maxOf(1, (source.width * scale).toInt()), maxOf(1, (source.height * scale).toInt()), true)
-        } else source
+            Bitmap.createScaledBitmap(
+                source,
+                maxOf(1, (source.width * scale).toInt()),
+                maxOf(1, (source.height * scale).toInt()),
+                true
+            )
+        } else {
+            source
+        }
+
         return try {
             ByteArrayOutputStream().use { out ->
                 check(prepared.compress(Bitmap.CompressFormat.JPEG, 84, out))
@@ -185,10 +213,17 @@ class GeminiVlmRuntime(
         }
     }
 
-    override fun setMaxImageDimension(pixels: Int) { maxImageDimension = pixels.coerceIn(512, 1024) }
-    override fun cancel() { activeCall?.cancel() }
+    override fun setMaxImageDimension(pixels: Int) {
+        maxImageDimension = pixels.coerceIn(512, 1024)
+    }
+
+    override fun cancel() {
+        activeCall?.cancel()
+    }
+
     override fun isReady(): Boolean = keyStore.hasKey()
     override fun unload() = Unit
+
     override fun close() {
         activeCall?.cancel()
         client.dispatcher.executorService.shutdown()
