@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.credits import grant
 from app.db import get_db
-from app.models import RefreshToken, User
+from app.models import Device, RefreshToken, User
 from app.schemas import LoginRequest, LogoutRequest, RefreshRequest, SignupRequest, TokenPair, UserView
 from app.security import (
     create_access_token,
@@ -43,6 +43,11 @@ def _age(dob: date) -> int:
     return today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
 
 
+def _client_ip(request: Request) -> str | None:
+    forwarded = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+    return forwarded or (request.client.host if request.client else None)
+
+
 async def _issue_pair(db: AsyncSession, user: User, request: Request) -> TokenPair:
     raw_refresh, token_hash = new_refresh_token()
     db.add(
@@ -51,7 +56,7 @@ async def _issue_pair(db: AsyncSession, user: User, request: Request) -> TokenPa
             token_hash=token_hash,
             expires_at=refresh_expiry(),
             user_agent=request.headers.get("user-agent", "")[:300],
-            ip=(request.client.host if request.client else None),
+            ip=_client_ip(request),
         )
     )
     await db.commit()
@@ -80,6 +85,7 @@ async def signup(
     existing = await db.scalar(select(User.id).where(or_(User.email == email, User.phone == phone)))
     if existing:
         raise HTTPException(status_code=409, detail="email or phone is already registered")
+
     user = User(
         display_name=payload.display_name.strip(),
         email=email,
@@ -92,12 +98,36 @@ async def signup(
     db.add(user)
     try:
         await db.flush()
+        device = payload.device
+        db.add(
+            Device(
+                user_id=user.id,
+                install_id=device.install_id,
+                manufacturer=device.manufacturer.strip(),
+                model=device.model.strip(),
+                device_name=device.device_name.strip() if device.device_name else None,
+                android_release=device.android_release.strip(),
+                sdk_int=device.sdk_int,
+                app_version=device.app_version.strip(),
+                app_build=device.app_build,
+                locale=device.locale.strip(),
+                timezone=device.timezone.strip(),
+                screen_width_px=device.screen_width_px,
+                screen_height_px=device.screen_height_px,
+                density_dpi=device.density_dpi,
+                is_emulator=device.is_emulator,
+                sierra_beta_version=device.sierra_beta_version,
+                camera_capabilities=device.camera_capabilities,
+                last_ip=_client_ip(request),
+                last_user_agent=request.headers.get("user-agent", "")[:300],
+            )
+        )
         if settings.trial_credits:
             await grant(db, user.id, settings.trial_credits, "trial_grant", "new account trial")
         await db.commit()
     except IntegrityError as exc:
         await db.rollback()
-        raise HTTPException(status_code=409, detail="email or phone is already registered") from exc
+        raise HTTPException(status_code=409, detail="email, phone or installation is already registered") from exc
     await db.refresh(user)
     return await _issue_pair(db, user, request)
 
