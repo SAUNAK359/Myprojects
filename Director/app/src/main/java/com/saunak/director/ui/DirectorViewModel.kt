@@ -15,6 +15,7 @@ import com.saunak.director.camera.StillFlashMode
 import com.saunak.director.director.DirectorOrchestrator
 import com.saunak.director.director.DirectorStage
 import com.saunak.director.director.DirectorUiState
+import com.saunak.director.director.SierraMode
 import com.saunak.director.platform.ThermalMonitor
 import com.saunak.director.skills.SkillEngine
 import com.saunak.director.storage.PhotoRepository
@@ -44,6 +45,9 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
         recipeMemory = recipeMemory
     )
     private val repository = PhotoRepository(app)
+    private val preferences = app.getSharedPreferences("sierra_vision_preferences", Application.MODE_PRIVATE)
+    private val initialPrivateMode = preferences.getBoolean("private_mode", false)
+
     private val orchestrator = DirectorOrchestrator(
         camera = camera,
         vlm = runtime,
@@ -53,23 +57,27 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
         recipeMemory = recipeMemory,
         thermal = ThermalMonitor(app)
     ) { state ->
+        val current = _ui.value
         _ui.value = state.copy(
             camera = runCatching { camera.uiState() }.getOrDefault(state.camera),
             hasApiKey = runtime.isReady(),
             recipeCount = recipeMemory.count(),
-            showSettings = _ui.value.showSettings,
-            showTools = _ui.value.showTools,
-            gridEnabled = _ui.value.gridEnabled,
-            levelEnabled = _ui.value.levelEnabled
+            showSettings = current.showSettings,
+            showTools = current.showTools,
+            gridEnabled = current.gridEnabled,
+            levelEnabled = current.levelEnabled,
+            privateMode = current.privateMode
         )
     }
 
     private val _ui = MutableStateFlow(
         DirectorUiState(
             hasApiKey = runtime.isReady(),
-            aiAvailable = runtime.isReady(),
+            aiAvailable = runtime.isReady() && !initialPrivateMode,
             recipeCount = recipeMemory.count(),
-            status = if (runtime.isReady()) "Camera ready • ${runtime.selectedPreset().label}" else "Camera ready • configure AI provider"
+            status = if (initialPrivateMode || !runtime.isReady()) "Sierra β ready" else "Sierra AI + β ready",
+            sierraMode = if (initialPrivateMode || !runtime.isReady()) SierraMode.BETA else SierraMode.AI,
+            privateMode = initialPrivateMode
         )
     )
     val ui: StateFlow<DirectorUiState> = _ui.asStateFlow()
@@ -79,6 +87,7 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
     private var cameraBound = false
 
     init {
+        orchestrator.setCloudEnabled(!initialPrivateMode)
         viewModelScope.launch {
             val recovered = orchestrator.recoverPendingReferences()
             if (recovered.isNotEmpty()) {
@@ -101,7 +110,7 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
                     withContext(Dispatchers.IO) {
                         runCatching { deviceConfigSkill.refresh(camera.capabilities(), camera.snapshot()) }
                     }
-                    refreshCamera("Camera ready${if (runtime.isReady()) " • ${runtime.selectedPreset().label}" else " • configure AI"}")
+                    refreshCamera()
                 }
                 .onFailure {
                     _ui.value = _ui.value.copy(stage = DirectorStage.ERROR, status = "Camera unavailable", error = it.message)
@@ -119,16 +128,16 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
                 runtime.cancel()
                 _ui.value = _ui.value.copy(
                     stage = DirectorStage.ERROR,
-                    aiAvailable = runtime.isReady(),
-                    status = "Director memory pressure • try again",
+                    aiAvailable = runtime.isReady() && !_ui.value.privateMode,
+                    status = "Sierra memory pressure • try again",
                     error = "Analysis used too much memory"
                 )
             } catch (t: Throwable) {
                 runtime.cancel()
                 _ui.value = _ui.value.copy(
                     stage = DirectorStage.ERROR,
-                    aiAvailable = runtime.isReady(),
-                    status = providerFailureMessage(t),
+                    aiAvailable = runtime.isReady() && !_ui.value.privateMode,
+                    status = "Sierra could not prepare the shot",
                     error = t.message ?: t::class.java.simpleName
                 )
             }
@@ -184,12 +193,30 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
             .onFailure { _ui.value = _ui.value.copy(error = it.message, status = "Camera switch failed") }
     }
 
+    fun togglePrivateMode() {
+        val enabled = !_ui.value.privateMode
+        orchestrator.cancelForUserAction()
+        orchestrator.setCloudEnabled(!enabled)
+        preferences.edit().putBoolean("private_mode", enabled).apply()
+        _ui.value = _ui.value.copy(
+            privateMode = enabled,
+            aiAvailable = !enabled && runtime.isReady(),
+            sierraMode = if (!enabled && runtime.isReady()) SierraMode.AI else SierraMode.BETA,
+            stage = DirectorStage.READY,
+            status = if (enabled) "Sierra β Private • on-device only" else if (runtime.isReady()) "Sierra AI + β ready" else "Sierra β ready",
+            error = null
+        )
+    }
+
     fun toggleSettings() { _ui.value = _ui.value.copy(showSettings = !_ui.value.showSettings, showTools = false) }
     fun dismissSettings() { _ui.value = _ui.value.copy(showSettings = false) }
     fun toggleTools() { _ui.value = _ui.value.copy(showTools = !_ui.value.showTools, showSettings = false) }
+    fun dismissTools() { _ui.value = _ui.value.copy(showTools = false) }
     fun toggleGrid() { _ui.value = _ui.value.copy(gridEnabled = !_ui.value.gridEnabled) }
     fun toggleLevel() { _ui.value = _ui.value.copy(levelEnabled = !_ui.value.levelEnabled) }
 
+    // Development-only provider hooks retained until the Sierra laptop gateway replaces direct
+    // provider access. The customer Sierra Vision surface does not expose these controls.
     fun providerPresets(): List<AiProviderPreset> = runtime.presets()
     fun selectedProvider(): AiProviderPreset = runtime.selectedPreset()
     fun providerHasCredential(preset: AiProviderPreset): Boolean = runtime.hasCredential(preset)
@@ -200,22 +227,10 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
     fun selectProvider(preset: AiProviderPreset) {
         orchestrator.cancelForUserAction()
         runtime.selectPreset(preset)
-        val ready = runtime.isReady()
-        _ui.value = _ui.value.copy(
-            hasApiKey = ready,
-            aiAvailable = ready,
-            stage = if (ready) DirectorStage.READY else DirectorStage.CAMERA_ONLY,
-            status = if (ready) "Selected • ${preset.label}" else if (preset == AiProviderPreset.AUTO) "Auto • add at least one provider key" else "${preset.label} • add API key",
-            error = null
-        )
+        refreshCamera()
     }
 
-    fun saveProvider(
-        preset: AiProviderPreset,
-        apiKey: String,
-        endpoint: String = "",
-        model: String = ""
-    ): String? = runCatching {
+    fun saveProvider(preset: AiProviderPreset, apiKey: String, endpoint: String = "", model: String = ""): String? = runCatching {
         require(preset != AiProviderPreset.AUTO) { "Choose a provider before adding a key" }
         if (preset == AiProviderPreset.CUSTOM_OPENAI) {
             require(endpoint.trim().startsWith("https://")) { "Custom endpoint must use HTTPS" }
@@ -229,85 +244,28 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
         if (apiKey.isNotBlank()) runtime.saveCredential(preset, apiKey)
         require(runtime.hasCredential(preset)) { "API key is required" }
         runtime.selectPreset(preset)
-        _ui.value = _ui.value.copy(
-            hasApiKey = runtime.isReady(),
-            aiAvailable = false,
-            status = "Testing ${preset.label}…",
-            error = null
-        )
         viewModelScope.launch {
-            runtime.validateConnection(preset)
-                .onSuccess { label ->
-                    _ui.value = _ui.value.copy(
-                        hasApiKey = true,
-                        aiAvailable = true,
-                        stage = DirectorStage.READY,
-                        status = "$label connected • Director ready",
-                        error = null
-                    )
-                }
-                .onFailure { failure ->
-                    _ui.value = _ui.value.copy(
-                        hasApiKey = runtime.isReady(),
-                        aiAvailable = false,
-                        stage = DirectorStage.ERROR,
-                        status = providerFailureMessage(failure),
-                        error = failure.message
-                    )
-                }
+            runtime.validateConnection(preset).onSuccess { refreshCamera("Sierra AI route connected") }
+                .onFailure { refreshCamera("Sierra β ready • cloud route unavailable") }
         }
         null
     }.getOrElse { it.message ?: "Could not save provider" }
 
-    fun clearProvider(preset: AiProviderPreset) {
-        orchestrator.cancelForUserAction()
-        runtime.clearCredential(preset)
-        val ready = runtime.isReady()
-        _ui.value = _ui.value.copy(
-            hasApiKey = ready,
-            aiAvailable = ready,
-            stage = if (ready) DirectorStage.READY else DirectorStage.CAMERA_ONLY,
-            status = if (ready) "Provider key removed • another route is available" else "Camera ready • configure AI provider",
-            error = null
-        )
-    }
+    fun clearProvider(preset: AiProviderPreset) { runtime.clearCredential(preset); refreshCamera() }
+    fun saveApiKey(value: String): String? = saveProvider(selectedProvider().takeUnless { it == AiProviderPreset.AUTO } ?: AiProviderPreset.NVIDIA_NEMOTRON, value)
+    fun clearApiKey() = clearProvider(selectedProvider().takeUnless { it == AiProviderPreset.AUTO } ?: AiProviderPreset.NVIDIA_NEMOTRON)
 
-    /** Backward-compatible hook for older Settings UI. */
-    fun saveApiKey(value: String): String? {
-        val preset = selectedProvider().takeUnless { it == AiProviderPreset.AUTO } ?: AiProviderPreset.NVIDIA_NEMOTRON
-        return saveProvider(preset, value)
-    }
-
-    fun clearApiKey() {
-        val preset = selectedProvider().takeUnless { it == AiProviderPreset.AUTO } ?: AiProviderPreset.NVIDIA_NEMOTRON
-        clearProvider(preset)
-    }
-
-    private fun providerFailureMessage(t: Throwable): String {
-        val message = t.message.orEmpty().trim()
-        val lower = message.lowercase()
-        return when {
-            "out of memory" in lower || "memory" in lower && "frame" in lower -> "Director memory pressure • try again"
-            "401" in lower || "invalid" in lower && "key" in lower -> "API key invalid • update it in Settings"
-            "402" in lower || "credits" in lower || "billing" in lower -> "Provider credits/billing required"
-            "403" in lower || "blocked" in lower -> "Provider access blocked • check key/account"
-            "404" in lower || "unavailable" in lower -> "Selected model/endpoint unavailable"
-            "429" in lower || "rate limit" in lower -> "Provider rate limit reached • switch route or retry"
-            "timeout" in lower || "timed out" in lower -> "AI provider timed out • switch route or retry"
-            message.isNotBlank() -> "AI provider error • ${message.take(96)}"
-            else -> "AI provider connection failed"
-        }
-    }
-
-    private fun refreshCamera(status: String = _ui.value.status) {
-        val ready = runtime.isReady()
+    private fun refreshCamera(status: String? = null) {
+        val privateMode = _ui.value.privateMode
+        val aiReady = runtime.isReady() && !privateMode
         _ui.value = _ui.value.copy(
             camera = runCatching { camera.uiState() }.getOrDefault(_ui.value.camera),
-            status = status,
-            hasApiKey = ready,
-            aiAvailable = ready,
+            status = status ?: if (privateMode) "Sierra β Private • on-device only" else if (aiReady) "Sierra AI + β ready" else "Sierra β ready",
+            hasApiKey = runtime.isReady(),
+            aiAvailable = aiReady,
             recipeCount = recipeMemory.count(),
-            stage = if (ready) DirectorStage.READY else DirectorStage.CAMERA_ONLY
+            sierraMode = if (aiReady) SierraMode.AI else SierraMode.BETA,
+            stage = DirectorStage.READY
         )
     }
 
