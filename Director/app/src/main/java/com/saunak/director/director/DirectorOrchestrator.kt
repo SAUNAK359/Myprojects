@@ -12,7 +12,9 @@ import com.saunak.director.processing.PhotoQuality
 import com.saunak.director.skills.SkillEngine
 import com.saunak.director.storage.PhotoRepository
 import com.saunak.director.storage.RecipeMemory
+import com.saunak.director.storage.SierraCropPolicy
 import com.saunak.director.tools.ToolExecutor
+import com.saunak.director.tools.ToolIds
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
@@ -20,8 +22,8 @@ import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Sierra pipeline: Sierra β always owns execution and technical verification. Sierra AI may
- * provide the semantic plan, but any unavailable/failed/disabled cloud route falls back to the
- * deterministic Sierra β planner using the same validated tool surface.
+ * provide the semantic plan, but any unavailable/failed/disabled/slow cloud route falls back to
+ * the deterministic Sierra β planner using the same validated tool surface.
  */
 class DirectorOrchestrator(
     private val camera: CameraEngine,
@@ -68,7 +70,7 @@ class DirectorOrchestrator(
                     stage = DirectorStage.READY,
                     aiAvailable = cloudEnabled && vlm.isReady(),
                     sierraMode = SierraMode.BETA,
-                    status = "Sierra β ready • cloud preparation timed out",
+                    status = "Sierra β ready • preparation timed out",
                     camera = camera.uiState(),
                     recipeCount = recipeMemory.count()
                 )
@@ -114,16 +116,24 @@ class DirectorOrchestrator(
             }
 
             var mode = SierraMode.BETA
+            val localPlan by lazy { SierraLocalPlanner.plan(referenceQuality, frame.width, frame.height) }
             val basePlan = if (cloudAllowed) {
                 emit(session, DirectorUiState(DirectorStage.ANALYZING, true, "Sierra AI is composing…", camera = camera.uiState(), sierraMode = SierraMode.AI))
                 vlm.setMaxImageDimension(thermalPolicy.maxAiDimension)
-                val cloud = vlm.plan(frame, camera.capabilities(), camera.snapshot(), skills.planningContext())
-                cloud.getOrNull()?.also { mode = SierraMode.AI } ?: run {
+                val cloudResult = withTimeoutOrNull(CLOUD_PLAN_BUDGET_MS) {
+                    vlm.plan(frame, camera.capabilities(), camera.snapshot(), skills.planningContext())
+                }
+                val cloudPlan = cloudResult?.getOrNull()
+                if (cloudPlan != null) {
+                    mode = SierraMode.AI
+                    consumeCompositionIntent(cloudPlan, localPlan)
+                } else {
+                    vlm.cancel()
                     emit(session, DirectorUiState(DirectorStage.PLANNING, false, "Sierra β is taking over…", camera = camera.uiState(), sierraMode = SierraMode.BETA))
-                    SierraLocalPlanner.plan(referenceQuality, frame.width, frame.height)
+                    localPlan
                 }
             } else {
-                SierraLocalPlanner.plan(referenceQuality, frame.width, frame.height)
+                localPlan
             }
             assertCurrent(session)
 
@@ -193,6 +203,30 @@ class DirectorOrchestrator(
             planningBitmap?.let { if (!it.isRecycled) it.recycle() }
             storage.cleanup(created)
         }
+    }
+
+    /**
+     * Sierra AI expresses creative framing through semantic tool 7. Sierra β owns the validation
+     * and strips that non-hardware tool before ToolExecutor sees the plan. If a provider omits
+     * composition intent, we retain its other decisions but use Sierra β's safe composition.
+     */
+    private fun consumeCompositionIntent(ai: PlanOutput, local: PlanOutput): PlanOutput {
+        val composition = ai.toolCalls.lastOrNull { it.id == ToolIds.COMPOSITION }
+        val requestedRatio = composition?.stringValue?.trim().orEmpty()
+        val ratio = when {
+            SierraCropPolicy.isSupported(requestedRatio) -> requestedRatio
+            SierraCropPolicy.isSupported(ai.aspectRatio) && ai.aspectRatio != "4:3" -> ai.aspectRatio
+            else -> local.aspectRatio
+        }
+        val centerX = (composition?.x ?: ai.cropCenterX).coerceIn(0.08, 0.92)
+        val centerY = (composition?.y ?: ai.cropCenterY).coerceIn(0.08, 0.92)
+        return ai.copy(
+            aspectRatio = ratio,
+            cropCenterX = centerX,
+            cropCenterY = centerY,
+            toolCalls = ai.toolCalls.filterNot { it.id == ToolIds.COMPOSITION },
+            planner = "sierra_ai"
+        )
     }
 
     private fun combinedReadyScore(ai: Double, camera: Double, finish: Double): Double =
@@ -271,7 +305,8 @@ class DirectorOrchestrator(
     private class StaleSession : RuntimeException()
 
     companion object {
-        private const val HARD_PREPARE_DEADLINE_MS = 8_000L
+        private const val HARD_PREPARE_DEADLINE_MS = 6_500L
+        private const val CLOUD_PLAN_BUDGET_MS = 3_400L
         private const val FAST_FRAME_TIMEOUT_MS = 650L
         private const val FAST_VERIFY_TIMEOUT_MS = 500L
         private const val LOCAL_SETTLE_TIMEOUT_MS = 650L
