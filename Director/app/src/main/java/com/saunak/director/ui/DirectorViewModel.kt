@@ -67,12 +67,15 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
             recipeCount = recipeMemory.count(),
             showSettings = current.showSettings,
             showTools = current.showTools,
+            showGallery = current.showGallery,
+            galleryItems = current.galleryItems,
             gridEnabled = current.gridEnabled,
             levelEnabled = current.levelEnabled,
             privateMode = current.privateMode,
             aspectRatioOverride = current.aspectRatioOverride,
             keepOriginal = current.keepOriginal
         )
+        if (state.lastSavedUri != null && state.stage == DirectorStage.READY) refreshGallery()
     }
 
     private val _ui = MutableStateFlow(
@@ -98,6 +101,7 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
         orchestrator.setCloudEnabled(!initialPrivateMode)
         orchestrator.setAspectRatioOverride(initialAspectRatioOverride)
         orchestrator.setKeepOriginal(initialKeepOriginal)
+        refreshGallery()
         viewModelScope.launch {
             val recovered = orchestrator.recoverPendingReferences()
             if (recovered.isNotEmpty()) {
@@ -105,6 +109,7 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
                     status = "Recovered ${recovered.size} protected photo${if (recovered.size == 1) "" else "s"}",
                     lastSavedUri = recovered.last().toString()
                 )
+                refreshGallery()
             }
         }
     }
@@ -241,6 +246,20 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
         _ui.value = _ui.value.copy(keepOriginal = enabled, status = if (enabled) "Originals will also be saved" else "Saving Sierra final only")
     }
 
+    fun openGallery() {
+        refreshGallery()
+        _ui.value = _ui.value.copy(showGallery = true, showTools = false, showSettings = false)
+    }
+
+    fun closeGallery() { _ui.value = _ui.value.copy(showGallery = false) }
+
+    fun refreshGallery() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val items = runCatching { repository.recentFinals() }.getOrDefault(emptyList()).map { it.toString() }
+            withContext(Dispatchers.Main) { _ui.value = _ui.value.copy(galleryItems = items) }
+        }
+    }
+
     fun toggleSettings() { _ui.value = _ui.value.copy(showSettings = !_ui.value.showSettings, showTools = false) }
     fun dismissSettings() { _ui.value = _ui.value.copy(showSettings = false) }
     fun toggleTools() { _ui.value = _ui.value.copy(showTools = !_ui.value.showTools, showSettings = false) }
@@ -308,7 +327,7 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun onAppBackgrounded() { orchestrator.cancelForUserAction() }
-    fun onAppForegrounded() { refreshCamera() }
+    fun onAppForegrounded() { refreshCamera(); refreshGallery() }
 
     override fun onCleared() {
         orchestrator.cancelForUserAction()
