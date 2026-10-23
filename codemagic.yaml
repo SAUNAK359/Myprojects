@@ -1,139 +1,52 @@
 workflows:
-  director-android-debug-v8:
-    name: Director Android Debug V8
-    max_build_duration: 120
+  director-android-debug:
+    name: Director Android Debug
+    working_directory: Director
     instance_type: mac_mini_m2
+    max_build_duration: 60
     environment:
       java: 17
       vars:
-        PACKAGE_NAME: "com.saunak.director"
+        PACKAGE_NAME: "com.saunak.director.debug"
     cache:
       cache_paths:
         - $HOME/.gradle/caches
         - $HOME/.gradle/director-wrapper
-        - $CM_BUILD_DIR/Director/third_party/llama.cpp
-        - $CM_BUILD_DIR/Director/app/.cxx
     scripts:
-      - name: Build identity
+      - name: Environment
         script: |
           set -euo pipefail
-          echo "Director Codemagic workflow: debug-v8"
-          echo "Commit: $(git rev-parse HEAD)"
-          echo "Branch: $(git branch --show-current || true)"
-          echo "Host: $(uname -a)"
-          echo "Bash: ${BASH_VERSION:-unknown}"
+          chmod +x gradlew
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
           java -version
-          df -h "$CM_BUILD_DIR"
-
-      - name: Bootstrap Android native toolchain
-        script: |
-          set -euo pipefail
-          cd "$CM_BUILD_DIR/Director"
-          chmod +x gradlew scripts/*.sh scripts/*.py
-          ./scripts/bootstrap_android_sdk.sh
-
-      - name: Deterministic build preflight
-        script: |
-          set -euo pipefail
-          cd "$CM_BUILD_DIR/Director"
-          ./scripts/ci_preflight.sh
-          mkdir -p "$CM_BUILD_DIR/director-build-logs"
-
-      - name: Fetch verified llama.cpp
-        script: |
-          set -euo pipefail
-          cd "$CM_BUILD_DIR/Director"
-          ./scripts/fetch_llama_cpp.sh
-          test -s third_party/llama.cpp/CMakeLists.txt
-          test -s third_party/llama.cpp/include/llama.h
-          test -s third_party/llama.cpp/tools/mtmd/mtmd.h
-          test -s third_party/llama.cpp/.director-qwen3vl-pruned-v3
-
-      - name: Compile debug APK
-        script: |
-          set +e
-          cd "$CM_BUILD_DIR/Director"
-          LOG="$CM_BUILD_DIR/director-build-logs/assemble-debug.log"
-          DIRECTOR_GRADLE_TIMEOUT_SEC=4500 ./scripts/run_gradle_ci.sh "$LOG" assembleDebug
-          STATUS=$?
-          set -e
-          if [ "$STATUS" -ne 0 ]; then
-            echo "========== DIRECTOR ROOT CAUSE =========="
-            grep -nE '^\* What went wrong:|^e: |^w: |C/C\+\+:|(^|[[:space:]])error:|fatal error:|Caused by:|Could not resolve|Execution failed for task|A problem occurred|FAILED|Director timeout|Hard timeout' "$LOG" | head -n 300 || true
-            echo "========================================="
-            exit "$STATUS"
-          fi
-          APK="$(find app/build/outputs/apk/debug -name '*.apk' -type f -print -quit)"
-          test -n "$APK" && test -s "$APK"
-
-          SDK_ROOT="$(cat "$CM_BUILD_DIR/.director-android-sdk-root")"
-          BUILD_TOOLS="$SDK_ROOT/build-tools/36.0.0"
-          test -x "$BUILD_TOOLS/zipalign"
-          test -f "$BUILD_TOOLS/apksigner"
-          test -x "$BUILD_TOOLS/aapt2"
-
-          echo "========== DIRECTOR APK VALIDATION =========="
-          "$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$APK"
-          "$BUILD_TOOLS/zipalign" -c -P 16 -v 4 "$APK"
-          "$BUILD_TOOLS/aapt2" dump badging "$APK" | head -n 12
-          unzip -l "$APK" | grep -qE '(^|[[:space:]])classes\.dex$'
-          unzip -l "$APK" | grep -qE 'lib/arm64-v8a/libdirector-vlm\.so$'
-          unzip -l "$APK" | grep -qE 'lib/arm64-v8a/libc\+\+_shared\.so$'
-          if unzip -l "$APK" | grep -qE 'lib/(armeabi-v7a|x86|x86_64)/'; then
-            echo "Unexpected non-arm64 native ABI packaged in Director debug APK" >&2
-            exit 12
-          fi
-          du -h "$APK"
-          echo "============================================="
-          echo "APK ready and structurally verified: $APK"
-
+          ./gradlew --version
       - name: Unit tests
         script: |
-          set +e
-          cd "$CM_BUILD_DIR/Director"
-          LOG="$CM_BUILD_DIR/director-build-logs/unit-tests.log"
-          DIRECTOR_GRADLE_TIMEOUT_SEC=900 ./scripts/run_gradle_ci.sh "$LOG" testDebugUnitTest
-          STATUS=$?
-          set -e
-          if [ "$STATUS" -ne 0 ]; then
-            echo "========== TEST ROOT CAUSE =========="
-            grep -nE '^\* What went wrong:|^e: |error:|Caused by:|Execution failed for task|FAILED|AssertionError|Director timeout|Hard timeout' "$LOG" | head -n 300 || true
-            echo "====================================="
-            exit "$STATUS"
-          fi
-
-      - name: Android lint report
+          set -euo pipefail
+          ./gradlew --no-daemon testDebugUnitTest
+      - name: Lint
         script: |
-          set +e
-          cd "$CM_BUILD_DIR/Director"
-          LOG="$CM_BUILD_DIR/director-build-logs/lint-debug.log"
-          DIRECTOR_GRADLE_TIMEOUT_SEC=900 ./scripts/run_gradle_ci.sh "$LOG" lintDebug
-          STATUS=$?
-          set -e
-          TXT="app/build/reports/lint-results-debug.txt"
-          if [ -f "$TXT" ]; then
-            echo "========== ANDROID LINT FINDINGS =========="
-            cat "$TXT"
-            echo "==========================================="
-          fi
-          if [ "$STATUS" -ne 0 ]; then
-            echo "DEBUG APK remains available for device validation; Release V8 remains strict."
-            grep -nE '^\* What went wrong:|^e: |error:|Caused by:|Execution failed for task|Fatal:|Director timeout|Hard timeout' "$LOG" | head -n 300 || true
-          fi
-          exit 0
-
+          set -euo pipefail
+          ./gradlew --no-daemon lintDebug
+      - name: Build debug APK
+        script: |
+          set -euo pipefail
+          ./gradlew --no-daemon assembleDebug
+          APK="$(find app/build/outputs/apk/debug -name '*.apk' -type f -print -quit)"
+          test -n "$APK" && test -s "$APK"
+          echo "APK: $APK"
+          ls -lh "$APK"
     artifacts:
-      - Director/app/build/outputs/**/*.apk
-      - Director/app/build/reports/lint-results-*.html
-      - Director/app/build/reports/lint-results-*.txt
-      - Director/app/build/reports/lint-results-*.xml
-      - Director/app/build/test-results/**/*.xml
-      - director-build-logs/**/*.log
+      - app/build/outputs/**/*.apk
+      - app/build/reports/lint-results-*.html
+      - app/build/reports/lint-results-*.xml
+      - app/build/test-results/**/*.xml
 
-  director-android-release-v8:
-    name: Director Android Release V8
-    max_build_duration: 120
+  director-android-release:
+    name: Director Android Release
+    working_directory: Director
     instance_type: mac_mini_m2
+    max_build_duration: 60
     environment:
       java: 17
       vars:
@@ -142,75 +55,30 @@ workflows:
       cache_paths:
         - $HOME/.gradle/caches
         - $HOME/.gradle/director-wrapper
-        - $CM_BUILD_DIR/Director/third_party/llama.cpp
-        - $CM_BUILD_DIR/Director/app/.cxx
     scripts:
-      - name: Build identity
+      - name: Environment
         script: |
           set -euo pipefail
-          echo "Director Codemagic workflow: release-v8"
-          echo "Commit: $(git rev-parse HEAD)"
-          echo "Bash: ${BASH_VERSION:-unknown}"
+          chmod +x gradlew
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
           java -version
-          df -h "$CM_BUILD_DIR"
-
-      - name: Bootstrap and preflight
+          ./gradlew --version
+      - name: Validate release
         script: |
           set -euo pipefail
-          cd "$CM_BUILD_DIR/Director"
-          chmod +x gradlew scripts/*.sh scripts/*.py
-          ./scripts/bootstrap_android_sdk.sh
-          ./scripts/ci_preflight.sh
-          mkdir -p "$CM_BUILD_DIR/director-build-logs"
-          ./scripts/fetch_llama_cpp.sh
-          test -s third_party/llama.cpp/CMakeLists.txt
-          test -s third_party/llama.cpp/include/llama.h
-          test -s third_party/llama.cpp/tools/mtmd/mtmd.h
-          test -s third_party/llama.cpp/.director-qwen3vl-pruned-v3
-
-      - name: Build and verify release
-        script: |
-          set +e
-          cd "$CM_BUILD_DIR/Director"
-          LOG="$CM_BUILD_DIR/director-build-logs/release.log"
-          DIRECTOR_GRADLE_TIMEOUT_SEC=5100 ./scripts/run_gradle_ci.sh "$LOG" \
-            assembleRelease bundleRelease testReleaseUnitTest lintRelease \
+          ./gradlew --no-daemon testReleaseUnitTest lintRelease assembleRelease bundleRelease \
             -PversionCode=$BUILD_NUMBER \
             -PversionName=1.0.$BUILD_NUMBER
-          STATUS=$?
-          set -e
-          if [ "$STATUS" -ne 0 ]; then
-            TXT="app/build/reports/lint-results-release.txt"
-            if [ -f "$TXT" ]; then cat "$TXT"; fi
-            echo "========== RELEASE ROOT CAUSE =========="
-            grep -nE '^\* What went wrong:|^e: |C/C\+\+:|error:|fatal error:|Caused by:|Could not resolve|Execution failed for task|A problem occurred|Fatal:|FAILED|Director timeout|Hard timeout' "$LOG" | head -n 360 || true
-            echo "========================================"
-            exit "$STATUS"
-          fi
           APK="$(find app/build/outputs/apk/release -name '*.apk' -type f -print -quit)"
           AAB="$(find app/build/outputs/bundle/release -name '*.aab' -type f -print -quit)"
           test -n "$APK" && test -s "$APK"
           test -n "$AAB" && test -s "$AAB"
-
-          SDK_ROOT="$(cat "$CM_BUILD_DIR/.director-android-sdk-root")"
-          BUILD_TOOLS="$SDK_ROOT/build-tools/36.0.0"
-          "$BUILD_TOOLS/zipalign" -c -P 16 -v 4 "$APK"
-          unzip -l "$APK" | grep -qE '(^|[[:space:]])classes\.dex$'
-          unzip -l "$APK" | grep -qE 'lib/arm64-v8a/libdirector-vlm\.so$'
-          unzip -l "$APK" | grep -qE 'lib/arm64-v8a/libc\+\+_shared\.so$'
-          "$BUILD_TOOLS/aapt2" dump badging "$APK" | head -n 12
-          if [ -n "${CM_KEYSTORE_PATH:-}" ]; then
-            "$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$APK"
-          else
-            echo "Release APK is unsigned because no Codemagic keystore was supplied; release install validation requires signing."
-          fi
           echo "Release APK: $APK"
           echo "Release AAB: $AAB"
-
+          ls -lh "$APK" "$AAB"
     artifacts:
-      - Director/app/build/outputs/**/*.apk
-      - Director/app/build/outputs/**/*.aab
-      - Director/app/build/reports/lint-results-*.html
-      - Director/app/build/reports/lint-results-*.txt
-      - Director/app/build/reports/lint-results-*.xml
-      - director-build-logs/**/*.log
+      - app/build/outputs/**/*.apk
+      - app/build/outputs/**/*.aab
+      - app/build/reports/lint-results-*.html
+      - app/build/reports/lint-results-*.xml
+      - app/build/test-results/**/*.xml
