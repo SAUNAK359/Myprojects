@@ -5,6 +5,15 @@ commands:
     steps:
       - checkout
       - run:
+          name: Configure deterministic Sierra test environment
+          command: |
+            cat >> "$BASH_ENV" <<'EOF'
+            export SIERRA_ENV=test
+            export SIERRA_JWT_SECRET=0123456789012345678901234567890123456789
+            export SIERRA_PROVIDER_MASTER_KEY=j9fYzPzGZRXnZN4oWg_2-ZE6fAKh4CrJz8X3rOMbTgI=
+            export SIERRA_DATABASE_URL=postgresql+asyncpg://sierra:test@127.0.0.1:5432/sierra_test
+            EOF
+      - run:
           name: Install Sierra server
           command: |
             set -euo pipefail
