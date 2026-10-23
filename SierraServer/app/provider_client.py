@@ -16,7 +16,9 @@ from app.schemas import SierraPlan
 PHOTOGRAPHY_PROMPT = """
 You are Sierra AI, an elite computational-photography director controlling a real Android camera through a constrained plan.
 Study subject, lighting, skin, motion, depth, background, highlight risk, shadow detail, composition, mood and probable user intent as a professional photographer would.
-The Android client will validate and execute every camera action locally through Sierra beta. Never invent unsupported direct Camera2 commands.
+The Android client runs Sierra beta locally. Sierra beta is the execution and safety authority: it validates your plan against the real camera and may reject unsafe or unsupported actions.
+Never invent a camera control, tool ID, range, lens, extension, or capability that is not explicitly present in DEVICE CAPABILITIES / SKILL CONTEXT.
+Use LOCAL SIERRA BETA QUALITY as measured evidence, not as a replacement for visual reasoning.
 Choose a deliberate aspect ratio and crop center for the photograph, not merely the sensor ratio.
 Aim for an immediately post-ready photograph: technically clean, strong subject placement, natural skin, protected highlights, intentional color and tasteful finish.
 Return ONLY one JSON object with these keys:
@@ -31,10 +33,31 @@ If uncertain, prefer fewer safe calls and a natural finish. planner must be sier
 def prepare_image(raw: bytes) -> str:
     with Image.open(io.BytesIO(raw)) as image:
         image = ImageOps.exif_transpose(image).convert("RGB")
-        image.thumbnail((settings.max_image_dimension, settings.max_image_dimension), Image.Resampling.LANCZOS)
+        image.thumbnail(
+            (settings.max_image_dimension, settings.max_image_dimension),
+            Image.Resampling.LANCZOS,
+        )
         out = io.BytesIO()
         image.save(out, format="JPEG", quality=74, optimize=True)
     return "data:image/jpeg;base64," + base64.b64encode(out.getvalue()).decode()
+
+
+def build_prompt(
+    *,
+    camera_context_json: str | None,
+    device_capabilities_json: str | None,
+    local_quality_json: str | None,
+    skill_context: str | None,
+) -> str:
+    return "\n\n".join(
+        [
+            PHOTOGRAPHY_PROMPT,
+            "DEVICE CAPABILITIES:\n" + (device_capabilities_json or "{}"),
+            "CURRENT CAMERA STATE:\n" + (camera_context_json or "{}"),
+            "LOCAL SIERRA BETA QUALITY:\n" + (local_quality_json or "{}"),
+            "SELECTED PHOTOGRAPHY SKILL CONTEXT:\n" + (skill_context or "general photography"),
+        ]
+    )
 
 
 def _extract_content(payload: dict[str, Any]) -> str:
@@ -85,7 +108,7 @@ def _json_objects(text: str):
         elif char == "}" and depth:
             depth -= 1
             if depth == 0 and start is not None:
-                yield text[start:index + 1]
+                yield text[start : index + 1]
                 start = None
 
 
@@ -115,14 +138,33 @@ def parse_plan(text: str) -> SierraPlan:
     raise ValueError("provider did not return a valid Sierra plan")
 
 
-async def call_provider(provider: Provider, image_bytes: bytes) -> tuple[SierraPlan, int]:
+async def call_provider(
+    provider: Provider,
+    image_bytes: bytes,
+    *,
+    camera_context_json: str | None = None,
+    device_capabilities_json: str | None = None,
+    local_quality_json: str | None = None,
+    skill_context: str | None = None,
+) -> tuple[SierraPlan, int]:
     image_url = prepare_image(image_bytes)
+    prompt = build_prompt(
+        camera_context_json=camera_context_json,
+        device_capabilities_json=device_capabilities_json,
+        local_quality_json=local_quality_json,
+        skill_context=skill_context,
+    )
     body: dict[str, Any] = {
         "model": provider.model,
-        "messages": [{"role": "user", "content": [
-            {"type": "text", "text": PHOTOGRAPHY_PROMPT},
-            {"type": "image_url", "image_url": {"url": image_url}},
-        ]}],
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": image_url}},
+                ],
+            }
+        ],
         "temperature": 0.25,
         "top_p": 0.9,
         "max_tokens": provider.max_tokens,
@@ -145,7 +187,11 @@ async def call_provider(provider: Provider, image_bytes: bytes) -> tuple[SierraP
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
         response = await client.post(
             provider.endpoint,
-            headers={"Authorization": f"Bearer {decrypt_secret(provider.secret_ciphertext)}", "Content-Type": "application/json", "X-Title": "Sierra Vision"},
+            headers={
+                "Authorization": f"Bearer {decrypt_secret(provider.secret_ciphertext)}",
+                "Content-Type": "application/json",
+                "X-Title": "Sierra Vision",
+            },
             json=body,
         )
     latency = int((time.monotonic() - started) * 1000)
