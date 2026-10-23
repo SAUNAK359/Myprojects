@@ -18,6 +18,7 @@ import com.saunak.director.tools.ToolIds
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
+import java.util.UUID
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -132,7 +133,13 @@ class DirectorOrchestrator(
                 emit(session, DirectorUiState(DirectorStage.ANALYZING, true, "Sierra AI is composing…", camera = camera.uiState(), sierraMode = SierraMode.AI, aspectRatioOverride = aspectRatioOverride, keepOriginal = keepOriginal))
                 vlm.setMaxImageDimension(thermalPolicy.maxAiDimension)
                 val cloudResult = withTimeoutOrNull(CLOUD_PLAN_BUDGET_MS) {
-                    vlm.plan(frame, camera.capabilities(), camera.snapshot(), skills.planningContext())
+                    vlm.plan(
+                        frame,
+                        camera.capabilities(),
+                        camera.snapshot(),
+                        skills.planningContext(),
+                        referenceQuality
+                    )
                 }
                 val cloudPlan = cloudResult?.getOrNull()
                 if (cloudPlan != null) {
@@ -185,6 +192,7 @@ class DirectorOrchestrator(
                 try {
                     val cameraQuality = PhotoQuality.analyze(verification)
                     if (cameraQuality.catastrophic) {
+                        if (mode == SierraMode.AI) vlm.cancel()
                         tools.restoreUserState()
                         emit(session, DirectorUiState(DirectorStage.READY, mode == SierraMode.AI, "Hold steady or add light • try again", camera = camera.uiState(), sierraMode = mode, aspectRatioOverride = aspectRatioOverride, keepOriginal = keepOriginal))
                         return null
@@ -206,10 +214,13 @@ class DirectorOrchestrator(
             approve(session, appliedPlan, look, score, mode)
             return null
         } catch (_: StaleSession) {
+            vlm.cancel()
             return null
         } catch (t: CancellationException) {
+            vlm.cancel()
             throw t
         } catch (t: Throwable) {
+            vlm.cancel()
             runCatching { tools.restoreUserState() }
             emit(session, DirectorUiState(DirectorStage.ERROR, false, "Sierra could not prepare this shot", error = t.message, camera = camera.uiState(), sierraMode = SierraMode.BETA, aspectRatioOverride = aspectRatioOverride, keepOriginal = keepOriginal))
             return null
@@ -219,11 +230,6 @@ class DirectorOrchestrator(
         }
     }
 
-    /**
-     * Sierra AI expresses creative framing through semantic tool 7. Sierra β owns the validation
-     * and strips that non-hardware tool before ToolExecutor sees the plan. If a provider omits
-     * composition intent, we retain its other decisions but use Sierra β's safe composition.
-     */
     private fun consumeCompositionIntent(ai: PlanOutput, local: PlanOutput): PlanOutput {
         val composition = ai.toolCalls.lastOrNull { it.id == ToolIds.COMPOSITION }
         val requestedRatio = composition?.stringValue?.trim().orEmpty()
@@ -278,17 +284,28 @@ class DirectorOrchestrator(
             file = storage.newAttempt(session, 99)
             camera.capturePrivate(file)
             emit(session, DirectorUiState(DirectorStage.SAVING, state.mode == SierraMode.AI, "Sierra β finishing…", lastScore = state.score, camera = camera.uiState(), sierraMode = state.mode, aspectRatio = state.plan.aspectRatio, aspectRatioOverride = aspectRatioOverride, sceneLabel = state.plan.scene, objective = state.plan.objective, keepOriginal = keepOriginal))
-            if (keepOriginal) storage.saveOriginal(file)
+            if (keepOriginal) runCatching { storage.saveOriginal(file) }
             val uri = storage.saveFinal(file, state.look, state.plan.aspectRatio, state.plan.cropCenterX, state.plan.cropCenterY)
             recipeMemory.remember(state.plan, state.score)
+
+            val settlement = if (state.mode == SierraMode.AI) {
+                val captureId = UUID.randomUUID().toString()
+                withTimeoutOrNull(CLOUD_SETTLEMENT_BUDGET_MS) {
+                    vlm.confirmFinalCapture(captureId)
+                }
+            } else {
+                Result.success(Unit)
+            }
+
             approved = null
             tools.restoreUserState()
+            val settlementPending = state.mode == SierraMode.AI && settlement?.isSuccess != true
             emit(
                 session,
                 DirectorUiState(
                     DirectorStage.READY,
                     cloudEnabled && vlm.isReady(),
-                    "Sierra photo saved",
+                    if (settlementPending) "Sierra photo saved • credit sync pending" else "Sierra photo saved",
                     lastScore = state.score,
                     camera = camera.uiState(),
                     lastSavedUri = uri.toString(),
@@ -303,6 +320,7 @@ class DirectorOrchestrator(
             )
             uri
         } catch (t: Throwable) {
+            if (state.mode == SierraMode.AI) vlm.cancel()
             approved = null
             runCatching { tools.restoreUserState() }
             emit(session, DirectorUiState(DirectorStage.ERROR, cloudEnabled && vlm.isReady(), "Final capture failed", error = t.message, camera = camera.uiState(), sierraMode = state.mode, aspectRatioOverride = aspectRatioOverride, keepOriginal = keepOriginal))
@@ -326,6 +344,7 @@ class DirectorOrchestrator(
     companion object {
         private const val HARD_PREPARE_DEADLINE_MS = 6_500L
         private const val CLOUD_PLAN_BUDGET_MS = 3_400L
+        private const val CLOUD_SETTLEMENT_BUDGET_MS = 1_200L
         private const val FAST_FRAME_TIMEOUT_MS = 650L
         private const val FAST_VERIFY_TIMEOUT_MS = 500L
         private const val LOCAL_SETTLE_TIMEOUT_MS = 650L
