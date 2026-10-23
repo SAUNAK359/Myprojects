@@ -39,12 +39,19 @@ class DirectorOrchestrator(
     private data class ApprovedState(val look: LookSpec, val plan: PlanOutput, val score: Double, val mode: SierraMode)
     @Volatile private var approved: ApprovedState? = null
     @Volatile private var cloudEnabled: Boolean = true
+    @Volatile private var aspectRatioOverride: String? = null
+    @Volatile private var keepOriginal: Boolean = false
 
     fun isPrepared(): Boolean = approved != null
     fun setCloudEnabled(enabled: Boolean) {
         cloudEnabled = enabled
         if (!enabled) vlm.cancel()
     }
+    fun setAspectRatioOverride(value: String?) {
+        aspectRatioOverride = value?.takeIf(SierraCropPolicy::isSupported)
+        approved = null
+    }
+    fun setKeepOriginal(enabled: Boolean) { keepOriginal = enabled }
     suspend fun recoverPendingReferences(): List<Uri> = storage.recoverPendingToGallery()
 
     fun cancelForUserAction(): Long {
@@ -72,7 +79,9 @@ class DirectorOrchestrator(
                     sierraMode = SierraMode.BETA,
                     status = "Sierra β ready • preparation timed out",
                     camera = camera.uiState(),
-                    recipeCount = recipeMemory.count()
+                    recipeCount = recipeMemory.count(),
+                    aspectRatioOverride = aspectRatioOverride,
+                    keepOriginal = keepOriginal
                 )
             )
         }
@@ -95,13 +104,15 @@ class DirectorOrchestrator(
                     cloudAllowed,
                     if (cloudAllowed) "Sierra is reading the scene…" else "Sierra β is reading the scene…",
                     camera = camera.uiState(),
-                    sierraMode = if (cloudAllowed) SierraMode.AI else SierraMode.BETA
+                    sierraMode = if (cloudAllowed) SierraMode.AI else SierraMode.BETA,
+                    aspectRatioOverride = aspectRatioOverride,
+                    keepOriginal = keepOriginal
                 )
             )
 
             planningBitmap = camera.captureAnalysisFrame(FAST_FRAME_TIMEOUT_MS)
             if (planningBitmap == null) {
-                emit(session, DirectorUiState(DirectorStage.CAPTURING, cloudAllowed, "Sampling camera…", camera = camera.uiState(), sierraMode = if (cloudAllowed) SierraMode.AI else SierraMode.BETA))
+                emit(session, DirectorUiState(DirectorStage.CAPTURING, cloudAllowed, "Sampling camera…", camera = camera.uiState(), sierraMode = if (cloudAllowed) SierraMode.AI else SierraMode.BETA, aspectRatioOverride = aspectRatioOverride, keepOriginal = keepOriginal))
                 val fallback = storage.newAttempt(session, 0).also { created += it }
                 camera.capturePrivate(fallback)
                 assertCurrent(session)
@@ -111,14 +122,14 @@ class DirectorOrchestrator(
             val frame = checkNotNull(planningBitmap)
             val referenceQuality = PhotoQuality.analyze(frame)
             if (referenceQuality.catastrophic) {
-                emit(session, DirectorUiState(DirectorStage.READY, cloudAllowed, "Scene too dark or blank • reframe", camera = camera.uiState(), sierraMode = SierraMode.BETA))
+                emit(session, DirectorUiState(DirectorStage.READY, cloudAllowed, "Scene too dark or blank • reframe", camera = camera.uiState(), sierraMode = SierraMode.BETA, aspectRatioOverride = aspectRatioOverride, keepOriginal = keepOriginal))
                 return null
             }
 
             var mode = SierraMode.BETA
             val localPlan by lazy { SierraLocalPlanner.plan(referenceQuality, frame.width, frame.height) }
             val basePlan = if (cloudAllowed) {
-                emit(session, DirectorUiState(DirectorStage.ANALYZING, true, "Sierra AI is composing…", camera = camera.uiState(), sierraMode = SierraMode.AI))
+                emit(session, DirectorUiState(DirectorStage.ANALYZING, true, "Sierra AI is composing…", camera = camera.uiState(), sierraMode = SierraMode.AI, aspectRatioOverride = aspectRatioOverride, keepOriginal = keepOriginal))
                 vlm.setMaxImageDimension(thermalPolicy.maxAiDimension)
                 val cloudResult = withTimeoutOrNull(CLOUD_PLAN_BUDGET_MS) {
                     vlm.plan(frame, camera.capabilities(), camera.snapshot(), skills.planningContext())
@@ -129,7 +140,7 @@ class DirectorOrchestrator(
                     consumeCompositionIntent(cloudPlan, localPlan)
                 } else {
                     vlm.cancel()
-                    emit(session, DirectorUiState(DirectorStage.PLANNING, false, "Sierra β is taking over…", camera = camera.uiState(), sierraMode = SierraMode.BETA))
+                    emit(session, DirectorUiState(DirectorStage.PLANNING, false, "Sierra β is taking over…", camera = camera.uiState(), sierraMode = SierraMode.BETA, aspectRatioOverride = aspectRatioOverride, keepOriginal = keepOriginal))
                     localPlan
                 }
             } else {
@@ -137,7 +148,8 @@ class DirectorOrchestrator(
             }
             assertCurrent(session)
 
-            val plan = InstantFinishEngine.enrich(basePlan, referenceQuality)
+            val userConstrainedPlan = aspectRatioOverride?.let { basePlan.copy(aspectRatio = it) } ?: basePlan
+            val plan = InstantFinishEngine.enrich(userConstrainedPlan, referenceQuality)
             emit(
                 session,
                 DirectorUiState(
@@ -147,8 +159,10 @@ class DirectorOrchestrator(
                     camera = camera.uiState(),
                     sierraMode = mode,
                     aspectRatio = plan.aspectRatio,
+                    aspectRatioOverride = aspectRatioOverride,
                     sceneLabel = plan.scene,
-                    objective = plan.objective
+                    objective = plan.objective,
+                    keepOriginal = keepOriginal
                 )
             )
 
@@ -160,19 +174,19 @@ class DirectorOrchestrator(
             val appliedPlan = plan.copy(toolCalls = execution.applied)
 
             if (execution.requiresRecapture) {
-                emit(session, DirectorUiState(DirectorStage.CHECKING, mode == SierraMode.AI, "Locking focus & exposure…", camera = camera.uiState(), sierraMode = mode, aspectRatio = plan.aspectRatio, sceneLabel = plan.scene, objective = plan.objective))
+                emit(session, DirectorUiState(DirectorStage.CHECKING, mode == SierraMode.AI, "Locking focus & exposure…", camera = camera.uiState(), sierraMode = mode, aspectRatio = plan.aspectRatio, aspectRatioOverride = aspectRatioOverride, sceneLabel = plan.scene, objective = plan.objective, keepOriginal = keepOriginal))
                 camera.awaitSettledState(LOCAL_SETTLE_TIMEOUT_MS)
                 assertCurrent(session)
             }
 
-            emit(session, DirectorUiState(DirectorStage.CHECKING, mode == SierraMode.AI, "Sierra β checking quality…", camera = camera.uiState(), sierraMode = mode, aspectRatio = plan.aspectRatio, sceneLabel = plan.scene, objective = plan.objective))
+            emit(session, DirectorUiState(DirectorStage.CHECKING, mode == SierraMode.AI, "Sierra β checking quality…", camera = camera.uiState(), sierraMode = mode, aspectRatio = plan.aspectRatio, aspectRatioOverride = aspectRatioOverride, sceneLabel = plan.scene, objective = plan.objective, keepOriginal = keepOriginal))
             val verification = camera.captureAnalysisFrame(FAST_VERIFY_TIMEOUT_MS)
             val score = if (verification != null) {
                 try {
                     val cameraQuality = PhotoQuality.analyze(verification)
                     if (cameraQuality.catastrophic) {
                         tools.restoreUserState()
-                        emit(session, DirectorUiState(DirectorStage.READY, mode == SierraMode.AI, "Hold steady or add light • try again", camera = camera.uiState(), sierraMode = mode))
+                        emit(session, DirectorUiState(DirectorStage.READY, mode == SierraMode.AI, "Hold steady or add light • try again", camera = camera.uiState(), sierraMode = mode, aspectRatioOverride = aspectRatioOverride, keepOriginal = keepOriginal))
                         return null
                     }
                     val rendered = LookProcessor.apply(verification, look)
@@ -197,7 +211,7 @@ class DirectorOrchestrator(
             throw t
         } catch (t: Throwable) {
             runCatching { tools.restoreUserState() }
-            emit(session, DirectorUiState(DirectorStage.ERROR, false, "Sierra could not prepare this shot", error = t.message, camera = camera.uiState(), sierraMode = SierraMode.BETA))
+            emit(session, DirectorUiState(DirectorStage.ERROR, false, "Sierra could not prepare this shot", error = t.message, camera = camera.uiState(), sierraMode = SierraMode.BETA, aspectRatioOverride = aspectRatioOverride, keepOriginal = keepOriginal))
             return null
         } finally {
             planningBitmap?.let { if (!it.isRecycled) it.recycle() }
@@ -246,8 +260,10 @@ class DirectorOrchestrator(
                 recipeCount = recipeMemory.count(),
                 sierraMode = mode,
                 aspectRatio = plan.aspectRatio,
+                aspectRatioOverride = aspectRatioOverride,
                 sceneLabel = plan.scene,
-                objective = plan.objective
+                objective = plan.objective,
+                keepOriginal = keepOriginal
             )
         )
     }
@@ -257,11 +273,12 @@ class DirectorOrchestrator(
         val session = generation.get()
         var file: File? = null
         return try {
-            emit(session, DirectorUiState(DirectorStage.FINAL_CAPTURING, state.mode == SierraMode.AI, "Capturing full quality…", lastScore = state.score, camera = camera.uiState(), sierraMode = state.mode, aspectRatio = state.plan.aspectRatio, sceneLabel = state.plan.scene, objective = state.plan.objective))
+            emit(session, DirectorUiState(DirectorStage.FINAL_CAPTURING, state.mode == SierraMode.AI, "Capturing full quality…", lastScore = state.score, camera = camera.uiState(), sierraMode = state.mode, aspectRatio = state.plan.aspectRatio, aspectRatioOverride = aspectRatioOverride, sceneLabel = state.plan.scene, objective = state.plan.objective, keepOriginal = keepOriginal))
             camera.awaitSettledState(550)
             file = storage.newAttempt(session, 99)
             camera.capturePrivate(file)
-            emit(session, DirectorUiState(DirectorStage.SAVING, state.mode == SierraMode.AI, "Sierra β finishing…", lastScore = state.score, camera = camera.uiState(), sierraMode = state.mode, aspectRatio = state.plan.aspectRatio, sceneLabel = state.plan.scene, objective = state.plan.objective))
+            emit(session, DirectorUiState(DirectorStage.SAVING, state.mode == SierraMode.AI, "Sierra β finishing…", lastScore = state.score, camera = camera.uiState(), sierraMode = state.mode, aspectRatio = state.plan.aspectRatio, aspectRatioOverride = aspectRatioOverride, sceneLabel = state.plan.scene, objective = state.plan.objective, keepOriginal = keepOriginal))
+            if (keepOriginal) storage.saveOriginal(file)
             val uri = storage.saveFinal(file, state.look, state.plan.aspectRatio, state.plan.cropCenterX, state.plan.cropCenterY)
             recipeMemory.remember(state.plan, state.score)
             approved = null
@@ -278,15 +295,17 @@ class DirectorOrchestrator(
                     recipeCount = recipeMemory.count(),
                     sierraMode = state.mode,
                     aspectRatio = state.plan.aspectRatio,
+                    aspectRatioOverride = aspectRatioOverride,
                     sceneLabel = state.plan.scene,
-                    objective = state.plan.objective
+                    objective = state.plan.objective,
+                    keepOriginal = keepOriginal
                 )
             )
             uri
         } catch (t: Throwable) {
             approved = null
             runCatching { tools.restoreUserState() }
-            emit(session, DirectorUiState(DirectorStage.ERROR, cloudEnabled && vlm.isReady(), "Final capture failed", error = t.message, camera = camera.uiState(), sierraMode = state.mode))
+            emit(session, DirectorUiState(DirectorStage.ERROR, cloudEnabled && vlm.isReady(), "Final capture failed", error = t.message, camera = camera.uiState(), sierraMode = state.mode, aspectRatioOverride = aspectRatioOverride, keepOriginal = keepOriginal))
             null
         } finally {
             file?.let { storage.cleanup(listOf(it)) }
