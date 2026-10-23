@@ -1,11 +1,7 @@
 version: 2.1
 
-jobs:
-  sierra-import:
-    docker:
-      - image: cimg/python:3.12
-    resource_class: medium
-    working_directory: ~/project
+commands:
+  install-server:
     steps:
       - checkout
       - run:
@@ -15,13 +11,59 @@ jobs:
             cd SierraServer
             python -m pip install --upgrade pip
             pip install '.[dev]'
+
+jobs:
+  sierra-core-import:
+    docker:
+      - image: cimg/python:3.12
+    resource_class: medium
+    working_directory: ~/project
+    steps:
+      - install-server
       - run:
-          name: Compile and import
+          name: Import config database models schemas
           command: |
-            set -euo pipefail
             cd SierraServer
-            python -m compileall -q app tests scripts
-            python -c 'import app.main; import app.provider_client; import app.job_worker; print("Sierra import OK")'
+            python -c 'import app.config; import app.db; import app.models; import app.schemas; print("core OK")'
+
+  sierra-security-import:
+    docker:
+      - image: cimg/python:3.12
+    resource_class: medium
+    working_directory: ~/project
+    steps:
+      - install-server
+      - run:
+          name: Import security and credits
+          command: |
+            cd SierraServer
+            python -c 'import app.security; import app.credits; import app.provider_crypto; print("security OK")'
+
+  sierra-provider-import:
+    docker:
+      - image: cimg/python:3.12
+    resource_class: medium
+    working_directory: ~/project
+    steps:
+      - install-server
+      - run:
+          name: Import provider and worker stack
+          command: |
+            cd SierraServer
+            python -c 'import app.provider_client; import app.provider_router; import app.job_worker; print("provider OK")'
+
+  sierra-app-import:
+    docker:
+      - image: cimg/python:3.12
+    resource_class: medium
+    working_directory: ~/project
+    steps:
+      - install-server
+      - run:
+          name: Import FastAPI application
+          command: |
+            cd SierraServer
+            python -c 'import app.main; print("app OK")'
 
   sierra-static:
     docker:
@@ -29,19 +71,12 @@ jobs:
     resource_class: medium
     working_directory: ~/project
     steps:
-      - checkout
-      - run:
-          name: Install Sierra server
-          command: |
-            set -euo pipefail
-            cd SierraServer
-            python -m pip install --upgrade pip
-            pip install '.[dev]'
+      - install-server
       - run:
           name: Static correctness
           command: |
-            set -euo pipefail
             cd SierraServer
+            python -m compileall -q app tests scripts
             ruff check app tests scripts
 
   sierra-tests:
@@ -50,18 +85,10 @@ jobs:
     resource_class: medium
     working_directory: ~/project
     steps:
-      - checkout
-      - run:
-          name: Install Sierra server
-          command: |
-            set -euo pipefail
-            cd SierraServer
-            python -m pip install --upgrade pip
-            pip install '.[dev]'
+      - install-server
       - run:
           name: Unit tests
           command: |
-            set -euo pipefail
             cd SierraServer
             mkdir -p /tmp/sierra-test-results
             pytest -q --junitxml=/tmp/sierra-test-results/results.xml
@@ -71,11 +98,17 @@ jobs:
 workflows:
   sierra-server-build:
     jobs:
-      - sierra-import:
+      - sierra-core-import:
           filters: &server_filter
             branches:
               only:
                 - sierra-vision-server-v1
+      - sierra-security-import:
+          filters: *server_filter
+      - sierra-provider-import:
+          filters: *server_filter
+      - sierra-app-import:
+          filters: *server_filter
       - sierra-static:
           filters: *server_filter
       - sierra-tests:
