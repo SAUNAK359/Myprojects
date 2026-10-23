@@ -1,5 +1,6 @@
 package com.saunak.director.storage
 
+import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
 import android.graphics.Bitmap
@@ -88,12 +89,35 @@ class PhotoRepository(private val context: Context) {
         }
     }
 
-    /** Preserve the untouched CameraX JPEG in a separate Originals album only when requested. */
     suspend fun saveOriginal(file: File): Uri = saveRawJpeg(
         file = file,
         relativePath = "Pictures/Sierra Vision/Originals",
         prefix = "SIERRA_ORIGINAL"
     )
+
+    suspend fun recentFinals(limit: Int = 60): List<Uri> = withContext(Dispatchers.IO) {
+        val collection = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+        val projection = arrayOf(MediaStore.Images.Media._ID, MediaStore.Images.Media.DISPLAY_NAME)
+        val selection = "${MediaStore.Images.Media.RELATIVE_PATH}=?"
+        val args = arrayOf("Pictures/Sierra Vision/")
+        val result = ArrayList<Uri>(limit.coerceAtLeast(1))
+        context.contentResolver.query(
+            collection,
+            projection,
+            selection,
+            args,
+            "${MediaStore.Images.Media.DATE_ADDED} DESC"
+        )?.use { cursor ->
+            val idColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
+            val nameColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DISPLAY_NAME)
+            while (cursor.moveToNext() && result.size < limit) {
+                val name = cursor.getString(nameColumn).orEmpty()
+                if (!name.startsWith("SIERRA_") || name.startsWith("SIERRA_ORIGINAL_")) continue
+                result += ContentUris.withAppendedId(collection, cursor.getLong(idColumn))
+            }
+        }
+        result
+    }
 
     private fun cropToRatio(
         source: Bitmap,
@@ -213,7 +237,7 @@ class PhotoRepository(private val context: Context) {
 }
 
 object SierraCropPolicy {
-    private val ratios = mapOf(
+    private val ratios = linkedMapOf(
         "4:3" to (4 to 3),
         "3:2" to (3 to 2),
         "4:5" to (4 to 5),
