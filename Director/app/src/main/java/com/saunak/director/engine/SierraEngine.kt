@@ -9,6 +9,7 @@ import com.saunak.director.engine.experts.ExpertScheduler
 import com.saunak.director.engine.geometry.CoordinateGraph
 import com.saunak.director.engine.models.ModelArtifactStore
 import com.saunak.director.engine.models.ModelRegistry
+import com.saunak.director.engine.models.SierraShippingManifests
 import com.saunak.director.engine.quality.QualityCouncil
 import com.saunak.director.engine.reconstruction.EvidenceLedger
 import com.saunak.director.engine.runtime.ComputeHypervisor
@@ -35,6 +36,11 @@ class SierraEngine private constructor(context: Context) : AutoCloseable {
 
     private val onnxLazy = lazy(LazyThreadSafetyMode.SYNCHRONIZED) { OnnxRuntimeEngine() }
     val onnx: OnnxRuntimeEngine get() = onnxLazy.value
+
+    init {
+        // Registration is lightweight metadata only. Artifact download/session creation remain lazy.
+        SierraShippingManifests.registerAll(models)
+    }
 
     fun deviceTwin(refresh: Boolean = false): Result<DeviceTwin> {
         if (!refresh) twinRef.get()?.let { return Result.success(it) }
