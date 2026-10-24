@@ -15,7 +15,9 @@ object PrifBayesianFusion {
         observations: List<RawObservation>,
         degreesOfFreedom: Double,
         maxNormalizedResidual: Double,
-        conservativeAnchor: Boolean
+        conservativeAnchor: Boolean,
+        /** Optional semantic/occlusion prior. Return 0..1 support for this frame at this pixel. */
+        spatialSupport: ((frameIndex: Int, x: Int, y: Int) -> Double)? = null
     ): RadiancePosterior {
         require(observations.isNotEmpty())
         require(degreesOfFreedom in 1.0..30.0)
@@ -37,6 +39,8 @@ object PrifBayesianFusion {
         val supportCount = ByteArray(n)
 
         for (i in 0 until n) {
+            val x = i % reference.width
+            val y = i / reference.width
             val anchor = normalized.first()[i].toDouble()
             var weighted = 0.0
             var weightSum = 0.0
@@ -66,6 +70,7 @@ object PrifBayesianFusion {
                     obs.motionConfidence.toDouble() *
                     obs.saturationConfidence.toDouble()
                 if (conservativeAnchor && j != 0) physicalSupport *= 0.72
+                physicalSupport *= spatialSupport?.invoke(j, x, y)?.coerceIn(0.0, 1.0) ?: 1.0
                 val precision = 1.0 / scaledVariance
                 val weight = physicalSupport * student * precision
                 if (weight <= 0.0 || !weight.isFinite()) continue
