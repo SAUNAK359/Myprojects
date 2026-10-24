@@ -19,7 +19,6 @@ import androidx.camera.camera2.interop.CaptureRequestOptions
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
-import androidx.camera.core.ExperimentalImageCaptureOutputFormat
 import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
@@ -48,7 +47,7 @@ import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
-@OptIn(ExperimentalCamera2Interop::class, ExperimentalImageCaptureOutputFormat::class)
+@OptIn(ExperimentalCamera2Interop::class)
 class CameraEngine(private val context: Context) : AutoCloseable {
     private var provider: ProcessCameraProvider? = null
     private var camera: Camera? = null
@@ -395,7 +394,7 @@ class CameraEngine(private val context: Context) : AutoCloseable {
     suspend fun restoreUserState() {
         if (currentExtension != userExtension) bindInternal(userExtension)
         aiSetZoom(userZoom)
-        val e = camera?.cameraInfo?.exposureState
+        val e = camera?.cameraInfo.exposureState
         if (e?.isExposureCompensationSupported == true) {
             camera?.cameraControl?.setExposureCompensationIndex(
                 userEvIndex.coerceIn(e.exposureCompensationRange.lower, e.exposureCompensationRange.upper)
@@ -572,13 +571,11 @@ class CameraEngine(private val context: Context) : AutoCloseable {
         )
     }
 
-    @OptIn(ExperimentalImageCaptureOutputFormat::class)
     fun supportedImageCaptureFormats(): Set<Int> = camera?.let { current ->
         runCatching { ImageCapture.getImageCaptureCapabilities(current.cameraInfo).supportedOutputFormats.toSet() }
             .getOrDefault(setOf(ImageCapture.OUTPUT_FORMAT_JPEG))
     } ?: emptySet()
 
-    @OptIn(ExperimentalImageCaptureOutputFormat::class)
     fun rawJpegCaptureSupported(): Boolean {
         val caps = capabilities()
         return currentExtension == DirectorExtension.NONE &&
