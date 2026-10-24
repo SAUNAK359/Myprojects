@@ -9,8 +9,8 @@ import kotlin.math.max
 
 /**
  * Production-safe multi-frame executor built entirely on the already-certified CameraX JPEG path.
- * It is the universal fallback underneath optional RAW execution: no Camera2 session mutation,
- * no vendor-specific assumptions, and every frame remains independently decodable evidence.
+ * This is intentionally a smart burst selector, not RAW/HDR fusion: each frame remains an independent
+ * evidence image and capture failures never invalidate earlier successfully captured frames.
  */
 class SafeBurstExecutor(
     private val camera: CameraEngine,
@@ -29,6 +29,8 @@ class SafeBurstExecutor(
         val rejectedCount: Int,
         val requestedCount: Int,
         val executedCount: Int,
+        val truncatedByFailure: Boolean,
+        val allCatastrophic: Boolean,
         val rationale: String
     ) {
         init {
@@ -36,7 +38,9 @@ class SafeBurstExecutor(
             require(selected in frames)
             require(requestedCount >= 1)
             require(executedCount == frames.size)
+            require(executedCount in 1..requestedCount)
             require(rejectedCount in 0..executedCount)
+            require(allCatastrophic == frames.all { it.quality.catastrophic })
         }
     }
 
@@ -48,32 +52,48 @@ class SafeBurstExecutor(
         require(maxFrames in 1..MAX_ALLOWED_FRAMES)
         val requested = program?.frames?.size?.coerceAtLeast(1) ?: 1
         val count = requested.coerceAtMost(maxFrames)
-        val captured = ArrayList<CapturedFrame>(count)
+        require(storage.hasWorkingSpace(requiredWorkingBytes(count))) {
+            "Insufficient working storage for Sierra burst"
+        }
 
-        repeat(count) { index ->
-            // Each still is captured through the existing CameraX path. The first frame has already
-            // benefited from settled 3A; subsequent frames are naturally serialized by CameraX.
+        val captured = ArrayList<CapturedFrame>(count)
+        var truncated = false
+
+        for (index in 0 until count) {
             val file = storage.newAttempt(sessionId, 100 + index)
-            camera.capturePrivate(file)
-            val preview = storage.decodeOriented(file, QUALITY_DECODE_MAX_DIMENSION)
-            val quality = try {
-                PhotoQuality.analyze(preview)
-            } finally {
-                if (!preview.isRecycled) preview.recycle()
+            val frame = runCatching {
+                // CameraX serializes ImageCapture requests. We deliberately do not pretend that the
+                // CaptureProgram's RAW/manual exposure values are applied on this safe JPEG path.
+                camera.capturePrivate(file)
+                val preview = storage.decodeOriented(file, QUALITY_DECODE_MAX_DIMENSION)
+                val quality = try {
+                    PhotoQuality.analyze(preview)
+                } finally {
+                    if (!preview.isRecycled) preview.recycle()
+                }
+                CapturedFrame(
+                    file = file,
+                    quality = quality,
+                    score = frameScore(quality, index, count),
+                    index = index
+                )
             }
-            captured += CapturedFrame(
-                file = file,
-                quality = quality,
-                score = frameScore(quality, index, count),
-                index = index
-            )
+
+            if (frame.isFailure) {
+                runCatching { file.delete() }
+                if (captured.isEmpty()) throw frame.exceptionOrNull() ?: IllegalStateException("First burst frame failed")
+                truncated = true
+                break
+            }
+            captured += frame.getOrThrow()
         }
 
         val valid = captured.filterNot { it.quality.catastrophic }
+        val allCatastrophic = valid.isEmpty()
         val pool = if (valid.isNotEmpty()) valid else captured
         val selected = pool.maxWithOrNull(
             compareBy<CapturedFrame> { it.score }
-                .thenByDescending { -kotlin.math.abs(it.index - (count - 1) / 2.0) }
+                .thenByDescending { -kotlin.math.abs(it.index - (captured.size - 1) / 2.0) }
         ) ?: error("Sierra burst produced no frames")
 
         return Result(
@@ -82,10 +102,13 @@ class SafeBurstExecutor(
             rejectedCount = captured.count { it.quality.catastrophic },
             requestedCount = requested,
             executedCount = captured.size,
-            rationale = if (count == 1) {
-                "single certified CameraX evidence frame"
-            } else {
-                "best-evidence selection across $count serialized CameraX frames"
+            truncatedByFailure = truncated,
+            allCatastrophic = allCatastrophic,
+            rationale = when {
+                allCatastrophic -> "all captured frames failed the technical quality gate; preserve an untouched fallback"
+                truncated -> "burst stopped after a later capture failure; best valid earlier evidence retained"
+                captured.size == 1 -> "single certified CameraX evidence frame"
+                else -> "best-evidence selection across ${captured.size} serialized CameraX frames"
             }
         )
     }
@@ -108,9 +131,14 @@ class SafeBurstExecutor(
             ).coerceIn(0.0, 1.0)
     }
 
+    private fun requiredWorkingBytes(frameCount: Int): Long =
+        STORAGE_RESERVE_BYTES + frameCount.toLong() * ESTIMATED_MAX_JPEG_BYTES
+
     companion object {
         private const val QUALITY_DECODE_MAX_DIMENSION = 768
         private const val DEFAULT_MAX_FRAMES = 5
         private const val MAX_ALLOWED_FRAMES = 8
+        private const val ESTIMATED_MAX_JPEG_BYTES = 32L * 1024L * 1024L
+        private const val STORAGE_RESERVE_BYTES = 64L * 1024L * 1024L
     }
 }
