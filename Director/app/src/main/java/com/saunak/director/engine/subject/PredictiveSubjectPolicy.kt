@@ -1,7 +1,6 @@
 package com.saunak.director.engine.subject
 
 import kotlin.math.exp
-import kotlin.math.hypot
 
 /** Pure, hardware-independent decision output derived from one temporal subject track. */
 data class PredictiveSubjectDirective(
@@ -41,12 +40,9 @@ object PredictiveSubjectPolicy {
         val dy = predicted.y - current.y
         val autofocus = NormalizedPoint(focusBase.x + dx, focusBase.y + dy).clamped()
 
-        // AE/AWB should represent more of the subject than the eye/face AF target.
         val meterBase = track.mask?.centroid ?: current
         val metering = NormalizedPoint(meterBase.x + dx * 0.65, meterBase.y + dy * 0.65).clamped()
 
-        // Give a moving subject lead room: crop center moves slightly in the direction of travel,
-        // making the subject appear behind the center and leaving more image space ahead.
         val leadX = track.kinematics.velocityXPerSec.coerceIn(-1.0, 1.0) * LEAD_ROOM_GAIN
         val leadY = track.kinematics.velocityYPerSec.coerceIn(-0.6, 0.6) * VERTICAL_LEAD_GAIN
         val cropCenter = NormalizedPoint(predicted.x + leadX, predicted.y + leadY)
@@ -57,11 +53,15 @@ object PredictiveSubjectPolicy {
         val speedRisk = (speed / SPEED_REFERENCE).coerceIn(0.0, 1.0)
         val accelRisk = (acceleration / ACCEL_REFERENCE).coerceIn(0.0, 1.0)
         val kinematicRisk = (0.58 * speedRisk + 0.24 * accelRisk + 0.18 * edgeRisk).coerceIn(0.0, 1.0)
-        val confidence = (track.confidence * (1.0 - 0.65 * track.uncertainty)).coerceIn(0.0, 1.0)
+        val missPenalty = Math.pow(MISS_CONFIDENCE_DECAY, track.missedUpdates.toDouble())
+        val confidence = (track.confidence * (1.0 - 0.65 * track.uncertainty) * missPenalty).coerceIn(0.0, 1.0)
         val exposureMultiplier = exp(-EXPOSURE_GAIN * kinematicRisk)
             .coerceIn(MIN_EXPOSURE_MULTIPLIER, 1.0)
-        val retarget = confidence >= RETARGET_CONFIDENCE &&
-            (displacement >= RETARGET_DISPLACEMENT || speed >= RETARGET_SPEED || edgeRisk >= 0.45)
+        val firstAcquisition = track.updateCount == 1 && track.missedUpdates == 0 &&
+            confidence >= INITIAL_ACQUIRE_CONFIDENCE
+        val predictiveRetarget = displacement >= RETARGET_DISPLACEMENT || speed >= RETARGET_SPEED || edgeRisk >= 0.45
+        val retarget = track.missedUpdates == 0 && confidence >= RETARGET_CONFIDENCE &&
+            (firstAcquisition || predictiveRetarget)
 
         return PredictiveSubjectDirective(
             autofocusPoint = autofocus,
@@ -124,8 +124,10 @@ object PredictiveSubjectPolicy {
     private const val EXPOSURE_GAIN = 0.92
     private const val MIN_EXPOSURE_MULTIPLIER = 0.40
     private const val RETARGET_CONFIDENCE = 0.52
+    private const val INITIAL_ACQUIRE_CONFIDENCE = 0.64
     private const val RETARGET_DISPLACEMENT = 0.012
     private const val RETARGET_SPEED = 0.10
     private const val LEAD_ROOM_GAIN = 0.055
     private const val VERTICAL_LEAD_GAIN = 0.025
+    private const val MISS_CONFIDENCE_DECAY = 0.62
 }
