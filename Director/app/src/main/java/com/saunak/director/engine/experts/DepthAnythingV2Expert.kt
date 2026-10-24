@@ -5,6 +5,7 @@ import com.saunak.director.engine.SierraEngine
 import com.saunak.director.engine.device.ComputeBackend
 import com.saunak.director.engine.models.InstalledModelArtifact
 import com.saunak.director.engine.models.SierraShippingManifests
+import java.util.Arrays
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlin.math.ceil
@@ -64,8 +65,6 @@ class DepthAnythingV2Expert(
         contractInputSize(width, height, targetLongSide)
 
     private fun preprocess(source: Bitmap, width: Int, height: Int): FloatArray {
-        // Bitmap's filtered resampler is used as the portable baseline; accelerated bicubic input
-        // preprocessing can replace this without changing the model/expert contract.
         val scaled = if (source.width == width && source.height == height) source
         else Bitmap.createScaledBitmap(source, width, height, true)
         try {
@@ -132,11 +131,19 @@ class DepthAnythingV2Expert(
         sourceWidth: Int,
         sourceHeight: Int
     ): RelativeDepthMap {
-        val finite = raw.filter(Float::isFinite).sorted()
-        require(finite.isNotEmpty()) { "Depth model produced no finite values" }
-        val finiteFraction = finite.size.toDouble() / raw.size.toDouble()
-        val lo = percentile(finite, 0.02)
-        val hi = percentile(finite, 0.98)
+        // Keep percentile calculation primitive-only. FloatArray.filter()/sorted() boxes hundreds of
+        // thousands of values on a 518px depth map and creates avoidable camera-process GC pressure.
+        val finite = FloatArray(raw.size)
+        var finiteCount = 0
+        for (value in raw) {
+            if (value.isFinite()) finite[finiteCount++] = value
+        }
+        require(finiteCount > 0) { "Depth model produced no finite values" }
+        Arrays.sort(finite, 0, finiteCount)
+
+        val finiteFraction = finiteCount.toDouble() / raw.size.toDouble()
+        val lo = percentile(finite, finiteCount, 0.02)
+        val hi = percentile(finite, finiteCount, 0.98)
         val range = (hi - lo).coerceAtLeast(1e-6f)
         val normalized = FloatArray(raw.size) { index ->
             val value = raw[index]
@@ -154,8 +161,9 @@ class DepthAnythingV2Expert(
         )
     }
 
-    private fun percentile(sorted: List<Float>, fraction: Double): Float {
-        val index = ((sorted.size - 1) * fraction).toInt().coerceIn(0, sorted.lastIndex)
+    private fun percentile(sorted: FloatArray, count: Int, fraction: Double): Float {
+        require(count in 1..sorted.size)
+        val index = ((count - 1) * fraction).toInt().coerceIn(0, count - 1)
         return sorted[index]
     }
 
