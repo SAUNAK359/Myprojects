@@ -39,10 +39,10 @@ data class MotionEstimate(
     /** Planning uses the upper plausible bound, not an arbitrary fallback class. */
     val conservativeRisk: Double get() = (risk + uncertainty).coerceIn(0.0, 1.0)
 
-    fun toMotionClass(): MotionClass = when (conservativeRisk) {
-        in 0.0..<0.14 -> MotionClass.STATIC
-        in 0.14..<0.38 -> MotionClass.LOW
-        in 0.38..<0.68 -> MotionClass.MEDIUM
+    fun toMotionClass(): MotionClass = when {
+        conservativeRisk < 0.14 -> MotionClass.STATIC
+        conservativeRisk < 0.38 -> MotionClass.LOW
+        conservativeRisk < 0.68 -> MotionClass.MEDIUM
         else -> MotionClass.HIGH
     }
 
@@ -141,7 +141,7 @@ object MotionExposurePolicy {
     private const val MIN_EXPOSURE_NS = 4_000_000L
     private const val MAX_EXPOSURE_NS = 66_666_667L
     private const val TARGET_BLUR_PX = 1.5
-    private const val RISK_EXPONENT = 2.8134107 // maps risk=1 approximately to 4 ms from 66.7 ms
+    private const val RISK_EXPONENT = 2.8134107
 
     fun exposureCapNs(snapshot: MotionSnapshot): Long {
         val speed = max(snapshot.camera.vector.speedPxPerSecond, snapshot.subject.vector.speedPxPerSecond)
