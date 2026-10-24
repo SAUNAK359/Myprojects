@@ -252,6 +252,7 @@ workflows:
                 - director-gemini-v1
                 - director-sierra-v3
                 - director-sierra-v4-camera-os
+                - director-sierra-v5-temporal-scene
       - director-compile-no-ui:
           filters: *director_filter
       - director-compile-no-runtime:
