@@ -6,9 +6,9 @@ import com.saunak.director.ai.VlmRuntime
 import com.saunak.director.camera.CameraEngine
 import com.saunak.director.camera.DirectorExtension
 import com.saunak.director.camera.SierraCaptureBridge
-import com.saunak.director.engine.capture.CapturePath
 import com.saunak.director.engine.capture.CaptureProgram
 import com.saunak.director.engine.capture.SafeBurstExecutor
+import com.saunak.director.engine.device.CapturePath
 import com.saunak.director.engine.prif.PrifLiveCaptureExecutor
 import com.saunak.director.platform.ThermalMonitor
 import com.saunak.director.processing.InstantFinishEngine
