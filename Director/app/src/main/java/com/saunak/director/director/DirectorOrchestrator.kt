@@ -14,6 +14,7 @@ import com.saunak.director.processing.InstantFinishEngine
 import com.saunak.director.processing.LookProcessor
 import com.saunak.director.processing.LookSpec
 import com.saunak.director.processing.PhotoQuality
+import com.saunak.director.processing.TechnicalQuality
 import com.saunak.director.skills.SkillEngine
 import com.saunak.director.storage.PhotoRepository
 import com.saunak.director.storage.RecipeMemory
@@ -109,9 +110,6 @@ class DirectorOrchestrator(
                 faceExpert.detect(frame).getOrNull()
             }
             val sceneSignals = SierraSceneAnalyzer.analyze(frame, referenceQuality, planningCaps.lensFacing, expertFaces)
-            val captureProgram = withTimeoutOrNull(CAPTURE_PLAN_BUDGET_MS) {
-                captureBridge.plan(referenceQuality, sceneSignals, thermalPolicy).getOrNull()
-            }
 
             var mode = SierraMode.BETA
             val localPlan by lazy { SierraLocalPlanner.plan(referenceQuality, frame.width, frame.height, sceneSignals, planningCaps) }
@@ -151,9 +149,11 @@ class DirectorOrchestrator(
 
             emit(session, DirectorUiState(DirectorStage.CHECKING, mode == SierraMode.AI, "Sierra beta checking quality…", camera = camera.uiState(), sierraMode = mode, aspectRatio = plan.aspectRatio, aspectRatioOverride = aspectRatioOverride, sceneLabel = plan.scene, objective = plan.objective, keepOriginal = keepOriginal))
             val verification = camera.captureAnalysisFrame(FAST_VERIFY_TIMEOUT_MS)
+            var finalObservedQuality: TechnicalQuality = referenceQuality
             val score = if (verification != null) {
                 try {
                     val cameraQuality = PhotoQuality.analyze(verification)
+                    finalObservedQuality = cameraQuality
                     if (cameraQuality.catastrophic) {
                         tools.restoreUserState()
                         emit(session, DirectorUiState(DirectorStage.READY, mode == SierraMode.AI, "Hold steady or add light • try again", camera = camera.uiState(), sierraMode = mode, aspectRatioOverride = aspectRatioOverride, keepOriginal = keepOriginal))
@@ -166,6 +166,15 @@ class DirectorOrchestrator(
                     } finally { if (rendered !== verification && !rendered.isRecycled) rendered.recycle() }
                 } finally { if (!verification.isRecycled) verification.recycle() }
             } else CapturePolicy.combinedFallbackScore(plan.referenceScore, referenceQuality.heuristicScore)
+
+            // Capture planning is deliberately refreshed after camera mutations have settled. An OEM
+            // extension owns its private pipeline, so the universal JPEG fallback performs one final
+            // still instead of multiplying an HDR/Night/Bokeh capture into another burst.
+            val captureProgram = if (camera.snapshot().extension == DirectorExtension.NONE) {
+                withTimeoutOrNull(CAPTURE_PLAN_BUDGET_MS) {
+                    captureBridge.plan(finalObservedQuality, sceneSignals, thermalPolicy).getOrNull()
+                }
+            } else null
 
             approve(session, appliedPlan, look, score, mode, captureProgram)
             return null
@@ -202,7 +211,7 @@ class DirectorOrchestrator(
 
     private fun approve(session: Long, plan: PlanOutput, look: LookSpec, score: Double, mode: SierraMode, captureProgram: CaptureProgram?) {
         approved = ApprovedState(look, plan, score, mode, captureProgram)
-        val captureSuffix = captureProgram?.let { " • ${it.frames.size}f ${it.path.name.lowercase()}" }.orEmpty()
+        val captureSuffix = captureProgram?.takeIf { it.frames.size > 1 }?.let { " • ${it.frames.size}f smart burst" }.orEmpty()
         emit(session, DirectorUiState(DirectorStage.PREPARED, mode == SierraMode.AI, if (mode == SierraMode.AI) "Ready • Sierra AI + beta$captureSuffix" else "Ready • Sierra beta$captureSuffix", lastScore = score, camera = camera.uiState(), recipeCount = recipeMemory.count(), sierraMode = mode, aspectRatio = plan.aspectRatio, aspectRatioOverride = aspectRatioOverride, sceneLabel = plan.scene, objective = plan.objective, keepOriginal = keepOriginal))
     }
 
