@@ -211,25 +211,26 @@ class DirectorOrchestrator(
             val plannedFrames = state.captureProgram?.frames?.size ?: 1
             emit(session, DirectorUiState(DirectorStage.FINAL_CAPTURING, state.mode == SierraMode.AI, if (plannedFrames > 1) "Capturing computational burst…" else "Capturing full quality…", lastScore = state.score, camera = camera.uiState(), sierraMode = state.mode, aspectRatio = state.plan.aspectRatio, aspectRatioOverride = aspectRatioOverride, sceneLabel = state.plan.scene, objective = state.plan.objective, keepOriginal = keepOriginal))
             camera.awaitSettledState(550)
-            burst = safeBurstExecutor.execute(
+            val burstResult = safeBurstExecutor.execute(
                 sessionId = session,
                 program = state.captureProgram,
-                maxFrames = thermal.policy().maxBurstFrames
+                maxFrames = thermal.policy().maxSierraBurstFrames
             )
-            val selected = burst.selected.file
+            burst = burstResult
+            val selected = burstResult.selected.file
             val captureScore = combinedReadyScore(
                 state.score,
-                burst.selected.quality.heuristicScore,
-                burst.selected.score
+                burstResult.selected.quality.heuristicScore,
+                burstResult.selected.score
             )
-            emit(session, DirectorUiState(DirectorStage.SAVING, state.mode == SierraMode.AI, if (burst.executedCount > 1) "Sierra selected best evidence • finishing…" else "Sierra beta finishing…", lastScore = captureScore, camera = camera.uiState(), sierraMode = state.mode, aspectRatio = state.plan.aspectRatio, aspectRatioOverride = aspectRatioOverride, sceneLabel = state.plan.scene, objective = state.plan.objective, keepOriginal = keepOriginal))
+            emit(session, DirectorUiState(DirectorStage.SAVING, state.mode == SierraMode.AI, if (burstResult.executedCount > 1) "Sierra selected best evidence • finishing…" else "Sierra beta finishing…", lastScore = captureScore, camera = camera.uiState(), sierraMode = state.mode, aspectRatio = state.plan.aspectRatio, aspectRatioOverride = aspectRatioOverride, sceneLabel = state.plan.scene, objective = state.plan.objective, keepOriginal = keepOriginal))
             if (keepOriginal) runCatching { storage.saveOriginal(selected) }
             val uri = storage.saveFinal(selected, state.look, state.plan.aspectRatio, state.plan.cropCenterX, state.plan.cropCenterY)
             recipeMemory.remember(state.plan, captureScore)
             approved = null
             tools.restoreUserState()
-            val savedStatus = if (burst.executedCount > 1) {
-                "Sierra photo saved • best of ${burst.executedCount} frames"
+            val savedStatus = if (burstResult.executedCount > 1) {
+                "Sierra photo saved • best of ${burstResult.executedCount} frames"
             } else {
                 "Sierra photo saved"
             }
