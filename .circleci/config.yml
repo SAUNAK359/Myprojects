@@ -238,6 +238,7 @@ workflows:
             branches:
               only:
                 - director-gemini-v1
+                - director-sierra-v3
       - director-compile-no-ui:
           filters: *director_filter
       - director-compile-no-runtime:
