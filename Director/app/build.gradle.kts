@@ -100,6 +100,10 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
+    // Portable on-device expert runtime. Vendor-specific QNN/MediaTek/Samsung runtimes stay optional
+    // because their native EP libraries are not guaranteed to exist in the generic Android AAR.
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.31.0")
+
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
