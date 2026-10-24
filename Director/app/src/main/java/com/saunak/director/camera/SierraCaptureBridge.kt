@@ -6,6 +6,7 @@ import com.saunak.director.engine.capture.AutoExposureSnapshot
 import com.saunak.director.engine.capture.CaptureBudget
 import com.saunak.director.engine.capture.CaptureCompiler
 import com.saunak.director.engine.capture.CaptureObservation
+import com.saunak.director.engine.capture.CaptureProgram
 import com.saunak.director.engine.motion.MotionExposurePolicy
 import com.saunak.director.engine.state.SceneState
 import com.saunak.director.engine.state.SceneStateAssembler
