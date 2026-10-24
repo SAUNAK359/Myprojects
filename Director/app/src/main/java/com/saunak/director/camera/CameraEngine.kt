@@ -2,6 +2,7 @@ package com.saunak.director.camera
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.ImageFormat
 import android.graphics.Matrix
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
@@ -11,8 +12,10 @@ import android.hardware.camera2.CaptureResult
 import android.hardware.camera2.TotalCaptureResult
 import android.util.Log
 import android.view.Surface
+import androidx.camera.camera2.interop.Camera2CameraControl
 import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.camera2.interop.Camera2Interop
+import androidx.camera.camera2.interop.CaptureRequestOptions
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
@@ -20,6 +23,7 @@ import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
+import androidx.camera.core.ImageProxy
 import androidx.camera.core.MeteringPointFactory
 import androidx.camera.core.Preview
 import androidx.camera.extensions.ExtensionMode
@@ -29,6 +33,14 @@ import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import com.google.common.util.concurrent.ListenableFuture
+import java.io.BufferedOutputStream
+import java.io.DataOutputStream
+import java.io.File
+import java.io.FileOutputStream
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
@@ -36,11 +48,6 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
-import java.io.File
-import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
-import kotlin.coroutines.resume
-import kotlin.coroutines.resumeWithException
 
 @OptIn(ExperimentalCamera2Interop::class)
 class CameraEngine(private val context: Context) : AutoCloseable {
@@ -132,16 +139,21 @@ class CameraEngine(private val context: Context) : AutoCloseable {
         return builder.build().also { it.surfaceProvider = view.surfaceProvider }
     }
 
-    private fun buildImageCapture(view: PreviewView): ImageCapture = ImageCapture.Builder()
-        .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+    private fun buildImageCapture(
+        view: PreviewView,
+        outputFormat: Int = ImageCapture.OUTPUT_FORMAT_JPEG,
+        captureMode: Int = ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY
+    ): ImageCapture = ImageCapture.Builder()
+        .setCaptureMode(captureMode)
+        .setOutputFormat(outputFormat)
         .setTargetRotation(view.display?.rotation ?: Surface.ROTATION_0)
         .build()
-        .also { it.flashMode = flashModeToCameraX(userFlash) }
+        .also { it.flashMode = if (outputFormat == ImageCapture.OUTPUT_FORMAT_RAW_JPEG) ImageCapture.FLASH_MODE_OFF else flashModeToCameraX(userFlash) }
 
     private fun buildImageAnalysis(view: PreviewView): ImageAnalysis {
         val analysis = ImageAnalysis.Builder()
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-            .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+            .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
             .setTargetRotation(view.display?.rotation ?: Surface.ROTATION_0)
             .build()
 
@@ -251,6 +263,25 @@ class CameraEngine(private val context: Context) : AutoCloseable {
             }
             currentExtension = DirectorExtension.NONE
         }
+    }
+
+    private fun bindRawJpegMode() {
+        val p = checkNotNull(provider)
+        val lifecycleOwner = checkNotNull(owner)
+        val view = checkNotNull(boundView)
+        check(currentExtension == DirectorExtension.NONE) { "RAW capture cannot replace an active OEM extension" }
+        clearAnalysisUseCase()
+        p.unbindAll()
+        resetCaptureTelemetry()
+
+        preview = buildPreview(view, interop = true)
+        imageCapture = buildImageCapture(
+            view = view,
+            outputFormat = ImageCapture.OUTPUT_FORMAT_RAW_JPEG,
+            captureMode = ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY
+        )
+        camera = p.bindToLifecycle(lifecycleOwner, baseSelector(), preview, imageCapture)
+        currentExtension = DirectorExtension.NONE
     }
 
     /** Returns one fresh preview frame. No full-resolution still is captured or written to disk. */
@@ -474,6 +505,18 @@ class CameraEngine(private val context: Context) : AutoCloseable {
         )
     }
 
+    fun supportedImageCaptureFormats(): Set<Int> = camera?.let { c ->
+        runCatching { ImageCapture.getImageCaptureCapabilities(c.cameraInfo).supportedOutputFormats.toSet() }.getOrDefault(emptySet())
+    } ?: emptySet()
+
+    fun supportsComputationalRawBurst(): Boolean {
+        val caps = capabilities()
+        return currentExtension == DirectorExtension.NONE &&
+            !userTorch && userFlash == StillFlashMode.OFF &&
+            caps.rawSupported && caps.manualSensorSupported &&
+            ImageCapture.OUTPUT_FORMAT_RAW_JPEG in supportedImageCaptureFormats()
+    }
+
     private fun focusMeteringSupported(c: Camera): Boolean {
         val view = boundView ?: return false
         if (view.width <= 0 || view.height <= 0) return false
@@ -559,6 +602,167 @@ class CameraEngine(private val context: Context) : AutoCloseable {
         captureToFile(file)
     }
 
+    suspend fun captureRawJpegBurst(specs: List<ManualRawFrameSpec>): RawJpegBurstCapture = captureMutex.withLock {
+        require(specs.isNotEmpty() && specs.size <= MAX_RAW_BURST_FRAMES) { "RAW burst must contain 1..$MAX_RAW_BURST_FRAMES frames" }
+        check(supportsComputationalRawBurst()) { "Current camera/session is not certified for Sierra RAW+JPEG" }
+        val caps = capabilities()
+        specs.forEach { spec ->
+            caps.exposureTimeMinNs?.let { require(spec.exposureTimeNs >= it) }
+            caps.exposureTimeMaxNs?.let { require(spec.exposureTimeNs <= it) }
+            caps.isoMin?.let { require(spec.sensitivityIso >= it) }
+            caps.isoMax?.let { require(spec.sensitivityIso <= it) }
+        }
+
+        val workingDir = File(context.cacheDir, "sierra_raw_v4/${System.currentTimeMillis()}_${System.nanoTime()}").apply { mkdirs() }
+        val frames = ArrayList<RawJpegCapturedFrame>(specs.size)
+        var restored = false
+        try {
+            bindRawJpegMode()
+            aiSetZoom(userZoom)
+            awaitSettledState(900)
+
+            specs.forEachIndexed { index, spec ->
+                applyManualSensor(spec)
+                val rawFile = File(workingDir, "frame_${index.toString().padStart(2, '0')}.sraw")
+                val jpegFile = File(workingDir, "frame_${index.toString().padStart(2, '0')}.jpg")
+                captureRawJpegMemoryPair(rawFile, jpegFile, spec)
+                frames += RawJpegCapturedFrame(
+                    index = index,
+                    rawFile = rawFile,
+                    jpegFile = jpegFile,
+                    requested = spec,
+                    observed = sensorTelemetry()
+                )
+            }
+            RawJpegBurstCapture(workingDir, frames)
+        } catch (t: Throwable) {
+            runCatching { workingDir.deleteRecursively() }
+            throw t
+        } finally {
+            runCatching { clearManualSensorInterop() }
+            runCatching {
+                bindInternal(userExtension)
+                restored = true
+            }
+            if (restored) runCatching { restoreUserState() }
+        }
+    }
+
+    private suspend fun applyManualSensor(spec: ManualRawFrameSpec) {
+        val c = checkNotNull(camera) { "Camera not ready" }
+        val options = CaptureRequestOptions.Builder()
+            .setCaptureRequestOption(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
+            .setCaptureRequestOption(CaptureRequest.SENSOR_EXPOSURE_TIME, spec.exposureTimeNs)
+            .setCaptureRequestOption(CaptureRequest.SENSOR_SENSITIVITY, spec.sensitivityIso)
+            .build()
+        Camera2CameraControl.from(c.cameraControl).setCaptureRequestOptions(options).await()
+    }
+
+    private suspend fun clearManualSensorInterop() {
+        val c = camera ?: return
+        Camera2CameraControl.from(c.cameraControl).clearCaptureRequestOptions().await()
+    }
+
+    private suspend fun captureRawJpegMemoryPair(rawFile: File, jpegFile: File, spec: ManualRawFrameSpec) =
+        suspendCancellableCoroutine<Unit> { cont ->
+            val capture = imageCapture ?: return@suspendCancellableCoroutine cont.resumeWithException(
+                IllegalStateException("RAW camera not ready")
+            )
+            capture.targetRotation = boundView?.display?.rotation ?: Surface.ROTATION_0
+            val gate = Any()
+            var rawSaved = false
+            var jpegSaved = false
+            var failed = false
+
+            fun finishIfComplete() {
+                synchronized(gate) {
+                    if (!failed && rawSaved && jpegSaved && cont.isActive) cont.resume(Unit)
+                }
+            }
+
+            capture.takePicture(
+                ContextCompat.getMainExecutor(context),
+                object : ImageCapture.OnImageCapturedCallback() {
+                    override fun onCaptureSuccess(image: ImageProxy) {
+                        try {
+                            when (image.format) {
+                                ImageFormat.RAW_SENSOR -> {
+                                    persistRawSensor(image, rawFile, spec)
+                                    synchronized(gate) { rawSaved = true }
+                                }
+                                ImageFormat.JPEG, ImageFormat.JPEG_R -> {
+                                    persistCompressedImage(image, jpegFile)
+                                    synchronized(gate) { jpegSaved = true }
+                                }
+                                else -> error("Unexpected RAW+JPEG callback format ${image.format}")
+                            }
+                            finishIfComplete()
+                        } catch (t: Throwable) {
+                            synchronized(gate) { failed = true }
+                            runCatching { rawFile.delete() }
+                            runCatching { jpegFile.delete() }
+                            if (cont.isActive) cont.resumeWithException(t)
+                        } finally {
+                            image.close()
+                        }
+                    }
+
+                    override fun onError(exception: ImageCaptureException) {
+                        synchronized(gate) { failed = true }
+                        runCatching { rawFile.delete() }
+                        runCatching { jpegFile.delete() }
+                        if (cont.isActive) cont.resumeWithException(exception)
+                    }
+                }
+            )
+            cont.invokeOnCancellation {
+                runCatching { rawFile.delete() }
+                runCatching { jpegFile.delete() }
+            }
+        }
+
+    private fun persistRawSensor(image: ImageProxy, file: File, spec: ManualRawFrameSpec) {
+        require(image.format == ImageFormat.RAW_SENSOR) { "Expected RAW_SENSOR" }
+        val plane = image.planes.singleOrNull() ?: error("RAW_SENSOR must expose one plane")
+        val source = plane.buffer.duplicate()
+        file.parentFile?.mkdirs()
+        DataOutputStream(BufferedOutputStream(FileOutputStream(file), IO_BUFFER_BYTES)).use { out ->
+            out.writeUTF(SRAW_MAGIC)
+            out.writeInt(SRAW_VERSION)
+            out.writeInt(image.width)
+            out.writeInt(image.height)
+            out.writeInt(plane.rowStride)
+            out.writeInt(plane.pixelStride)
+            out.writeInt(image.imageInfo.rotationDegrees)
+            out.writeLong(spec.exposureTimeNs)
+            out.writeInt(spec.sensitivityIso)
+            out.writeLong(lastSensorTimestampNs ?: 0L)
+            out.writeInt(source.remaining())
+            val scratch = ByteArray(minOf(IO_BUFFER_BYTES, maxOf(1, source.remaining())))
+            while (source.hasRemaining()) {
+                val count = minOf(source.remaining(), scratch.size)
+                source.get(scratch, 0, count)
+                out.write(scratch, 0, count)
+            }
+        }
+        check(file.isFile && file.length() > 32L) { "RAW sensor artifact was not persisted" }
+    }
+
+    private fun persistCompressedImage(image: ImageProxy, file: File) {
+        val plane = image.planes.singleOrNull() ?: error("Compressed image must expose one plane")
+        val source = plane.buffer.duplicate()
+        file.parentFile?.mkdirs()
+        BufferedOutputStream(FileOutputStream(file), IO_BUFFER_BYTES).use { out ->
+            val scratch = ByteArray(minOf(IO_BUFFER_BYTES, maxOf(1, source.remaining())))
+            while (source.hasRemaining()) {
+                val count = minOf(source.remaining(), scratch.size)
+                source.get(scratch, 0, count)
+                out.write(scratch, 0, count)
+            }
+        }
+        check(file.isFile && file.length() > 0L) { "JPEG safety image was not persisted" }
+    }
+
     private suspend fun captureToFile(file: File): File = suspendCancellableCoroutine { cont ->
         val capture = imageCapture ?: return@suspendCancellableCoroutine cont.resumeWithException(
             IllegalStateException("Camera not ready")
@@ -588,6 +792,11 @@ class CameraEngine(private val context: Context) : AutoCloseable {
     }
 
     companion object {
+        const val SRAW_MAGIC = "SIERRA_RAW_SENSOR"
+        const val SRAW_VERSION = 1
+        private const val IO_BUFFER_BYTES = 1024 * 1024
+        private const val MAX_RAW_BURST_FRAMES = 8
+
         internal fun surfaceRotationToDegrees(rotation: Int): Int = when (rotation) {
             Surface.ROTATION_0 -> 0
             Surface.ROTATION_90 -> 90
@@ -596,6 +805,46 @@ class CameraEngine(private val context: Context) : AutoCloseable {
             else -> 0
         }
     }
+}
+
+data class ManualRawFrameSpec(
+    val exposureTimeNs: Long,
+    val sensitivityIso: Int,
+    val role: String,
+    val evOffset: Double
+) {
+    init {
+        require(exposureTimeNs > 0)
+        require(sensitivityIso > 0)
+        require(role.isNotBlank())
+        require(evOffset.isFinite())
+    }
+}
+
+data class RawJpegCapturedFrame(
+    val index: Int,
+    val rawFile: File,
+    val jpegFile: File,
+    val requested: ManualRawFrameSpec,
+    val observed: CameraSensorTelemetry?
+) {
+    init {
+        require(index >= 0)
+        require(rawFile.isFile && rawFile.length() > 0)
+        require(jpegFile.isFile && jpegFile.length() > 0)
+    }
+}
+
+data class RawJpegBurstCapture(
+    val workingDirectory: File,
+    val frames: List<RawJpegCapturedFrame>
+) {
+    init {
+        require(workingDirectory.isDirectory)
+        require(frames.isNotEmpty())
+    }
+
+    fun cleanup() { runCatching { workingDirectory.deleteRecursively() } }
 }
 
 data class CameraSensorTelemetry(
