@@ -8,7 +8,6 @@ import com.saunak.director.camera.DirectorExtension
 import com.saunak.director.camera.SierraCaptureBridge
 import com.saunak.director.engine.capture.CaptureProgram
 import com.saunak.director.engine.capture.SafeBurstExecutor
-import com.saunak.director.engine.experts.YuNetFaceExpert
 import com.saunak.director.platform.ThermalMonitor
 import com.saunak.director.processing.InstantFinishEngine
 import com.saunak.director.processing.LookProcessor
@@ -37,7 +36,7 @@ class DirectorOrchestrator(
     private val onState: (DirectorUiState) -> Unit
 ) {
     private val generation = AtomicLong(0L)
-    private val faceExpert = YuNetFaceExpert()
+    private val perception = SierraPerceptionFabric()
     private val captureBridge = SierraCaptureBridge(camera)
     private val safeBurstExecutor = SafeBurstExecutor(camera, storage)
 
@@ -106,10 +105,18 @@ class DirectorOrchestrator(
             }
 
             val planningCaps = camera.capabilities()
-            val expertFaces = withTimeoutOrNull(LOCAL_FACE_BUDGET_MS) {
-                faceExpert.detect(frame).getOrNull()
+            val snapshot = camera.snapshot()
+            val perceptionSnapshot = withTimeoutOrNull(LOCAL_PERCEPTION_BUDGET_MS) {
+                perception.analyze(
+                    frame = frame,
+                    quality = referenceQuality,
+                    lensFacing = planningCaps.lensFacing,
+                    zoomRatio = snapshot.zoomRatio,
+                    thermalPressure = thermalPolicy.thermalPressure
+                )
             }
-            val sceneSignals = SierraSceneAnalyzer.analyze(frame, referenceQuality, planningCaps.lensFacing, expertFaces)
+            val sceneSignals = perceptionSnapshot?.signals
+                ?: SierraSceneAnalyzer.analyze(frame, referenceQuality, planningCaps.lensFacing)
 
             var mode = SierraMode.BETA
             val localPlan by lazy { SierraLocalPlanner.plan(referenceQuality, frame.width, frame.height, sceneSignals, planningCaps) }
@@ -167,9 +174,6 @@ class DirectorOrchestrator(
                 } finally { if (!verification.isRecycled) verification.recycle() }
             } else CapturePolicy.combinedFallbackScore(plan.referenceScore, referenceQuality.heuristicScore)
 
-            // Capture planning is deliberately refreshed after camera mutations have settled. An OEM
-            // extension owns its private pipeline, so the universal JPEG fallback performs one final
-            // still instead of multiplying an HDR/Night/Bokeh capture into another burst.
             val captureProgram = if (camera.snapshot().extension == DirectorExtension.NONE) {
                 withTimeoutOrNull(CAPTURE_PLAN_BUDGET_MS) {
                     captureBridge.plan(finalObservedQuality, sceneSignals, thermalPolicy).getOrNull()
@@ -308,7 +312,7 @@ class DirectorOrchestrator(
         private const val FAST_FRAME_TIMEOUT_MS = 650L
         private const val FAST_VERIFY_TIMEOUT_MS = 500L
         private const val LOCAL_SETTLE_TIMEOUT_MS = 650L
-        private const val LOCAL_FACE_BUDGET_MS = 220L
+        private const val LOCAL_PERCEPTION_BUDGET_MS = 520L
         private const val CAPTURE_PLAN_BUDGET_MS = 120L
     }
 }
