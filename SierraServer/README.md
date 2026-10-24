@@ -34,40 +34,94 @@ The Android APK remains useful without this service through Sierra β. Cloud cre
 
 A provider response alone never consumes a credit.
 
-## Quick start (Windows/Linux/macOS with Docker Desktop)
+## Secure quick start with Docker Desktop
 
 ```bash
 cd SierraServer
 cp .env.example .env
 python scripts/generate_secrets.py
-# copy the generated secrets into .env, then set admin credentials
-
-docker compose up --build -d
 ```
 
-Open:
+Copy the generated `SIERRA_DB_PASSWORD`, `SIERRA_JWT_SECRET`, and `SIERRA_PROVIDER_MASTER_KEY` values into your local `.env`. Never paste those values into GitHub, chat, screenshots, or issue trackers.
 
-- API: `http://localhost:8080`
-- API docs: `http://localhost:8080/docs`
-- health: `http://localhost:8080/health/ready`
-- admin login: `http://localhost:8080/admin/login`
+Start the database first:
 
-For customer devices outside your LAN, do **not** expose port 8080 directly. Put the server behind HTTPS (Caddy profile, a secure tunnel, or another reverse proxy) and set the APK API base URL to that HTTPS origin.
+```bash
+docker compose up -d db
+```
+
+Build the API image and run migrations once:
+
+```bash
+docker compose build api
+docker compose run --rm api alembic upgrade head
+```
+
+Create the first administrator securely. The password is read interactively, hashed immediately, and is never written to `.env`:
+
+```bash
+docker compose run --rm api python scripts/bootstrap_admin.py
+```
+
+Start Sierra Server:
+
+```bash
+docker compose up -d api
+```
+
+Open locally:
+
+- API: `http://127.0.0.1:8080`
+- API docs in development only: `http://127.0.0.1:8080/docs`
+- health: `http://127.0.0.1:8080/health/ready`
+- admin: `http://127.0.0.1:8080/admin/login`
+
+Before public exposure, switch `SIERRA_ENV=production`, configure `SIERRA_PUBLIC_BASE_URL=https://...`, restart the API, and verify `/health/ready` locally.
+
+## Public access
+
+For customer devices outside your LAN, do **not** expose port `8080`, PostgreSQL, or Docker daemon ports directly to the internet. The preferred laptop deployment is an outbound-only Cloudflare Tunnel using the `cloudflared` Compose profile.
+
+Keep the API host binding at `127.0.0.1:8080`. Configure the public tunnel hostname to proxy to `http://api:8080` on the Docker `edge` network. No home-router port forwarding is required.
+
+For the administrator dashboard, prefer a Cloudflare Access policy or use the local `http://127.0.0.1:8080/admin/login` page from the server laptop. Do not publish an unprotected admin dashboard URL merely because API authentication exists.
 
 ## Provider setup
 
-Provider credentials are not compiled into the APK. Sign into the admin dashboard/API and add one or more OpenAI-compatible multimodal routes (Groq/OpenRouter/NVIDIA/Gemini OpenAI-compatible endpoints or another compatible service). The API key is encrypted before it is written to PostgreSQL.
+Provider credentials are never compiled into the APK. Sign into the admin dashboard/API and add OpenAI-compatible multimodal routes. Provider API keys are Fernet-encrypted before being written to PostgreSQL and are never returned to the browser.
+
+Provider endpoints must use public HTTPS port 443. Local/private/link-local/reserved network targets are rejected to reduce SSRF risk.
+
+## Security controls
+
+- `.env` and runtime files are Git-ignored
+- API binds to localhost on the host machine
+- PostgreSQL is isolated on an internal Docker network
+- API container runs as a non-root user
+- passwords use Argon2
+- refresh tokens are random and stored only as hashes
+- provider API keys are encrypted at rest with a separate Fernet key
+- authentication/job/admin endpoints have request-rate limits
+- login errors are deliberately generic to reduce account enumeration
+- provider egress rejects private/local network destinations
+- uploaded analysis images have byte and pixel/decompression limits
+- analysis frames and temporary context are removed after processing
+- production OpenAPI/docs are disabled
+- browser security headers and no-store headers protect auth/admin responses
+- CI runs import/static/unit checks plus a dependency vulnerability audit
 
 ## Production rules
 
 - keep `.env` outside Git
-- use unique `JWT_SECRET` and `PROVIDER_MASTER_KEY`
-- run PostgreSQL on local/private networking only
-- expose the API only through HTTPS
-- back up PostgreSQL, not temporary analysis images
-- use one stable public hostname for the APK
-- configure router/firewall/tunnel auto-start on the laptop
-- use a UPS if this laptop is intended to be the production origin
+- use unique generated `JWT_SECRET`, `PROVIDER_MASTER_KEY`, and database password
+- back up PostgreSQL; analysis images are temporary and should not be backed up
+- use one stable HTTPS hostname for the APK
+- configure Docker Desktop/tunnel auto-start on the laptop
+- disable automatic sleep/hibernate while serving customers
+- use a UPS if the laptop is intended to be the production origin
+- periodically test database restore, not only backup creation
+- rotate provider API keys when staff/access changes
+- never copy production secrets into support logs
 
 ## Server vs APK responsibilities
 
