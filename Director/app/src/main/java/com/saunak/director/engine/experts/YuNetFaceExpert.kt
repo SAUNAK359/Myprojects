@@ -23,6 +23,7 @@ class YuNetFaceExpert(
     }
 
     @Volatile private var artifact: InstalledModelArtifact? = null
+    @Volatile private var selectedBackend: ComputeBackend? = null
 
     suspend fun prepare(): Result<Unit> = withContext(Dispatchers.IO) {
         val installed = engine.modelArtifacts.ensure(SierraShippingManifests.yunet2026May)
@@ -39,7 +40,7 @@ class YuNetFaceExpert(
 
             val size = chooseInputSize(source.width, source.height, inputLongSide)
             val tensor = preprocess(source, size.first, size.second)
-            val outputs = runWithFallback(model, tensor, size.first, size.second)
+            val outputs = runWithCertifiedFallback(model, tensor, size.first, size.second)
             YuNetDecoder.decode(
                 outputs = outputs,
                 inputWidth = size.first,
@@ -52,22 +53,44 @@ class YuNetFaceExpert(
         }
     }
 
-    private fun runWithFallback(
+    private fun runWithCertifiedFallback(
         model: InstalledModelArtifact,
         tensor: FloatArray,
         width: Int,
         height: Int
     ): Map<String, FloatArray> {
         val shape = longArrayOf(1, 3, height.toLong(), width.toLong())
-        val requested = OUTPUTS
-        // NNAPI is attempted first because the manifest prefers it, but the portable CPU/XNNPACK
-        // path is always retained as the correctness fallback for unsupported mobile operators.
-        val nnapi = runCatching {
-            engine.onnx.runFloatTensor(model, ComputeBackend.NNAPI, INPUT, tensor, shape, requested)
+        selectedBackend?.let { backend ->
+            val warm = runCatching { run(model, backend, tensor, shape) }
+            if (warm.isSuccess) return warm.getOrThrow()
+            // A previously valid accelerator can disappear/reset under driver or thermal faults.
+            selectedBackend = null
+            engine.onnx.unload(model.manifest.id)
         }
-        if (nnapi.isSuccess) return nnapi.getOrThrow()
-        return engine.onnx.runFloatTensor(model, ComputeBackend.CPU_XNNPACK, INPUT, tensor, shape, requested)
+
+        for (backend in BACKEND_PROBE_ORDER) {
+            val attempt = runCatching { run(model, backend, tensor, shape) }
+            if (attempt.isSuccess) {
+                selectedBackend = backend
+                return attempt.getOrThrow()
+            }
+        }
+        error("YuNet has no usable Sierra ONNX backend on this device")
     }
+
+    private fun run(
+        model: InstalledModelArtifact,
+        backend: ComputeBackend,
+        tensor: FloatArray,
+        shape: LongArray
+    ): Map<String, FloatArray> = engine.onnx.runFloatTensor(
+        artifact = model,
+        backend = backend,
+        inputName = INPUT,
+        values = tensor,
+        shape = shape,
+        requestedOutputs = OUTPUTS
+    )
 
     internal fun chooseInputSize(width: Int, height: Int, longSide: Int = inputLongSide): Pair<Int, Int> {
         require(width > 0 && height > 0 && longSide >= 32)
@@ -100,6 +123,7 @@ class YuNetFaceExpert(
 
     companion object {
         private const val INPUT = "input"
+        private val BACKEND_PROBE_ORDER = listOf(ComputeBackend.NNAPI, ComputeBackend.CPU_XNNPACK)
         private val OUTPUTS = buildSet {
             for (stride in intArrayOf(8, 16, 32)) {
                 add("cls_$stride")
