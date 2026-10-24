@@ -4,6 +4,8 @@ from typing import Literal
 
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
+from app.network_security import validate_public_https_endpoint
+
 SUPPORTED_RATIOS = {"4:3", "3:2", "4:5", "1:1", "16:9", "9:16", "2.39:1"}
 
 
@@ -151,9 +153,7 @@ class ProviderUpsert(BaseModel):
     @field_validator("endpoint")
     @classmethod
     def endpoint_https(cls, value: str) -> str:
-        if not value.startswith("https://"):
-            raise ValueError("provider endpoint must use HTTPS")
-        return value.rstrip("/")
+        return validate_public_https_endpoint(value)
 
 
 class ProviderView(BaseModel):
