@@ -21,11 +21,12 @@ data class RawSensorFrame(
     val timestampNs: Long,
     val raw: RawPlane,
     val rotationDegrees: Int,
-    val telemetry: CameraSensorTelemetry?
+    val metadata: RawCaptureMetadata?
 ) {
     init {
         require(timestampNs > 0)
         require(rotationDegrees in setOf(0, 90, 180, 270))
+        require(metadata == null || metadata.telemetry.sensorTimestampNs == timestampNs)
     }
 }
 
@@ -52,8 +53,7 @@ object RawSensorExtractor {
     fun extract(
         image: ImageProxy,
         calibration: RawSensorCalibration,
-        dynamicBlackLevel: FloatArray? = null,
-        telemetry: CameraSensorTelemetry? = null
+        metadata: RawCaptureMetadata? = null
     ): RawSensorFrame {
         require(image.format == ImageFormat.RAW_SENSOR) { "Expected RAW_SENSOR ImageProxy, got ${image.format}" }
         require(image.width > 1 && image.height > 1)
@@ -73,7 +73,7 @@ object RawSensorExtractor {
             }
         }
 
-        val dynamic = dynamicBlackLevel
+        val dynamic = metadata?.dynamicBlackLevel
             ?.takeIf { it.size == 4 && it.all { value -> value.isFinite() && value >= 0f } }
             ?.let { CfaBlackLevel(it.copyOf()) }
             ?: calibration.staticBlackLevel
@@ -90,7 +90,7 @@ object RawSensorExtractor {
                 blackLevelPattern = dynamic
             ),
             rotationDegrees = image.imageInfo.rotationDegrees,
-            telemetry = telemetry
+            metadata = metadata
         )
     }
 
