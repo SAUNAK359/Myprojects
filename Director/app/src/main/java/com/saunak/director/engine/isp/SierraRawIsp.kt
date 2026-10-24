@@ -1,6 +1,8 @@
 package com.saunak.director.engine.isp
 
 import android.graphics.Bitmap
+import com.saunak.director.camera.FrameCalibrationLedger
+import com.saunak.director.camera.FrameSensorCalibration
 import com.saunak.director.camera.RawJpegBurstCapture
 import com.saunak.director.engine.device.CameraModuleTwin
 import com.saunak.director.engine.device.CfaPattern
@@ -13,7 +15,7 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
 
-/** Immutable RAW rendering parameters derived from sensor evidence and Camera2 calibration. */
+/** Immutable RAW rendering parameters derived from exact sensor evidence and Camera2 calibration. */
 data class SierraIspPlan(
     val redGain: Double,
     val greenGain: Double,
@@ -22,7 +24,9 @@ data class SierraIspPlan(
     val cameraToSrgb: DoubleArray,
     val exposureScale: Double,
     val blackPoint: Double,
-    val confidence: Double
+    val confidence: Double,
+    val usedExactAwb: Boolean = false,
+    val usedExactColorTransform: Boolean = false
 ) {
     init {
         require(redGain in 0.25..6.0 && greenGain in 0.25..6.0 && blueGain in 0.25..6.0)
@@ -34,17 +38,29 @@ data class SierraIspPlan(
 }
 
 /**
- * Sensor-statistics ISP planner. White balance is estimated in RAW space from unclipped samples,
- * then Camera2 forward colorimetry is used when available. No semantic/generative modification is
- * performed in this deterministic truth path.
+ * Sensor-statistics ISP planner.
+ *
+ * The preferred path uses the exact Camera2 AWB gains and sensor->linear-sRGB transform reported for
+ * the reference sensor timestamp. Android documents these as the Bayer-domain gains and post-demosaic
+ * matrix used by the camera color pipeline. When a vendor omits either value Sierra falls back to
+ * RAW-statistics white balance and static Camera2 forward calibration rather than inventing metadata.
  */
 object SierraRawIspPlanner {
     fun plan(capture: RawJpegBurstCapture, camera: CameraModuleTwin): SierraIspPlan {
-        val referenceIndex = capture.frames.indices.minByOrNull { kotlin.math.abs(capture.frames[it].requested.evOffset) } ?: 0
+        val referenceIndex = capture.frames.indices.minByOrNull {
+            kotlin.math.abs(capture.frames[it].requested.evOffset)
+        } ?: 0
         SierraRawContainer.open(capture.frames[referenceIndex].rawFile).use { raw ->
-            val white = camera.whiteLevel?.toDouble()?.takeIf { it > 0 } ?: error("Sensor white level unavailable")
+            val timestamp = capture.frames[referenceIndex].observed?.sensorTimestampNs
+                ?: raw.header.sensorTimestampNs
+            val exactCalibration = timestamp.takeIf { it > 0 }?.let(FrameCalibrationLedger::find)
+            val white = (exactCalibration?.dynamicWhiteLevel ?: camera.whiteLevel)
+                ?.toDouble()?.takeIf { it > 0 } ?: error("Sensor white level unavailable")
             val targetSamples = 12_000
-            val stride = max(2, kotlin.math.sqrt((raw.header.width.toDouble() * raw.header.height) / targetSamples).toInt())
+            val stride = max(
+                2,
+                kotlin.math.sqrt((raw.header.width.toDouble() * raw.header.height) / targetSamples).toInt()
+            )
             val channelLogs = Array(3) { DoubleArray(targetSamples) }
             val counts = IntArray(3)
             val luminance = DoubleArray(targetSamples)
@@ -54,8 +70,9 @@ object SierraRawIspPlanner {
             while (y < raw.header.height) {
                 var x = 0
                 while (x < raw.header.width) {
-                    val black = blackLevel(camera, x, y).toDouble()
-                    val signal = ((raw.sampleUnsigned16(x, y) - black) / max(1.0, white - black)).coerceIn(0.0, 1.0)
+                    val black = blackLevel(camera, exactCalibration, x, y).toDouble()
+                    val signal = ((raw.sampleUnsigned16(x, y) - black) / max(1.0, white - black))
+                        .coerceIn(0.0, 1.0)
                     if (signal in 0.015..0.92) {
                         val channel = channelIndex(camera.cfaPattern, x, y)
                         val idx = counts[channel]
@@ -73,19 +90,60 @@ object SierraRawIspPlanner {
             val rMean = geometricTrimmedMean(channelLogs[0], counts[0])
             val gMean = geometricTrimmedMean(channelLogs[1], counts[1])
             val bMean = geometricTrimmedMean(channelLogs[2], counts[2])
-            val redGain = (gMean / max(1e-6, rMean)).coerceIn(0.45, 3.5)
-            val blueGain = (gMean / max(1e-6, bMean)).coerceIn(0.45, 3.5)
+            val statisticalRed = (gMean / max(1e-6, rMean)).coerceIn(0.45, 3.5)
+            val statisticalBlue = (gMean / max(1e-6, bMean)).coerceIn(0.45, 3.5)
+            val exactGains = exactWhiteBalance(exactCalibration)
+            val redGain = exactGains?.first ?: statisticalRed
+            val blueGain = exactGains?.second ?: statisticalBlue
 
             val p92 = if (lumCount > 0) {
                 Arrays.sort(luminance, 0, lumCount)
                 luminance[((lumCount - 1) * 0.92).toInt().coerceIn(0, lumCount - 1)]
             } else 0.18
             val exposureScale = (0.72 / max(0.03, p92)).coerceIn(0.35, 6.0)
-            val matrix = cameraToSrgb(camera)
-            val sampleConfidence = (min(1.0, counts.sum() / 4000.0) * if (camera.colorCalibration?.forwardMatrix1?.size == 9) 1.0 else 0.72)
-                .coerceIn(0.0, 1.0)
-            return SierraIspPlan(redGain, 1.0, blueGain, matrix, exposureScale, 0.0035, sampleConfidence)
+
+            val exactTransform = exactCalibration?.sensorToLinearSrgb
+                ?.takeIf { it.size == 9 && it.all(Double::isFinite) }
+            val matrix = exactTransform?.copyOf() ?: cameraToSrgb(camera)
+            val sampleCoverage = min(1.0, counts.sum() / 4000.0)
+            val calibrationConfidence = when {
+                exactGains != null && exactTransform != null -> 1.0
+                exactGains != null || exactTransform != null -> 0.90
+                camera.colorCalibration?.forwardMatrix1?.size == 9 -> 0.82
+                else -> 0.66
+            }
+            val confidence = (sampleCoverage * calibrationConfidence).coerceIn(0.0, 1.0)
+
+            // RAW reconstruction has already removed sensor black. Do not subtract another arbitrary
+            // display black offset; shadow shaping belongs to tone mapping, not sensor normalization.
+            return SierraIspPlan(
+                redGain = redGain,
+                greenGain = 1.0,
+                blueGain = blueGain,
+                cameraToSrgb = matrix,
+                exposureScale = exposureScale,
+                blackPoint = 0.0,
+                confidence = confidence,
+                usedExactAwb = exactGains != null,
+                usedExactColorTransform = exactTransform != null
+            )
         }
+    }
+
+    private fun exactWhiteBalance(calibration: FrameSensorCalibration?): Pair<Double, Double>? {
+        val gains = calibration?.awbGains
+        if (gains != null && gains.size == 4 && gains.all { it.isFinite() && it > 0f }) {
+            val green = ((gains[1] + gains[2]) * 0.5).toDouble().coerceAtLeast(1e-6)
+            return (gains[0] / green).toDouble().coerceIn(0.35, 4.5) to
+                (gains[3] / green).toDouble().coerceIn(0.35, 4.5)
+        }
+        val neutral = calibration?.neutralColorPoint
+        if (neutral != null && neutral.size == 3 && neutral.all { it.isFinite() && it > 0.0 }) {
+            val green = neutral[1]
+            return (green / neutral[0]).coerceIn(0.35, 4.5) to
+                (green / neutral[2]).coerceIn(0.35, 4.5)
+        }
+        return null
     }
 
     private fun geometricTrimmedMean(values: DoubleArray, count: Int): Double {
@@ -98,9 +156,16 @@ object SierraRawIspPlanner {
         return kotlin.math.exp(sum / (hi - lo))
     }
 
-    private fun blackLevel(camera: CameraModuleTwin, x: Int, y: Int): Int {
-        if (camera.blackLevelPattern.size != 4) return 0
-        return camera.blackLevelPattern[(y and 1) * 2 + (x and 1)]
+    private fun blackLevel(
+        camera: CameraModuleTwin,
+        calibration: FrameSensorCalibration?,
+        x: Int,
+        y: Int
+    ): Float {
+        val phase = (y and 1) * 2 + (x and 1)
+        calibration?.dynamicBlackLevel?.takeIf { it.size == 4 }?.let { return it[phase].coerceAtLeast(0f) }
+        if (camera.blackLevelPattern.size != 4) return 0f
+        return camera.blackLevelPattern[phase].toFloat()
     }
 
     private fun channelIndex(pattern: CfaPattern, x: Int, y: Int): Int {
@@ -123,9 +188,9 @@ object SierraRawIspPlanner {
     private fun multiply3x3(a: DoubleArray, b: DoubleArray): DoubleArray {
         val out = DoubleArray(9)
         for (r in 0..2) for (c in 0..2) {
-            var v = 0.0
-            for (k in 0..2) v += a[r * 3 + k] * b[k * 3 + c]
-            out[r * 3 + c] = v
+            var value = 0.0
+            for (k in 0..2) value += a[r * 3 + k] * b[k * 3 + c]
+            out[r * 3 + c] = value
         }
         return out
     }
@@ -177,7 +242,7 @@ class SierraIspBitmapSink(
             var g = m[3] * sourceR + m[4] * sourceG + m[5] * sourceB
             var b = m[6] * sourceR + m[7] * sourceG + m[8] * sourceB
 
-            // Reduce amplification in low-evidence areas instead of synthesizing unsupported detail.
+            // Lower-confidence regions are rendered conservatively rather than enhanced aggressively.
             val evidenceScale = 0.78 + 0.22 * confidence
             r = aces(max(0.0, r) * plan.exposureScale * evidenceScale)
             g = aces(max(0.0, g) * plan.exposureScale * evidenceScale)
@@ -203,5 +268,9 @@ class SierraIspBitmapSink(
         return ((x * (a * x + b)) / (x * (c * x + d) + e)).coerceIn(0.0, 1.0)
     }
 
-    private fun srgbOetf(x: Double): Double = if (x <= 0.0031308) 12.92 * x else 1.055 * x.pow(1.0 / 2.4) - 0.055
+    private fun srgbOetf(x: Double): Double = if (x <= 0.0031308) {
+        12.92 * x
+    } else {
+        1.055 * x.pow(1.0 / 2.4) - 0.055
+    }
 }
