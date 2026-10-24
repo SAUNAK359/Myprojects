@@ -150,6 +150,8 @@ class SierraServerClient(context: Context) {
         sessions.clear()
     }
 
+    fun logoutLocal() = sessions.clear()
+
     suspend fun syncDevice(profile: SierraDeviceProfile): Result<Unit> = runCatching {
         authenticatedJson<SierraDeviceSyncDto>("PUT", "/v1/me/devices/current", json.encodeToString(profile))
         Unit
