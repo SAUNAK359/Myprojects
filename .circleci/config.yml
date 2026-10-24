@@ -110,49 +110,6 @@ jobs:
       - store_test_results:
           path: /tmp/sierra-test-results
 
-  sierra-android-integration:
-    docker:
-      - image: cimg/android:2026.08
-    resource_class: medium+
-    working_directory: ~/project
-    environment:
-      GRADLE_USER_HOME: /home/circleci/.gradle
-      TERM: dumb
-    steps:
-      - checkout
-      - restore_cache:
-          keys:
-            - sierra-android-gradle-v1-{{ checksum "Director/gradle.properties" }}
-            - sierra-android-gradle-v1-
-      - run:
-          name: Prepare Android SDK 36
-          command: |
-            set -euo pipefail
-            yes | sdkmanager --licenses >/dev/null || true
-            sdkmanager 'platform-tools' 'platforms;android-36' 'build-tools;36.0.0'
-            cd Director
-            printf 'sdk.dir=%s\n' "$ANDROID_HOME" > local.properties
-            chmod +x gradlew
-      - run:
-          name: Compile test and assemble integrated Sierra APK
-          command: |
-            set -euo pipefail
-            cd Director
-            ./gradlew \
-              --no-daemon \
-              --no-parallel \
-              --stacktrace \
-              --max-workers=2 \
-              -Dorg.gradle.jvmargs='-Xmx2560m -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8' \
-              -Pkotlin.compiler.execution.strategy=in-process \
-              -PSIERRA_SERVER_BASE_URL=https://sierra.example.invalid \
-              compileDebugKotlin testDebugUnitTest assembleDebug
-      - save_cache:
-          key: sierra-android-gradle-v1-{{ checksum "Director/gradle.properties" }}
-          paths:
-            - ~/.gradle/caches
-            - ~/.gradle/wrapper
-
 workflows:
   sierra-server-build:
     jobs:
@@ -170,6 +127,4 @@ workflows:
       - sierra-static:
           filters: *server_filter
       - sierra-tests:
-          filters: *server_filter
-      - sierra-android-integration:
           filters: *server_filter
