@@ -185,7 +185,7 @@ class DeviceTwinBuilder(private val context: Context) {
     private fun mapColorCalibration(c: CameraCharacteristics): ColorCalibration? {
         val result = ColorCalibration(
             referenceIlluminant1 = c.get(CameraCharacteristics.SENSOR_REFERENCE_ILLUMINANT1),
-            referenceIlluminant2 = c.get(CameraCharacteristics.SENSOR_REFERENCE_ILLUMINANT2),
+            referenceIlluminant2 = c.get(CameraCharacteristics.SENSOR_REFERENCE_ILLUMINANT2)?.toInt(),
             calibrationTransform1 = matrix(c.get(CameraCharacteristics.SENSOR_CALIBRATION_TRANSFORM1)),
             calibrationTransform2 = matrix(c.get(CameraCharacteristics.SENSOR_CALIBRATION_TRANSFORM2)),
             colorTransform1 = matrix(c.get(CameraCharacteristics.SENSOR_COLOR_TRANSFORM1)),
