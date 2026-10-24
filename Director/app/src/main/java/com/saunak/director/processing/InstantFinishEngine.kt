@@ -4,11 +4,7 @@ import com.saunak.director.director.PlanOutput
 import com.saunak.director.director.ToolCall
 import com.saunak.director.tools.ToolIds
 
-/**
- * Local finishing intelligence for the "post-ready straight from camera" path.
- * It never mutates physical camera controls. The VLM remains responsible for semantic scene
- * understanding; this layer guarantees a tasteful finish without another network round-trip.
- */
+/** Local finishing intelligence for the post-ready straight-from-camera path. */
 object InstantFinishEngine {
     fun enrich(plan: PlanOutput, quality: TechnicalQuality): PlanOutput {
         val calls = plan.toolCalls.toMutableList()
@@ -32,10 +28,11 @@ object InstantFinishEngine {
             "cinematic" in intent && ("cool" in intent || "blue" in intent) -> ToolIds.LOOK_CINEMATIC_COOL
             "cinematic" in intent -> ToolIds.LOOK_CINEMATIC_WARM
             branch == "portrait" || branch == "selfie" || branch == "group" -> ToolIds.LOOK_CLEAN_PORTRAIT
-            branch == "landscape" || branch == "architecture" -> ToolIds.LOOK_LANDSCAPE_VIVID
+            branch == "landscape" -> ToolIds.LOOK_LANDSCAPE_VIVID
+            branch == "architecture" -> ToolIds.LOOK_NATURAL
             branch == "food" -> ToolIds.LOOK_WARM
             branch == "low_light" -> ToolIds.LOOK_CINEMATIC_COOL
-            else -> ToolIds.LOOK_SOCIAL_POP
+            else -> ToolIds.LOOK_NATURAL
         }
 
         if (lookId != ToolIds.LOOK_NATURAL) {
@@ -45,27 +42,27 @@ object InstantFinishEngine {
     }
 
     private fun defaultStrength(id: Int): Double = when (id) {
-        ToolIds.LOOK_SOCIAL_POP -> .50
-        ToolIds.LOOK_FILM_TEAL_ORANGE -> .56
-        ToolIds.LOOK_GOLDEN_HOUR -> .54
-        ToolIds.LOOK_MOODY -> .48
-        ToolIds.LOOK_CLEAN_PORTRAIT -> .44
-        ToolIds.LOOK_NIGHT_NEON -> .52
-        ToolIds.LOOK_CINEMATIC_WARM, ToolIds.LOOK_CINEMATIC_COOL -> .62
-        ToolIds.LOOK_SOFT_PORTRAIT -> .55
-        ToolIds.LOOK_LANDSCAPE_VIVID -> .52
-        ToolIds.LOOK_WARM, ToolIds.LOOK_COOL -> .55
+        ToolIds.LOOK_SOCIAL_POP -> .34
+        ToolIds.LOOK_FILM_TEAL_ORANGE -> .48
+        ToolIds.LOOK_GOLDEN_HOUR -> .46
+        ToolIds.LOOK_MOODY -> .42
+        ToolIds.LOOK_CLEAN_PORTRAIT -> .38
+        ToolIds.LOOK_NIGHT_NEON -> .46
+        ToolIds.LOOK_CINEMATIC_WARM, ToolIds.LOOK_CINEMATIC_COOL -> .50
+        ToolIds.LOOK_SOFT_PORTRAIT -> .44
+        ToolIds.LOOK_LANDSCAPE_VIVID -> .38
+        ToolIds.LOOK_WARM, ToolIds.LOOK_COOL -> .42
         ToolIds.LOOK_MONOCHROME -> 1.0
         else -> 0.0
     }
 
     private fun adaptStrength(base: Double, quality: TechnicalQuality): Double {
         var strength = base
-        // Avoid crushing already-clipped shadows/highlights. Stronger finish is reserved for
-        // technically clean frames where it cannot hide detail.
         if (quality.darkClipFraction > .12 || quality.brightClipFraction > .08) strength *= .78
-        if (quality.lumaStdDev < 24.0 && quality.edgeEnergy > 2.0) strength *= 1.08
+        val brightSky = quality.highlightP95 >= 210.0 && quality.topMeanLuma - quality.bottomMeanLuma >= 28.0
+        if (brightSky) strength *= .82
+        if (quality.lumaStdDev < 24.0 && quality.edgeEnergy > 2.0) strength *= 1.05
         if (quality.edgeEnergy < 1.2) strength *= .88
-        return strength.coerceIn(0.18, 0.78)
+        return strength.coerceIn(0.12, 0.70)
     }
 }

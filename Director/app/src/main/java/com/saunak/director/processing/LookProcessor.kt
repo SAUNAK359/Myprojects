@@ -42,12 +42,12 @@ object LookProcessor {
             Look.CINEMATIC_COOL -> matrix(sat = 0.93f, contrast = 1.07f, r = 0.94f, g = 1.01f, b = 1.07f, lift = -3f)
             Look.MONOCHROME -> ColorMatrix().apply { setSaturation(0f) }
             Look.SOFT_PORTRAIT -> matrix(sat = 0.96f, contrast = 0.97f, r = 1.025f, g = 1.005f, b = 0.985f, lift = 2f)
-            Look.LANDSCAPE_VIVID -> matrix(sat = 1.10f, contrast = 1.05f, g = 1.015f, b = 1.01f)
-            Look.SOCIAL_POP -> matrix(sat = 1.08f, contrast = 1.045f, r = 1.015f, g = 1.01f, b = 1.005f, lift = 2f)
+            Look.LANDSCAPE_VIVID -> matrix(sat = 1.07f, contrast = 1.045f, g = 1.008f, b = 1.005f, lift = -1f)
+            Look.SOCIAL_POP -> matrix(sat = 1.06f, contrast = 1.035f, r = 1.01f, g = 1.008f, b = 1.004f, lift = 1f)
             Look.FILM_TEAL_ORANGE -> matrix(sat = 0.98f, contrast = 1.075f, r = 1.045f, g = 0.995f, b = 1.035f, lift = -4f)
             Look.GOLDEN_HOUR -> matrix(sat = 1.04f, contrast = 1.025f, r = 1.08f, g = 1.025f, b = 0.91f, lift = 3f)
             Look.MOODY -> matrix(sat = 0.88f, contrast = 1.10f, r = 0.97f, g = 0.99f, b = 1.015f, lift = -7f)
-            Look.CLEAN_PORTRAIT -> matrix(sat = 0.99f, contrast = 1.015f, r = 1.018f, g = 1.012f, b = 0.995f, lift = 4f)
+            Look.CLEAN_PORTRAIT -> matrix(sat = 0.99f, contrast = 1.015f, r = 1.018f, g = 1.012f, b = 0.995f, lift = 2f)
             Look.NIGHT_NEON -> matrix(sat = 1.12f, contrast = 1.09f, r = 1.02f, g = 1.0f, b = 1.08f, lift = -6f)
             Look.NATURAL -> ColorMatrix()
         }
@@ -69,8 +69,6 @@ object LookProcessor {
             }
         )
 
-        // Subtle local vignette for cinematic/night styles. GPU-friendly Canvas composition and
-        // intentionally weak so faces/highlights remain natural.
         val vignette = when (spec.look) {
             Look.CINEMATIC_WARM, Look.CINEMATIC_COOL, Look.FILM_TEAL_ORANGE -> 0.15f * s
             Look.MOODY -> 0.22f * s

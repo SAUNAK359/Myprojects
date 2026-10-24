@@ -37,19 +37,11 @@ class SierraServerVlmRuntime(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val settlementPrefs = context.getSharedPreferences("sierra_ai_settlement_v1", Context.MODE_PRIVATE)
 
-    @Volatile
-    private var maxImageDimension = 704
+    @Volatile private var maxImageDimension = 704
+    @Volatile private var activeJobId: String? = null
 
-    @Volatile
-    private var activeJobId: String? = null
-
-    override suspend fun load(modelPath: String, projectorPath: String): Result<Unit> {
-        return if (isReady()) {
-            Result.success(Unit)
-        } else {
-            Result.failure(IllegalStateException("Sign in to Sierra Vision"))
-        }
-    }
+    override suspend fun load(modelPath: String, projectorPath: String): Result<Unit> =
+        if (isReady()) Result.success(Unit) else Result.failure(IllegalStateException("Sign in to Sierra Vision"))
 
     override suspend fun plan(
         image: Bitmap,
@@ -57,10 +49,7 @@ class SierraServerVlmRuntime(
         camera: CameraSnapshot,
         skillContext: String
     ): Result<PlanOutput> {
-        if (!isReady()) {
-            return Result.failure(IllegalStateException("Sierra AI requires a signed-in Sierra Server session"))
-        }
-
+        if (!isReady()) return Result.failure(IllegalStateException("Sierra AI requires a signed-in Sierra Server session"))
         return try {
             val capabilityJson = readCapabilitySnapshot(capabilities, camera)
             val localQualityJson = buildQualityJson(image)
@@ -73,7 +62,6 @@ class SierraServerVlmRuntime(
                 skillContext = skillContext,
                 idempotencyKey = UUID.randomUUID().toString()
             ).getOrThrow()
-
             activeJobId = created.id
             val readyJob = awaitReady(created)
             val plan = toPlanOutput(readyJob)
@@ -92,19 +80,14 @@ class SierraServerVlmRuntime(
         previousIssues: List<String>,
         evaluationContext: String,
         capabilities: CapabilityRegistry
-    ): Result<EvaluationOutput> {
-        return Result.failure(
-            UnsupportedOperationException("Sierra Vision uses one cloud plan; final technical QA is local")
-        )
-    }
+    ): Result<EvaluationOutput> = Result.failure(
+        UnsupportedOperationException("Sierra Vision uses one cloud plan; final technical QA is local")
+    )
 
     override suspend fun completeFinalCapture(captureId: String): Result<Unit> {
         val jobId = activeJobId ?: return Result.success(Unit)
         activeJobId = null
-        settlementPrefs.edit()
-            .putString(KEY_PENDING_JOB, jobId)
-            .putString(KEY_PENDING_CAPTURE, captureId)
-            .apply()
+        settlementPrefs.edit().putString(KEY_PENDING_JOB, jobId).putString(KEY_PENDING_CAPTURE, captureId).apply()
         return retryPendingSettlement()
     }
 
@@ -112,20 +95,15 @@ class SierraServerVlmRuntime(
         val jobId = settlementPrefs.getString(KEY_PENDING_JOB, null) ?: return Result.success(Unit)
         val captureId = settlementPrefs.getString(KEY_PENDING_CAPTURE, null) ?: return Result.success(Unit)
         var lastError: Throwable? = null
-
         repeat(3) { attempt ->
             val result = server.complete(jobId, captureId)
             if (result.isSuccess) {
-                settlementPrefs.edit()
-                    .remove(KEY_PENDING_JOB)
-                    .remove(KEY_PENDING_CAPTURE)
-                    .apply()
+                settlementPrefs.edit().remove(KEY_PENDING_JOB).remove(KEY_PENDING_CAPTURE).apply()
                 return Result.success(Unit)
             }
             lastError = result.exceptionOrNull()
             delay(250L * (1 shl attempt))
         }
-
         return Result.failure(lastError ?: IllegalStateException("Sierra credit settlement is pending"))
     }
 
@@ -135,29 +113,13 @@ class SierraServerVlmRuntime(
         scope.launch { server.cancel(jobId) }
     }
 
-    override fun setMaxImageDimension(pixels: Int) {
-        maxImageDimension = pixels.coerceIn(384, 896)
-    }
-
-    override fun cancel() {
-        cancelCloudJob()
-    }
-
+    override fun setMaxImageDimension(pixels: Int) { maxImageDimension = pixels.coerceIn(384, 896) }
+    override fun cancel() { cancelCloudJob() }
     override fun isReady(): Boolean = server.configured && server.authenticated
+    override fun unload() { cancelCloudJob() }
+    override fun close() { cancelCloudJob(); scope.cancel() }
 
-    override fun unload() {
-        cancelCloudJob()
-    }
-
-    override fun close() {
-        cancelCloudJob()
-        scope.cancel()
-    }
-
-    private suspend fun readCapabilitySnapshot(
-        capabilities: CapabilityRegistry,
-        camera: CameraSnapshot
-    ): String = withContext(Dispatchers.IO) {
+    private suspend fun readCapabilitySnapshot(capabilities: CapabilityRegistry, camera: CameraSnapshot): String = withContext(Dispatchers.IO) {
         deviceSkill.refresh(capabilities, camera)
         val file = File(deviceSkill.machineFilePath())
         if (file.isFile) file.readText() else "{}"
@@ -168,18 +130,24 @@ class SierraServerVlmRuntime(
         return JSONObject().apply {
             put("mean_luma", quality.meanLuma)
             put("luma_std_dev", quality.lumaStdDev)
+            put("shadow_p05", quality.shadowP05)
+            put("median_luma", quality.medianLuma)
+            put("highlight_p95", quality.highlightP95)
+            put("top_mean_luma", quality.topMeanLuma)
+            put("bottom_mean_luma", quality.bottomMeanLuma)
+            put("top_bottom_delta", quality.topMeanLuma - quality.bottomMeanLuma)
             put("highlight_clip", quality.brightClipFraction)
             put("shadow_clip", quality.darkClipFraction)
             put("edge_energy", quality.edgeEnergy)
+            put("horizontal_edge_energy", quality.horizontalEdgeEnergy)
+            put("vertical_edge_energy", quality.verticalEdgeEnergy)
+            put("strong_edge_fraction", quality.strongEdgeFraction)
             put("heuristic_score", quality.heuristicScore)
             put("catastrophic", quality.catastrophic)
         }.toString()
     }
 
-    private fun buildCameraContextJson(
-        capabilities: CapabilityRegistry,
-        camera: CameraSnapshot
-    ): String = JSONObject().apply {
+    private fun buildCameraContextJson(capabilities: CapabilityRegistry, camera: CameraSnapshot): String = JSONObject().apply {
         put("snapshot", camera.compactDescription())
         put("lens_facing", capabilities.lensFacing)
         put("zoom", camera.zoomRatio)
@@ -192,9 +160,7 @@ class SierraServerVlmRuntime(
         repeat(MAX_POLL_ATTEMPTS) {
             when (job.state) {
                 "ready" -> return job
-                "failed", "cancelled", "expired" -> {
-                    throw IllegalStateException(job.error_message ?: "Sierra AI job ${job.state}")
-                }
+                "failed", "cancelled", "expired" -> throw IllegalStateException(job.error_message ?: "Sierra AI job ${job.state}")
                 "completed" -> throw IllegalStateException("Sierra AI job completed before camera capture")
             }
             delay(POLL_INTERVAL_MS)
@@ -211,15 +177,7 @@ class SierraServerVlmRuntime(
             skillBranch = dto.branch,
             referenceScore = dto.reference_score,
             referenceAccept = dto.reference_accept,
-            toolCalls = dto.calls.map {
-                ToolCall(
-                    id = it.id,
-                    value = it.value,
-                    x = it.x,
-                    y = it.y,
-                    stringValue = it.stringValue
-                )
-            },
+            toolCalls = dto.calls.map { ToolCall(id = it.id, value = it.value, x = it.x, y = it.y, stringValue = it.stringValue) },
             recapture = dto.recapture,
             aspectRatio = dto.aspect_ratio,
             cropCenterX = dto.crop_center_x,
@@ -232,27 +190,15 @@ class SierraServerVlmRuntime(
         val longest = max(source.width, source.height)
         val output = if (longest > maxImageDimension) {
             val scale = maxImageDimension.toFloat() / longest.toFloat()
-            Bitmap.createScaledBitmap(
-                source,
-                (source.width * scale).toInt().coerceAtLeast(1),
-                (source.height * scale).toInt().coerceAtLeast(1),
-                true
-            )
-        } else {
-            source
-        }
-
+            Bitmap.createScaledBitmap(source, (source.width * scale).toInt().coerceAtLeast(1), (source.height * scale).toInt().coerceAtLeast(1), true)
+        } else source
         return try {
             ByteArrayOutputStream().use { stream ->
-                check(output.compress(Bitmap.CompressFormat.JPEG, 76, stream)) {
-                    "Could not encode Sierra analysis frame"
-                }
+                check(output.compress(Bitmap.CompressFormat.JPEG, 76, stream)) { "Could not encode Sierra analysis frame" }
                 stream.toByteArray()
             }
         } finally {
-            if (output !== source && !output.isRecycled) {
-                output.recycle()
-            }
+            if (output !== source && !output.isRecycled) output.recycle()
         }
     }
 
