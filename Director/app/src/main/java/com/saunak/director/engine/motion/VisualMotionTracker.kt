@@ -2,7 +2,6 @@ package com.saunak.director.engine.motion
 
 import kotlin.math.abs
 import kotlin.math.hypot
-import kotlin.math.max
 
 /**
  * Allocation-bounded translational motion estimator for the preview stream. It estimates robust
@@ -35,8 +34,8 @@ class VisualMotionTracker {
 
         val dxs = local.map { it.dx }.sorted()
         val dys = local.map { it.dy }.sorted()
-        val globalDx = median(dxs).toDouble()
-        val globalDy = median(dys).toDouble()
+        val globalDx = medianInt(dxs).toDouble()
+        val globalDy = medianInt(dys).toDouble()
         val globalSpeed = hypot(globalDx, globalDy) / dt
 
         val residualSpeeds = local.map { shift ->
@@ -47,7 +46,7 @@ class VisualMotionTracker {
         val subjectVx = ((subjectShift?.dx ?: globalDx) - globalDx) / dt
         val subjectVy = ((subjectShift?.dy ?: globalDy) - globalDy) / dt
 
-        val scoreMedian = median(local.map { it.score }.sorted())
+        val scoreMedian = medianDouble(local.map { it.score }.sorted())
         val textureConfidence = (1.0 - scoreMedian / 48.0).coerceIn(0.0, 1.0)
         val trackConfidence = (local.size / (GRID_X * GRID_Y).toDouble()).coerceIn(0.0, 1.0)
         val confidence = (0.58 * trackConfidence + 0.42 * textureConfidence).coerceIn(0.0, 1.0)
@@ -104,8 +103,8 @@ class VisualMotionTracker {
         return (normalized / (1.0 + normalized)).coerceIn(0.0, 1.0)
     }
 
-    private fun median(values: List<Int>): Int = values[values.size / 2]
-    private fun median(values: List<Double>): Double = values[values.size / 2]
+    private fun medianInt(values: List<Int>): Int = values[values.size / 2]
+    private fun medianDouble(values: List<Double>): Double = values[values.size / 2]
     private fun percentile(values: List<Double>, q: Double): Double {
         if (values.isEmpty()) return 0.0
         val index = ((values.size - 1) * q.coerceIn(0.0, 1.0)).toInt()
