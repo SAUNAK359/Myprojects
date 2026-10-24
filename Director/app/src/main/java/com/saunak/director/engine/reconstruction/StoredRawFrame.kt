@@ -4,6 +4,7 @@ import android.graphics.ImageFormat
 import androidx.camera.core.ImageProxy
 import com.saunak.director.camera.RawCaptureMetadata
 import com.saunak.director.camera.RawSensorCalibration
+import com.saunak.director.camera.RawSensorFrame
 import java.io.File
 import java.io.RandomAccessFile
 import java.nio.ByteBuffer
@@ -79,6 +80,46 @@ object StoredRawWriter {
             timestampNs = image.imageInfo.timestamp,
             rotationDegrees = image.imageInfo.rotationDegrees,
             metadata = metadata
+        )
+    }
+
+    /**
+     * Spills an already materialized RAW frame immediately to canonical uint16 storage. This is used
+     * by P-RIF after CameraX returns its in-memory RAW+JPEG burst so subsequent reconstruction can be
+     * tile-bounded and the large FloatArrays can become GC-eligible before fusion begins.
+     */
+    fun write(
+        frame: RawSensorFrame,
+        output: File
+    ): StoredRawFrame {
+        val raw = frame.raw
+        output.parentFile?.mkdirs()
+        RandomAccessFile(output, "rw").use { raf ->
+            raf.setLength(raw.width.toLong() * raw.height.toLong() * 2L)
+            val channel = raf.channel
+            val row = ByteBuffer.allocateDirect(raw.width * 2).order(ByteOrder.LITTLE_ENDIAN)
+            for (y in 0 until raw.height) {
+                row.clear()
+                val base = y * raw.width
+                for (x in 0 until raw.width) {
+                    val value = raw.values[base + x].toInt().coerceIn(0, 65535)
+                    row.putShort(value.toShort())
+                }
+                row.flip()
+                while (row.hasRemaining()) channel.write(row)
+            }
+            channel.force(false)
+        }
+        return StoredRawFrame(
+            file = output,
+            width = raw.width,
+            height = raw.height,
+            pattern = raw.pattern,
+            blackLevelPattern = raw.blackLevelPattern,
+            whiteLevel = raw.whiteLevel,
+            timestampNs = frame.timestampNs,
+            rotationDegrees = frame.rotationDegrees,
+            metadata = frame.metadata
         )
     }
 }
