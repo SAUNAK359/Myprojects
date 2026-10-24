@@ -5,6 +5,8 @@ import com.saunak.director.camera.CapabilityRegistry
 import com.saunak.director.camera.DirectorExtension
 import com.saunak.director.camera.StillFlashMode
 import com.saunak.director.director.ToolCall
+import com.saunak.director.engine.SierraEngine
+import com.saunak.director.engine.subject.PredictiveSubjectPolicy
 import com.saunak.director.processing.Look
 import com.saunak.director.processing.LookSpec
 import kotlinx.coroutines.sync.Mutex
@@ -12,7 +14,13 @@ import kotlinx.coroutines.sync.withLock
 
 class ToolExecutor(private val camera: CameraEngine, private val validator: ToolValidator = ToolValidator()) {
     data class Rejected(val call: ToolCall, val reason: String)
-    data class Result(val applied: List<ToolCall>, val rejected: List<Rejected>, val look: LookSpec, val requiresRecapture: Boolean)
+    data class Result(
+        val applied: List<ToolCall>,
+        val rejected: List<Rejected>,
+        val look: LookSpec,
+        val requiresRecapture: Boolean,
+        val predictiveRetargeted: Boolean = false
+    )
     private val mutationMutex = Mutex()
 
     suspend fun apply(calls: List<ToolCall>, capabilities: CapabilityRegistry, currentLook: LookSpec = LookSpec()): Result = mutationMutex.withLock {
@@ -53,8 +61,27 @@ class ToolExecutor(private val camera: CameraEngine, private val validator: Tool
                 }
             }.onSuccess { applied += call }.onFailure { rejected += Rejected(call, it.message ?: "execution_failed") }
         }
-        val requiresRecapture = applied.any { it.id in ToolIds.CAMERA_IDS }
-        Result(applied, rejected, look, requiresRecapture)
+
+        // System-owned predictive 3A runs only when the plan did not explicitly choose a focus point.
+        // CameraX's existing aiFocusNormalized action meters AF+AE+AWB together, so the orchestrator's
+        // normal requiresRecapture path will wait for convergence and verify the result afterward.
+        val explicitFocusApplied = applied.any { it.id == ToolIds.FOCUS }
+        val extensionActive = camera.snapshot().extension != DirectorExtension.NONE
+        val predictiveRetargeted = if (!explicitFocusApplied && !extensionActive && effectiveCaps.focusMeteringSupported) {
+            val track = SierraEngine.getOrNull()?.subjects?.latest()
+            val directive = track?.let(PredictiveSubjectPolicy::evaluate)
+            if (directive != null && directive.shouldRetargetThreeA) {
+                runCatching {
+                    camera.aiFocusNormalized(
+                        directive.autofocusPoint.x.toFloat(),
+                        directive.autofocusPoint.y.toFloat()
+                    )
+                }.isSuccess
+            } else false
+        } else false
+
+        val requiresRecapture = predictiveRetargeted || applied.any { it.id in ToolIds.CAMERA_IDS }
+        Result(applied, rejected, look, requiresRecapture, predictiveRetargeted)
     }
 
     suspend fun restoreUserState() = mutationMutex.withLock { camera.restoreUserState() }
