@@ -17,6 +17,7 @@ import com.saunak.director.engine.subject.SubjectMaskState
 import com.saunak.director.engine.subject.SubjectObservation
 import com.saunak.director.engine.subject.SubjectPoseState
 import com.saunak.director.engine.subject.SubjectTrack
+import com.saunak.director.platform.MemoryPressureBus
 import com.saunak.director.processing.TechnicalQuality
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -24,8 +25,9 @@ import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Shutter-time perception coordinator. YuNet establishes inexpensive human identity evidence first.
- * Optional segmentation, pose and depth experts then enrich the SAME timestamped observation in
- * parallel. Model failure or absence never invalidates the face-based subject track.
+ * Optional segmentation, pose and depth experts enrich the SAME timestamped observation. The runtime
+ * serializes same-backend ORT work; this layer additionally suppresses expensive experts under real
+ * thermal/RAM pressure. Any optional-model failure leaves the face-based subject track usable.
  */
 class SierraPerceptionFabric(
     private val engine: SierraEngine = SierraEngine.get(),
@@ -54,6 +56,8 @@ class SierraPerceptionFabric(
     ): Snapshot {
         val now = System.nanoTime()
         val effectiveCameraId = cameraId ?: "lens:$lensFacing"
+        val memoryPressure = MemoryPressureBus.normalizedPressure()
+        val resourcePressure = maxOf(thermalPressure.coerceIn(0.0, 1.0), memoryPressure)
         val faces = withTimeoutOrNull(FACE_BUDGET_MS) { faceExpert.detect(frame).getOrNull() }
         val preliminary = SierraSceneAnalyzer.analyze(frame, quality, lensFacing, faces)
         val primaryFace = faces?.maxByOrNull { it.area * it.score }
@@ -66,8 +70,8 @@ class SierraPerceptionFabric(
         }
 
         val proxyBounds = subjectBoundsFromFace(primaryFace, frame.width, frame.height)
-        val subjectVoI = subjectValueOfInformation(preliminary, primaryFace, thermalPressure)
-        val depthVoI = depthValueOfInformation(preliminary, zoomRatio, thermalPressure)
+        val subjectVoI = subjectValueOfInformation(preliminary, primaryFace, resourcePressure)
+        val depthVoI = depthValueOfInformation(preliminary, zoomRatio, resourcePressure)
 
         data class Enrichment(
             val mask: SubjectMaskState?,
@@ -77,21 +81,27 @@ class SierraPerceptionFabric(
 
         val enrichment = coroutineScope {
             val maskDeferred = async {
-                if (subjectVoI >= SEGMENTATION_VOI_THRESHOLD && segmentationExpert.isProvisioned()) {
+                if (resourcePressure < SEGMENTATION_PRESSURE_CUTOFF &&
+                    subjectVoI >= SEGMENTATION_VOI_THRESHOLD && segmentationExpert.isProvisioned()
+                ) {
                     withTimeoutOrNull(SEGMENTATION_BUDGET_MS) {
                         segmentationExpert.segment(frame, proxyBounds).getOrNull()
                     }
                 } else null
             }
             val poseDeferred = async {
-                if (subjectVoI >= POSE_VOI_THRESHOLD && poseExpert.isProvisioned()) {
+                if (resourcePressure < POSE_PRESSURE_CUTOFF &&
+                    subjectVoI >= POSE_VOI_THRESHOLD && poseExpert.isProvisioned()
+                ) {
                     withTimeoutOrNull(POSE_BUDGET_MS) {
                         poseExpert.estimate(frame, proxyBounds).getOrNull()
                     }
                 } else null
             }
             val depthDeferred = async {
-                if (depthVoI >= DEPTH_VOI_THRESHOLD && depthExpert.isProvisioned()) {
+                if (resourcePressure < DEPTH_PRESSURE_CUTOFF &&
+                    depthVoI >= DEPTH_VOI_THRESHOLD && depthExpert.isProvisioned()
+                ) {
                     withTimeoutOrNull(DEPTH_BUDGET_MS) {
                         depthExpert.estimate(frame).getOrNull()?.let { depth ->
                             DepthSceneInterpreter.subjectSeparation(depth, faces.orEmpty())
@@ -253,7 +263,7 @@ class SierraPerceptionFabric(
     private fun subjectValueOfInformation(
         signals: SierraSceneSignals,
         face: FaceDetection,
-        thermalPressure: Double
+        resourcePressure: Double
     ): Double {
         if (!signals.primaryHumanSubject) return 0.0
         val branchValue = when (signals.branch) {
@@ -264,13 +274,13 @@ class SierraPerceptionFabric(
         val sizeValue = (signals.faceCoverage / 0.12).coerceIn(0.0, 1.0)
         val confidenceValue = face.score.toDouble().coerceIn(0.0, 1.0)
         return (0.48 * branchValue + 0.28 * sizeValue + 0.24 * confidenceValue -
-            0.50 * thermalPressure.coerceIn(0.0, 1.0)).coerceIn(0.0, 1.0)
+            0.50 * resourcePressure.coerceIn(0.0, 1.0)).coerceIn(0.0, 1.0)
     }
 
     private fun depthValueOfInformation(
         signals: SierraSceneSignals,
         zoomRatio: Float,
-        thermalPressure: Double
+        resourcePressure: Double
     ): Double {
         if (!signals.primaryHumanSubject || signals.faceCount <= 0) return 0.0
         val branchValue = when (signals.branch) {
@@ -280,8 +290,8 @@ class SierraPerceptionFabric(
         }
         val faceValue = (signals.faceCoverage / 0.16).coerceIn(0.0, 1.0)
         val zoomValue = ((zoomRatio - 1f) / 2f).toDouble().coerceIn(0.0, 1.0)
-        val thermalPenalty = thermalPressure.coerceIn(0.0, 1.0) * 0.55
-        return (0.62 * branchValue + 0.25 * faceValue + 0.13 * zoomValue - thermalPenalty).coerceIn(0.0, 1.0)
+        val pressurePenalty = resourcePressure.coerceIn(0.0, 1.0) * 0.55
+        return (0.62 * branchValue + 0.25 * faceValue + 0.13 * zoomValue - pressurePenalty).coerceIn(0.0, 1.0)
     }
 
     companion object {
@@ -292,6 +302,9 @@ class SierraPerceptionFabric(
         private const val SEGMENTATION_VOI_THRESHOLD = 0.42
         private const val POSE_VOI_THRESHOLD = 0.55
         private const val DEPTH_VOI_THRESHOLD = 0.56
+        private const val SEGMENTATION_PRESSURE_CUTOFF = 0.88
+        private const val POSE_PRESSURE_CUTOFF = 0.74
+        private const val DEPTH_PRESSURE_CUTOFF = 0.62
         private const val SCENE_HALF_LIFE_NS = 650_000_000L
         private const val HUMAN_HALF_LIFE_NS = 350_000_000L
         private const val SUBJECT_HALF_LIFE_NS = 520_000_000L
