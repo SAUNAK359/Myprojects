@@ -5,21 +5,18 @@ import com.saunak.director.director.EvaluationOutput
 import com.saunak.director.director.PlanOutput
 import com.saunak.director.director.ToolCall
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class VlmContractValidatorTest {
-    @Test fun rejectsOutOfRangePlanScore() {
-        assertThrows(IllegalArgumentException::class.java) {
-            VlmContractValidator.plan(PlanOutput("scene", "objective", "general", 1.2, false))
-        }
+    @Test fun clampsOutOfRangePlanScore() {
+        val result = VlmContractValidator.plan(PlanOutput("scene", "objective", "general", 1.2, false))
+        assertEquals(1.0, result.referenceScore, .0001)
     }
 
-    @Test fun rejectsTooManyCalls() {
+    @Test fun capsTooManyCalls() {
         val calls = List(9) { ToolCall(30) }
-        assertThrows(IllegalArgumentException::class.java) {
-            VlmContractValidator.plan(PlanOutput("scene", "objective", "general", .5, false, calls))
-        }
+        val result = VlmContractValidator.plan(PlanOutput("scene", "objective", "general", .5, false, calls))
+        assertEquals(8, result.toolCalls.size)
     }
 
     @Test fun validatesEvaluationBounds() {
