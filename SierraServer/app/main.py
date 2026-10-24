@@ -1,63 +1,20 @@
 import asyncio
 from contextlib import asynccontextmanager
-from datetime import date
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse
-from sqlalchemy import select
 
 from app.config import prepare_runtime_directories, settings, validate_runtime_config
-from app.db import SessionLocal
 from app.job_worker import worker_loop
-from app.models import User
 from app.rate_limit import RateLimitMiddleware
 from app.routers import admin, auth, health, jobs, me
-from app.security import hash_password, normalize_email, normalize_phone
-
-
-async def bootstrap_admin() -> None:
-    email = settings.admin_bootstrap_email.strip()
-    password = settings.admin_bootstrap_password.get_secret_value()
-    if not email or not password:
-        return
-    if len(password) < 16:
-        raise RuntimeError("bootstrap admin password must be at least 16 characters")
-
-    normalized_email = normalize_email(email)
-    async with SessionLocal() as db:
-        existing = await db.scalar(select(User).where(User.email == normalized_email))
-        if existing:
-            if existing.role != "admin":
-                raise RuntimeError(
-                    "SIERRA_ADMIN_BOOTSTRAP_EMAIL belongs to an existing non-admin account; "
-                    "refusing automatic privilege escalation"
-                )
-            return
-
-        phone = normalize_phone(settings.admin_bootstrap_phone)
-        if await db.scalar(select(User).where(User.phone == phone)):
-            raise RuntimeError("SIERRA_ADMIN_BOOTSTRAP_PHONE already belongs to another account")
-
-        admin_user = User(
-            email=normalized_email,
-            phone=phone,
-            display_name="Sierra Administrator",
-            dob=date.fromisoformat(settings.admin_bootstrap_dob),
-            password_hash=hash_password(password),
-            role="admin",
-            credit_balance=0,
-            credit_reserved=0,
-        )
-        db.add(admin_user)
-        await db.commit()
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     validate_runtime_config(settings)
     prepare_runtime_directories(settings)
-    await bootstrap_admin()
     stop = asyncio.Event()
     task = asyncio.create_task(worker_loop(stop), name="sierra-job-worker")
     try:
@@ -77,8 +34,8 @@ app = FastAPI(
     openapi_url=None if settings.is_production else "/openapi.json",
 )
 
-# The laptop deployment deliberately uses one Uvicorn worker, so the in-process limiter is
-# authoritative for this origin. Cloudflare/Caddy limits remain an independent outer layer.
+# Sierra's laptop deployment intentionally runs one Uvicorn worker because that process also
+# owns the durable worker loop. The process-local limiter is authoritative for this origin.
 app.add_middleware(RateLimitMiddleware)
 
 if settings.cors_origins:
