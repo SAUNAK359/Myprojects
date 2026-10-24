@@ -10,6 +10,7 @@ import com.saunak.director.engine.device.CameraSyncQuality
 import com.saunak.director.engine.device.CapturePath
 import com.saunak.director.engine.device.CfaPattern
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -75,5 +76,56 @@ class CaptureCompilerTest {
             CaptureBudget(maxBurstFrames = 5)
         )
         assertEquals(CapturePath.YUV_REPROCESS, program.path)
+    }
+
+    @Test fun confidentFastSubjectSuppressesMixedExposureAndSuperResolution() {
+        val program = CaptureCompiler().compile(
+            camera(),
+            AutoExposureSnapshot(20_000_000L, 200),
+            CaptureObservation(
+                dynamicRangeStops = 13.0,
+                highlightClipRisk = 0.8,
+                shadowNoiseRisk = 0.72,
+                cameraMotion = MotionClass.LOW,
+                subjectMotion = MotionClass.LOW,
+                facePresent = true,
+                digitalZoomRatio = 2.0,
+                confidence = 0.92,
+                motionExposureCapNs = 7_000_000L,
+                motionRisk = 0.58,
+                subjectKinematicRisk = 0.86,
+                subjectEdgeRisk = 0.82,
+                subjectTrackConfidence = 0.91
+            ),
+            CaptureBudget(maxBurstFrames = 8)
+        )
+        assertTrue(program.frames.size <= 4)
+        assertTrue(program.frames.all { it.exposureTimeNs <= 7_000_000L })
+        assertFalse(program.burstSuperResolution)
+    }
+
+    @Test fun stableTrackedSubjectCanRetainSuperResolutionEligibility() {
+        val program = CaptureCompiler().compile(
+            camera(),
+            AutoExposureSnapshot(10_000_000L, 160),
+            CaptureObservation(
+                dynamicRangeStops = 8.0,
+                highlightClipRisk = 0.10,
+                shadowNoiseRisk = 0.55,
+                cameraMotion = MotionClass.LOW,
+                subjectMotion = MotionClass.LOW,
+                facePresent = true,
+                digitalZoomRatio = 2.0,
+                confidence = 0.95,
+                motionExposureCapNs = 22_000_000L,
+                motionRisk = 0.24,
+                subjectKinematicRisk = 0.12,
+                subjectEdgeRisk = 0.10,
+                subjectTrackConfidence = 0.93
+            ),
+            CaptureBudget(maxBurstFrames = 7)
+        )
+        assertEquals(CapturePath.RAW_CUSTOM, program.path)
+        assertTrue(program.burstSuperResolution)
     }
 }
