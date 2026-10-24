@@ -1,5 +1,6 @@
 package com.saunak.director.engine.runtime
 
+import ai.onnxruntime.OnnxJavaType
 import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
@@ -125,12 +126,7 @@ class OnnxRuntimeEngine(
         shape: LongArray,
         requestedOutputs: Set<String>
     ): Map<String, FloatArray> {
-        require(values.isNotEmpty())
-        require(shape.isNotEmpty() && shape.all { it > 0L })
-        val expected = shape.fold(1L) { acc, dimension -> Math.multiplyExact(acc, dimension) }
-        require(expected == values.size.toLong()) { "Input contains ${values.size} values but shape requires $expected" }
-        require(requestedOutputs.isNotEmpty())
-
+        requireDenseShape(shape, values.size)
         val direct = ByteBuffer.allocateDirect(values.size * Float.SIZE_BYTES)
             .order(ByteOrder.nativeOrder())
             .asFloatBuffer()
@@ -138,24 +134,63 @@ class OnnxRuntimeEngine(
         direct.rewind()
 
         OnnxTensor.createTensor(environment, direct, shape).use { tensor ->
-            val handle = getOrCreate(artifact, backend)
-            require(inputName in handle.inputNames) { "Model ${artifact.manifest.id} has no input '$inputName'" }
-            require(requestedOutputs.all { it in handle.outputNames }) {
-                "Model ${artifact.manifest.id} is missing requested outputs: ${requestedOutputs - handle.outputNames}"
-            }
-            return handle.run(mapOf(inputName to tensor)) { result ->
-                requestedOutputs.associateWith { name ->
-                    val value = result.get(name).orElseThrow { IllegalStateException("Missing ORT output '$name'") }
-                    val output = value as? OnnxTensor
-                        ?: error("Output '$name' is ${value.javaClass.simpleName}, expected OnnxTensor")
-                    val buffer: FloatBuffer = output.floatBuffer
-                        ?: error("Output '$name' cannot be represented as float32")
-                    val copy = FloatArray(buffer.remaining())
-                    buffer.get(copy)
-                    copy
-                }
+            return runFloatOutputs(artifact, backend, inputName, tensor, requestedOutputs)
+        }
+    }
+
+    /**
+     * Runs a dense unsigned-byte tensor. Java ByteArray values retain their raw 8-bit representation;
+     * OnnxJavaType.UINT8 tells ORT to interpret those bytes as 0..255 rather than signed INT8.
+     */
+    fun runUInt8Tensor(
+        artifact: InstalledModelArtifact,
+        backend: ComputeBackend,
+        inputName: String,
+        values: ByteArray,
+        shape: LongArray,
+        requestedOutputs: Set<String>
+    ): Map<String, FloatArray> {
+        requireDenseShape(shape, values.size)
+        val direct = ByteBuffer.allocateDirect(values.size).order(ByteOrder.nativeOrder())
+        direct.put(values)
+        direct.rewind()
+        OnnxTensor.createTensor(environment, direct, shape, OnnxJavaType.UINT8).use { tensor ->
+            return runFloatOutputs(artifact, backend, inputName, tensor, requestedOutputs)
+        }
+    }
+
+    private fun runFloatOutputs(
+        artifact: InstalledModelArtifact,
+        backend: ComputeBackend,
+        inputName: String,
+        tensor: OnnxTensor,
+        requestedOutputs: Set<String>
+    ): Map<String, FloatArray> {
+        require(requestedOutputs.isNotEmpty())
+        val handle = getOrCreate(artifact, backend)
+        require(inputName in handle.inputNames) { "Model ${artifact.manifest.id} has no input '$inputName'" }
+        require(requestedOutputs.all { it in handle.outputNames }) {
+            "Model ${artifact.manifest.id} is missing requested outputs: ${requestedOutputs - handle.outputNames}"
+        }
+        return handle.run(mapOf(inputName to tensor)) { result ->
+            requestedOutputs.associateWith { name ->
+                val value = result.get(name).orElseThrow { IllegalStateException("Missing ORT output '$name'") }
+                val output = value as? OnnxTensor
+                    ?: error("Output '$name' is ${value.javaClass.simpleName}, expected OnnxTensor")
+                val buffer: FloatBuffer = output.floatBuffer
+                    ?: error("Output '$name' cannot be represented as float32")
+                val copy = FloatArray(buffer.remaining())
+                buffer.get(copy)
+                copy
             }
         }
+    }
+
+    private fun requireDenseShape(shape: LongArray, valueCount: Int) {
+        require(valueCount > 0)
+        require(shape.isNotEmpty() && shape.all { it > 0L })
+        val expected = shape.fold(1L) { acc, dimension -> Math.multiplyExact(acc, dimension) }
+        require(expected == valueCount.toLong()) { "Input contains $valueCount values but shape requires $expected" }
     }
 
     fun unload(modelId: String) = lock.withLock {
