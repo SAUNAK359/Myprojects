@@ -48,7 +48,7 @@ jobs:
           command: |
             source "$BASH_ENV"
             cd SierraServer
-            python -c 'import app.security; import app.credits; import app.provider_crypto; print("security OK")'
+            python -c 'import app.security; import app.credits; import app.provider_crypto; import app.network_security; print("security OK")'
 
   sierra-provider-import:
     docker:
@@ -110,6 +110,22 @@ jobs:
       - store_test_results:
           path: /tmp/sierra-test-results
 
+  sierra-dependency-audit:
+    docker:
+      - image: cimg/python:3.12
+    resource_class: medium
+    working_directory: ~/project
+    steps:
+      - install-server
+      - run:
+          name: Audit installed Python dependencies for known vulnerabilities
+          command: |
+            set -euo pipefail
+            source "$BASH_ENV"
+            python -m pip install pip-audit
+            cd SierraServer
+            pip-audit
+
 workflows:
   sierra-server-build:
     jobs:
@@ -127,4 +143,6 @@ workflows:
       - sierra-static:
           filters: *server_filter
       - sierra-tests:
+          filters: *server_filter
+      - sierra-dependency-audit:
           filters: *server_filter
