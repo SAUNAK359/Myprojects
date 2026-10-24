@@ -27,11 +27,13 @@ data class PrifReconstructionResult(
     val integrity: PhotoIntegrityReport,
     val program: ReconstructionProgram,
     val usedCaptureIndices: List<Int>,
-    val rotationDegrees: Int
+    val rotationDegrees: Int,
+    val meanOcclusionProbability: Double
 ) {
     init {
         require(usedCaptureIndices.isNotEmpty())
         require(rotationDegrees in setOf(0, 90, 180, 270))
+        require(meanOcclusionProbability in 0.0..1.0)
     }
 }
 
@@ -53,14 +55,19 @@ class PrifReconstructionPipeline {
         val selectedIndices = PrifReconstructionCompiler.selectCaptureIndices(program)
         val orderedIndices = listOf(program.referenceFrameIndex) + selectedIndices.filter { it != program.referenceFrameIndex }
         val selected = orderedIndices.map(captured::get)
-        val motionConfidence = (1.0 - (motion?.conservativeRisk ?: 0.75) * 0.55).coerceIn(0.18, 0.98)
+        val motionRisk = motion?.conservativeRisk ?: 0.75
+        val motionConfidence = (1.0 - motionRisk * 0.55).coerceIn(0.18, 0.98)
 
         val observations = selected.mapIndexed { localIndex, frame ->
+            val rollingConfidence = RollingShutterEvidenceModel.globalAlignmentConfidence(
+                frame.metadata.telemetry.rollingShutterSkewNs,
+                motionRisk
+            )
             RawObservation(
                 raw = frame.raw.raw,
                 exposureTimeNs = frame.metadata.telemetry.exposureTimeNs,
                 sensitivityIso = frame.metadata.telemetry.sensitivityIso,
-                alignmentConfidence = if (localIndex == 0) 1f else 0.92f,
+                alignmentConfidence = if (localIndex == 0) 1f else (0.92 * rollingConfidence).toFloat(),
                 motionConfidence = if (localIndex == 0) 1f else motionConfidence.toFloat(),
                 saturationConfidence = saturationConfidence(frame.raw.raw),
                 noise = frame.metadata.representativeNoise()
@@ -68,14 +75,21 @@ class PrifReconstructionPipeline {
         }
 
         val aligned = CfaBurstAlignment.align(observations, program.alignmentSearchRadiusPx)
+        val occlusion = PrifOcclusionEstimator.estimate(aligned.observations)
         val referenceCapture = selected.first()
         val subjectSensorBounds = subject?.takeIf { program.alignmentMode == PrifAlignmentMode.SEMANTIC_LAYERED }
             ?.let { orientedToSensorBounds(it.bounds, referenceCapture.raw.rotationDegrees) }
-        val spatialSupport = subjectSensorBounds?.let { bounds ->
+        val semanticSupport = subjectSensorBounds?.let { bounds ->
             buildSubjectSupport(
                 bounds, aligned, referenceCapture.raw.raw.width, referenceCapture.raw.raw.height,
                 program.subjectProtection
             )
+        }
+        val spatialSupport: (Int, Int, Int) -> Double = { frameIndex, x, y ->
+            val index = y * aligned.observations.first().raw.width + x
+            val visibility = occlusion.visibility[frameIndex][index].toDouble()
+            val semantic = semanticSupport?.invoke(frameIndex, x, y) ?: 1.0
+            (visibility * semantic).coerceIn(0.0, 1.0)
         }
 
         val posterior = PrifBayesianFusion.fuse(
@@ -104,7 +118,8 @@ class PrifReconstructionPipeline {
             integrity = integrity,
             program = program,
             usedCaptureIndices = orderedIndices,
-            rotationDegrees = referenceCapture.raw.rotationDegrees
+            rotationDegrees = referenceCapture.raw.rotationDegrees,
+            meanOcclusionProbability = occlusion.meanOcclusionProbability
         )
     }
 
