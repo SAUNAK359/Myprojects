@@ -20,8 +20,8 @@ import kotlin.math.max
 
 /**
  * Converts one coherent temporal SceneState into a physics-constrained Sierra capture program.
- * Motion is measured from real IMU + visual evidence; uncertainty is carried forward rather than
- * replaced with a categorical fallback.
+ * Identity-aware subject prediction now tightens exposure and burst/fusion policy when confidence
+ * is sufficient; weak subject evidence only raises uncertainty and never fabricates motion.
  */
 class SierraCaptureBridge(
     private val camera: CameraEngine,
@@ -48,7 +48,8 @@ class SierraCaptureBridge(
                 quality = quality,
                 motion = motion,
                 telemetry = telemetry,
-                zoomRatio = camera.snapshot().zoomRatio
+                zoomRatio = camera.snapshot().zoomRatio,
+                subject = engine.subjects.latest()
             )
             val observation = estimateObservation(state)
             val budget = CaptureBudget(
@@ -77,6 +78,16 @@ class SierraCaptureBridge(
         val shadowTailRisk = ((34.0 - p05) / 34.0).coerceIn(0.0, 1.0)
         val shadowRisk = max(quality.darkClipFraction.coerceIn(0.0, 1.0), shadowTailRisk)
         val effectiveConfidence = (state.confidence * (1.0 - 0.35 * state.uncertainty)).coerceIn(0.0, 1.0)
+        val baseExposureCap = MotionExposurePolicy.exposureCapNs(state.motion)
+        val predictive = state.predictiveSubject
+        val predictiveCap = predictive?.let {
+            (baseExposureCap.toDouble() * it.exposureCapMultiplier).toLong().coerceAtLeast(MIN_PREDICTIVE_EXPOSURE_NS)
+        }
+        val exposureCap = minOf(baseExposureCap, predictiveCap ?: baseExposureCap)
+        val combinedMotionRisk = max(
+            state.motion.conservativeRisk,
+            predictive?.kinematicRisk?.times(predictive.confidence) ?: 0.0
+        ).coerceIn(0.0, 1.0)
 
         return CaptureObservation(
             dynamicRangeStops = rangeProxyStops,
@@ -87,8 +98,15 @@ class SierraCaptureBridge(
             facePresent = scene.faceCount > 0,
             digitalZoomRatio = state.zoomRatio.toDouble().coerceAtLeast(1.0),
             confidence = effectiveConfidence,
-            motionExposureCapNs = MotionExposurePolicy.exposureCapNs(state.motion),
-            motionRisk = state.motion.conservativeRisk
+            motionExposureCapNs = exposureCap,
+            motionRisk = combinedMotionRisk,
+            subjectKinematicRisk = predictive?.kinematicRisk,
+            subjectEdgeRisk = predictive?.edgeRisk,
+            subjectTrackConfidence = predictive?.confidence
         )
+    }
+
+    companion object {
+        private const val MIN_PREDICTIVE_EXPOSURE_NS = 2_000_000L
     }
 }
