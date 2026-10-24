@@ -1,0 +1,20 @@
+Sierra Vision — Subject Intelligence Model Notices
+
+This application can provision the following optional model artifacts at runtime. Model bytes are accepted only after SHA-256 verification against the pinned manifest in SierraShippingManifests.kt.
+
+1. RTMPose-S COCO-17 ONNX
+   Purpose: human body keypoint estimation.
+   Upstream/model source: https://huggingface.co/pzoltowski/rtmpose-s-onnx
+   Pinned revision: 8508e7b1ffb82fe0ce6e11b72ea65b96101f44a2
+   Artifact SHA-256: d869413ccfbc0ed027337c773f124d6362436239a83fd0a6e2d43b7a8377792e
+   License: Apache License 2.0.
+
+2. MediaPipe Selfie Segmentation Web ONNX
+   Purpose: prominent-human foreground segmentation.
+   Upstream/model source: https://huggingface.co/onnx-community/mediapipe_selfie_segmentation-web
+   Pinned revision: f2fc46440eb2478139cc0f122c24fab9f00124bc
+   Artifact SHA-256: 44f328e21a3840b7ddb177c8efe50177248d15d25b4905479b06e50d2470584e
+   Model lineage: MediaPipe Selfie Segmentation.
+   License: Apache License 2.0.
+
+A complete copy of the Apache License 2.0 is distributed in this same asset directory as Depth-Anything-V2-Apache-2.0.txt. These notices are informational and do not modify the corresponding upstream licenses or trademarks.
