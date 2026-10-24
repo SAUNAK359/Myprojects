@@ -394,7 +394,7 @@ class CameraEngine(private val context: Context) : AutoCloseable {
     suspend fun restoreUserState() {
         if (currentExtension != userExtension) bindInternal(userExtension)
         aiSetZoom(userZoom)
-        val e = camera?.cameraInfo.exposureState
+        val e = camera?.cameraInfo?.exposureState
         if (e?.isExposureCompensationSupported == true) {
             camera?.cameraControl?.setExposureCompensationIndex(
                 userEvIndex.coerceIn(e.exposureCompensationRange.lower, e.exposureCompensationRange.upper)
