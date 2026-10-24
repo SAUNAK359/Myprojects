@@ -1,18 +1,19 @@
 package com.saunak.director.engine.motion
 
+import com.saunak.director.engine.subject.NormalizedRect
 import kotlin.math.abs
 import kotlin.math.hypot
 
 /**
  * Allocation-bounded translational motion estimator for the preview stream. It estimates robust
- * global image motion first, then measures local residuals so independently moving subjects do not
- * get confused with camera movement. This intentionally stays deterministic and lightweight.
+ * global image motion first, then measures residual motion preferentially inside the persistent
+ * primary-subject region so unrelated moving objects do not masquerade as subject motion.
  */
 class VisualMotionTracker {
     private var previous: LumaMotionFrame? = null
 
     @Synchronized
-    fun push(frame: LumaMotionFrame): VisualMotionObservation? {
+    fun push(frame: LumaMotionFrame, subjectBounds: NormalizedRect? = null): VisualMotionObservation? {
         val prior = previous
         previous = frame
         if (prior == null || prior.width != frame.width || prior.height != frame.height) return null
@@ -38,11 +39,21 @@ class VisualMotionTracker {
         val globalDy = medianInt(dys).toDouble()
         val globalSpeed = hypot(globalDx, globalDy) / dt
 
-        val residualSpeeds = local.map { shift ->
+        val subjectCandidates = subjectBounds?.let { bounds ->
+            local.filter { shift ->
+                val nx = shift.cx.toDouble() / frame.width.toDouble()
+                val ny = shift.cy.toDouble() / frame.height.toDouble()
+                nx in bounds.left..bounds.right && ny in bounds.top..bounds.bottom
+            }
+        }.orEmpty()
+        val roiSupported = subjectCandidates.size >= MIN_SUBJECT_TRACKS
+        val subjectLocal = if (roiSupported) subjectCandidates else local
+
+        val residualSpeeds = subjectLocal.map { shift ->
             hypot(shift.dx.toDouble() - globalDx, shift.dy.toDouble() - globalDy) / dt
         }.sorted()
-        val subjectSpeed = percentile(residualSpeeds, 0.82)
-        val subjectShift = local.maxByOrNull { shift ->
+        val subjectSpeed = percentile(residualSpeeds, if (roiSupported) 0.68 else 0.82)
+        val subjectShift = subjectLocal.maxByOrNull { shift ->
             hypot(shift.dx.toDouble() - globalDx, shift.dy.toDouble() - globalDy)
         }
         val subjectDx = subjectShift?.dx?.toDouble() ?: globalDx
@@ -54,6 +65,15 @@ class VisualMotionTracker {
         val textureConfidence = (1.0 - scoreMedian / 48.0).coerceIn(0.0, 1.0)
         val trackConfidence = (local.size / (GRID_X * GRID_Y).toDouble()).coerceIn(0.0, 1.0)
         val confidence = (0.58 * trackConfidence + 0.42 * textureConfidence).coerceIn(0.0, 1.0)
+        val roiCoverage = if (subjectBounds != null) {
+            (subjectCandidates.size / maxOf(1.0, local.size.toDouble() * subjectBounds.area.coerceAtLeast(0.08))).coerceIn(0.0, 1.0)
+        } else 0.0
+        val subjectConfidence = if (roiSupported) {
+            (confidence * (0.68 + 0.32 * roiCoverage)).coerceIn(0.0, 1.0)
+        } else {
+            // Whole-frame residual remains a useful fallback but cannot claim subject identity.
+            (confidence * 0.42).coerceIn(0.0, 1.0)
+        }
 
         return VisualMotionObservation(
             globalVector = MotionVector(globalDx / dt, globalDy / dt),
@@ -62,13 +82,14 @@ class VisualMotionTracker {
             subjectRisk = speedToRisk(subjectSpeed),
             confidence = confidence,
             frameTimestampNs = frame.sensorTimestampNs,
-            trackCount = local.size
+            trackCount = local.size,
+            subjectConfidence = subjectConfidence
         )
     }
 
     @Synchronized fun reset() { previous = null }
 
-    private data class Shift(val dx: Int, val dy: Int, val score: Double)
+    private data class Shift(val dx: Int, val dy: Int, val score: Double, val cx: Int, val cy: Int)
 
     private fun bestShift(a: LumaMotionFrame, b: LumaMotionFrame, cx: Int, cy: Int): Shift? {
         var best: Shift? = null
@@ -96,7 +117,7 @@ class VisualMotionTracker {
                 }
                 if (n < 9) continue
                 val score = sad.toDouble() / n
-                if (best == null || score < best.score) best = Shift(dx, dy, score)
+                if (best == null || score < best.score) best = Shift(dx, dy, score, cx, cy)
             }
         }
         return best
@@ -119,6 +140,7 @@ class VisualMotionTracker {
         private const val GRID_X = 7
         private const val GRID_Y = 5
         private const val MIN_TRACKS = 12
+        private const val MIN_SUBJECT_TRACKS = 2
         private const val SEARCH_RADIUS = 4
         private const val PATCH_RADIUS = 6
         private const val SAMPLE_STEP = 3
