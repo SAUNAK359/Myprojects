@@ -15,7 +15,9 @@ class PredictiveSubjectPolicyTest {
         velocityX: Double,
         accelerationX: Double = 0.0,
         confidence: Double = 0.92,
-        uncertainty: Double = 0.08
+        uncertainty: Double = 0.08,
+        updateCount: Int = 3,
+        missedUpdates: Int = 0
     ): SubjectTrack {
         val bounds = NormalizedRect(centerX - 0.10, 0.20, centerX + 0.10, 0.78)
         val horizon = 120L
@@ -41,8 +43,8 @@ class PredictiveSubjectPolicyTest {
             uncertainty = uncertainty,
             firstSeenNs = 1_000_000_000L,
             lastSeenNs = 1_200_000_000L,
-            updateCount = 3,
-            missedUpdates = 0,
+            updateCount = updateCount,
+            missedUpdates = missedUpdates,
             mask = null,
             pose = null,
             depth = null,
@@ -58,10 +60,22 @@ class PredictiveSubjectPolicyTest {
         assertTrue(directive.shouldRetargetThreeA)
     }
 
-    @Test fun stableSubjectAvoidsUnnecessaryThreeARetarget() {
-        val directive = PredictiveSubjectPolicy.evaluate(track(centerX = 0.50, velocityX = 0.0))
+    @Test fun stableTrackedSubjectAvoidsUnnecessaryRepeatedThreeARetarget() {
+        val directive = PredictiveSubjectPolicy.evaluate(track(centerX = 0.50, velocityX = 0.0, updateCount = 3))
         assertFalse(directive.shouldRetargetThreeA)
         assertTrue(directive.exposureCapMultiplier > 0.90)
+    }
+
+    @Test fun firstConfidentObservationAcquiresSubjectEvenWhenStatic() {
+        val directive = PredictiveSubjectPolicy.evaluate(track(centerX = 0.50, velocityX = 0.0, updateCount = 1))
+        assertTrue(directive.shouldRetargetThreeA)
+    }
+
+    @Test fun missedTrackCannotAutonomouslyRetargetThreeA() {
+        val directive = PredictiveSubjectPolicy.evaluate(
+            track(centerX = 0.50, velocityX = 0.70, updateCount = 4, missedUpdates = 1)
+        )
+        assertFalse(directive.shouldRetargetThreeA)
     }
 
     @Test fun predictedFrameExitRaisesEdgeRisk() {
