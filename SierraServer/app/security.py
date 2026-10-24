@@ -11,6 +11,9 @@ from pwdlib import PasswordHash
 from app.config import settings
 
 password_hash = PasswordHash.recommended()
+# Used only to make nonexistent-account login attempts perform the same expensive password
+# verification work as real-account failures. This reduces account-existence timing leakage.
+DUMMY_PASSWORD_HASH = password_hash.hash("sierra-dummy-password-never-used-for-login")
 ALGORITHM = "HS256"
 
 
