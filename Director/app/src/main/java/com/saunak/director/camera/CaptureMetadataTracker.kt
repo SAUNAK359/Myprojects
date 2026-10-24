@@ -35,8 +35,8 @@ data class FrameSensorCalibration(
     /** Returns [slope, intercept] for CFA phase 0..3 where variance = slope*signal + intercept. */
     fun noiseForPhase(phase: Int): Pair<Double, Double>? {
         val values = noiseProfile ?: return null
-        val p = phase.coerceIn(0, 3) * 2
-        return Pair(values[p], values[p + 1])
+        val offset = phase.coerceIn(0, 3) * 2
+        return Pair(values[offset], values[offset + 1])
     }
 }
 
@@ -60,10 +60,7 @@ object FrameCalibrationLedger {
 
 /**
  * Bounded timestamp-indexed Camera2 metadata ledger.
- *
- * SENSOR_TIMESTAMP is the bridge between Camera2 CaptureResult and CameraX ImageInfo.timestamp for
- * buffers emitted from the same sensor capture. Keeping the ledger bounded avoids retaining an
- * unbounded stream of preview results while allowing RAW callbacks to resolve exact per-frame data.
+ * SENSOR_TIMESTAMP is the bridge between Camera2 CaptureResult and CameraX ImageInfo.timestamp.
  */
 class CaptureMetadataTracker(
     private val capacity: Int = 96
@@ -118,16 +115,21 @@ class CaptureMetadataTracker(
         val black = result.get(CaptureResult.SENSOR_DYNAMIC_BLACK_LEVEL)?.copyOf()
         val white = result.get(CaptureResult.SENSOR_DYNAMIC_WHITE_LEVEL)
         val noise = result.get(CaptureResult.SENSOR_NOISE_PROFILE)?.let { profile ->
-            if (profile.size == 4) DoubleArray(8) { index ->
+            if (profile.size != 4) null else DoubleArray(8) { index ->
                 val pair = profile[index / 2]
                 if (index % 2 == 0) pair.first else pair.second
-            } else null
+            }
         }
         val neutral = result.get(CaptureResult.SENSOR_NEUTRAL_COLOR_POINT)?.let { points ->
-            if (points.size == 3) DoubleArray(3) { points[it].toDouble() } else null
+            if (points.size != 3) null else DoubleArray(3) { index -> points[index].toDouble() }
         }
         val gains = result.get(CaptureResult.COLOR_CORRECTION_GAINS)?.let { value ->
-            floatArrayOf(value.red, value.greenEven, value.greenOdd, value.blue)
+            floatArrayOf(
+                value.getRed(),
+                value.getGreenEven(),
+                value.getGreenOdd(),
+                value.getBlue()
+            )
         }
         val transform = result.get(CaptureResult.COLOR_CORRECTION_TRANSFORM)?.let { matrix ->
             DoubleArray(9) { index ->
