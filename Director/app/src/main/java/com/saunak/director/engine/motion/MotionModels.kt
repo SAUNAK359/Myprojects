@@ -107,12 +107,15 @@ data class VisualMotionObservation(
     val subjectRisk: Double,
     val confidence: Double,
     val frameTimestampNs: Long,
-    val trackCount: Int
+    val trackCount: Int,
+    /** Confidence that the residual vector belongs to the tracked primary subject. */
+    val subjectConfidence: Double = confidence
 ) {
     init {
         require(globalRisk in 0.0..1.0)
         require(subjectRisk in 0.0..1.0)
         require(confidence in 0.0..1.0)
+        require(subjectConfidence in 0.0..1.0)
         require(frameTimestampNs > 0)
         require(trackCount >= 0)
     }
