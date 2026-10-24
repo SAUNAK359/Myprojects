@@ -212,7 +212,7 @@ function Ensure-WindowsPrerequisites {
     $driveName = $rootPath.TrimEnd('\').TrimEnd(':')
     $drive = Get-PSDrive -Name $driveName
     $freeGb = [math]::Round($drive.Free / 1GB, 1)
-    Write-Host "Free disk on $rootPath: $freeGb GB"
+    Write-Host "Free disk on ${rootPath}: $freeGb GB"
     if ($freeGb -lt $RequiredFreeDiskGb) {
         Fail "At least $RequiredFreeDiskGb GB free disk space is required before setup."
     }
@@ -381,7 +381,6 @@ function Ensure-LocalEnvironment([string]$ServerRoot) {
     $example = Join-Path $ServerRoot '.env.example'
 
     if (-not (Test-Path $envFile)) {
-        # A pre-existing DB without its matching password must never be silently re-keyed.
         $volumeExists = $false
         try {
             docker volume inspect 'sierra-vision_sierra_pgdata' *> $null
@@ -394,7 +393,6 @@ function Ensure-LocalEnvironment([string]$ServerRoot) {
         $content = Get-Content $example -Raw
         $dbPassword = ConvertTo-Base64Url (New-RandomBytes 32)
         $jwtSecret = ConvertTo-Base64Url (New-RandomBytes 48)
-        # Fernet requires exactly 32 random bytes encoded with URL-safe Base64 including padding.
         $providerKey = ConvertTo-Base64Url (New-RandomBytes 32) $true
 
         $content = Set-EnvValue $content 'COMPOSE_PROJECT_NAME' 'sierra-vision'
@@ -433,7 +431,6 @@ function Start-SierraLocal([string]$ServerRoot) {
     Write-Step 'Starting Sierra PostgreSQL and API locally'
     Push-Location $ServerRoot
     try {
-        # Public ingress remains deliberately disabled during initial setup.
         try { docker compose --profile tunnel --profile public stop cloudflared caddy 2>$null | Out-Null } catch { }
         docker compose pull db | Out-Host
         if ($LASTEXITCODE -ne 0) { Fail 'Could not download the PostgreSQL image.' }
