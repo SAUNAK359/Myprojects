@@ -6,8 +6,8 @@ import com.saunak.director.engine.capture.AutoExposureSnapshot
 import com.saunak.director.engine.capture.CaptureBudget
 import com.saunak.director.engine.capture.CaptureCompiler
 import com.saunak.director.engine.capture.CaptureObservation
-import com.saunak.director.engine.capture.CaptureProgram
-import com.saunak.director.engine.capture.MotionClass
+import com.saunak.director.engine.state.SceneState
+import com.saunak.director.engine.state.SceneStateAssembler
 import com.saunak.director.platform.ThermalPolicy
 import com.saunak.director.processing.TechnicalQuality
 import kotlinx.coroutines.Dispatchers
@@ -16,8 +16,9 @@ import kotlin.math.log2
 import kotlin.math.max
 
 /**
- * Converts only verified camera/quality state into a physics-constrained Sierra capture program.
- * Motion intentionally defaults to MEDIUM until gyro/flow experts provide trustworthy evidence.
+ * Converts one coherent temporal SceneState into a physics-constrained Sierra capture program.
+ * Motion is measured from real IMU + visual evidence; uncertainty is carried forward rather than
+ * replaced with a categorical fallback.
  */
 class SierraCaptureBridge(
     private val camera: CameraEngine,
@@ -30,6 +31,8 @@ class SierraCaptureBridge(
         thermal: ThermalPolicy
     ): Result<CaptureProgram> = withContext(Dispatchers.Default) {
         runCatching {
+            // Refresh the rapidly changing part of the world model immediately before planning.
+            val motion = engine.motionProbe.measure(camera)
             val telemetry = requireNotNull(camera.sensorTelemetry()) {
                 "No synchronized Camera2 sensor telemetry is available yet"
             }
@@ -38,7 +41,14 @@ class SierraCaptureBridge(
             val module = requireNotNull(cameraId?.let(twin::camera)) {
                 "Active camera is missing from Sierra device twin"
             }
-            val observation = estimateObservation(quality, scene, camera.snapshot().zoomRatio)
+            val state = SceneStateAssembler.assemble(
+                scene = scene,
+                quality = quality,
+                motion = motion,
+                telemetry = telemetry,
+                zoomRatio = camera.snapshot().zoomRatio
+            )
+            val observation = estimateObservation(state)
             val budget = CaptureBudget(
                 thermalPressure = thermal.thermalPressure,
                 memoryPressure = 0.0,
@@ -54,32 +64,28 @@ class SierraCaptureBridge(
         }
     }
 
-    internal fun estimateObservation(
-        quality: TechnicalQuality,
-        scene: SierraSceneSignals,
-        zoomRatio: Float
-    ): CaptureObservation {
+    internal fun estimateObservation(state: SceneState): CaptureObservation {
+        val quality = state.technicalQuality
+        val scene = state.sceneSignals
         val p05 = quality.shadowP05.coerceIn(0.0, 255.0)
         val p95 = quality.highlightP95.coerceIn(0.0, 255.0)
-        // This is a scene-luminance proxy, not claimed sensor dynamic range. It is used only as a
-        // relative capture-policy input and is clamped to a physically plausible decision range.
+        // Scene-luminance proxy only; not a claim about physical sensor dynamic range.
         val rangeProxyStops = log2((p95 + 1.0) / (p05 + 1.0)).coerceIn(0.0, 14.0)
         val highlightTailRisk = ((p95 - 230.0) / 25.0).coerceIn(0.0, 1.0)
         val highlightRisk = max(quality.brightClipFraction.coerceIn(0.0, 1.0), highlightTailRisk)
         val shadowTailRisk = ((34.0 - p05) / 34.0).coerceIn(0.0, 1.0)
         val shadowRisk = max(quality.darkClipFraction.coerceIn(0.0, 1.0), shadowTailRisk)
+        val effectiveConfidence = (state.confidence * (1.0 - 0.35 * state.uncertainty)).coerceIn(0.0, 1.0)
 
-        val subjectMotion = if (scene.primaryHumanSubject) MotionClass.MEDIUM else MotionClass.MEDIUM
-        val cameraMotion = MotionClass.MEDIUM
         return CaptureObservation(
             dynamicRangeStops = rangeProxyStops,
             highlightClipRisk = highlightRisk,
             shadowNoiseRisk = shadowRisk,
-            cameraMotion = cameraMotion,
-            subjectMotion = subjectMotion,
+            cameraMotion = state.motion.camera.toMotionClass(),
+            subjectMotion = state.motion.subject.toMotionClass(),
             facePresent = scene.faceCount > 0,
-            digitalZoomRatio = zoomRatio.toDouble().coerceAtLeast(1.0),
-            confidence = scene.confidence.coerceIn(0.0, 1.0)
+            digitalZoomRatio = state.zoomRatio.toDouble().coerceAtLeast(1.0),
+            confidence = effectiveConfidence
         )
     }
 }
