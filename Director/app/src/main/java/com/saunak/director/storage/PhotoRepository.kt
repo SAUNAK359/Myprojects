@@ -89,6 +89,30 @@ class PhotoRepository(private val context: Context) {
         }
     }
 
+    /**
+     * Saves a Sierra computational RAW render without re-decoding/downscaling it. The caller retains
+     * ownership of [source]; temporary crop/look bitmaps created here are released before return.
+     */
+    suspend fun saveComputational(
+        source: Bitmap,
+        metadataSourceJpeg: File,
+        look: LookSpec,
+        aspectRatio: String = "4:3",
+        cropCenterX: Double = 0.5,
+        cropCenterY: Double = 0.5
+    ): Uri {
+        require(!source.isRecycled && source.width > 0 && source.height > 0)
+        val ratio = SierraCropPolicy.ratioOrNull(aspectRatio)
+        val cropped = if (ratio == null) source else cropToRatio(source, ratio.first, ratio.second, cropCenterX, cropCenterY)
+        val rendered = LookProcessor.apply(cropped, look)
+        return try {
+            saveProcessed(rendered, metadataSourceJpeg)
+        } finally {
+            if (rendered !== cropped && !rendered.isRecycled) rendered.recycle()
+            if (cropped !== source && !cropped.isRecycled) cropped.recycle()
+        }
+    }
+
     suspend fun saveOriginal(file: File): Uri = saveRawJpeg(
         file = file,
         relativePath = "Pictures/Sierra Vision/Originals",
