@@ -1,6 +1,7 @@
 package com.saunak.director.engine.motion
 
 import android.content.Context
+import android.os.SystemClock
 import com.saunak.director.engine.belief.Belief
 import com.saunak.director.engine.belief.SceneBeliefGraph
 import java.util.concurrent.atomic.AtomicReference
@@ -37,9 +38,10 @@ class MotionFusionEngine(
         return snapshot
     }
 
-    fun latest(nowNs: Long = System.nanoTime()): MotionSnapshot {
-        val value = latestRef.get() ?: return MotionSnapshot.unobserved(nowNs)
-        val ageNs = (nowNs - value.frameTimestampNs).coerceAtLeast(0L)
+    /** `nowElapsedNs` is deliberately in Android elapsed-realtime, matching visual/IMU fusion time. */
+    fun latest(nowElapsedNs: Long = SystemClock.elapsedRealtimeNanos()): MotionSnapshot {
+        val value = latestRef.get() ?: return MotionSnapshot.unobserved(nowElapsedNs)
+        val ageNs = (nowElapsedNs - value.frameTimestampNs).coerceAtLeast(0L)
         if (ageNs <= STALE_AFTER_NS) return value
         val agePenalty = ((ageNs - STALE_AFTER_NS).toDouble() / STALE_AFTER_NS).coerceIn(0.0, 1.0)
         return value.copy(
@@ -137,13 +139,16 @@ class MotionFusionEngine(
     }
 
     private fun publish(snapshot: MotionSnapshot) {
+        // SceneBeliefGraph is already aged using System.nanoTime() elsewhere in Sierra. Keep that
+        // graph clock independent from the sensor/IMU clock used above.
+        val graphNowNs = System.nanoTime()
         beliefs.put(
             SceneBeliefGraph.CAMERA_MOTION,
             Belief(
                 value = snapshot.camera,
                 confidence = snapshot.camera.confidence,
                 uncertainty = snapshot.camera.uncertainty,
-                timestampNs = snapshot.frameTimestampNs,
+                timestampNs = graphNowNs,
                 source = snapshot.camera.source,
                 halfLifeNs = CAMERA_HALF_LIFE_NS
             )
@@ -154,7 +159,7 @@ class MotionFusionEngine(
                 value = snapshot.subject,
                 confidence = snapshot.subject.confidence,
                 uncertainty = snapshot.subject.uncertainty,
-                timestampNs = snapshot.frameTimestampNs,
+                timestampNs = graphNowNs,
                 source = snapshot.subject.source,
                 halfLifeNs = SUBJECT_HALF_LIFE_NS
             )
