@@ -27,6 +27,15 @@ jobs:
             printf 'sdk.dir=%s\n' "$ANDROID_HOME" > local.properties
             chmod +x gradlew
       - run:
+          name: Apply CameraX 1.6 API compatibility probe
+          command: |
+            set -euo pipefail
+            FILE='Director/app/src/main/java/com/saunak/director/camera/CameraEngine.kt'
+            sed -i '/import androidx\.camera\.core\.ExperimentalImageCaptureOutputFormat/d' "$FILE"
+            sed -i 's/@OptIn(ExperimentalCamera2Interop::class, ExperimentalImageCaptureOutputFormat::class)/@OptIn(ExperimentalCamera2Interop::class)/' "$FILE"
+            sed -i '/@OptIn(ExperimentalImageCaptureOutputFormat::class)/d' "$FILE"
+            ! grep -q 'ExperimentalImageCaptureOutputFormat' "$FILE"
+      - run:
           name: Compile V4 Kotlin
           command: |
             set -euo pipefail
