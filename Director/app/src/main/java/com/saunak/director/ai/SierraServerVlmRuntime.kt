@@ -2,6 +2,7 @@ package com.saunak.director.ai
 
 import android.content.Context
 import android.graphics.Bitmap
+import com.saunak.director.backend.SierraJobDto
 import com.saunak.director.backend.SierraServerClient
 import com.saunak.director.camera.CameraSnapshot
 import com.saunak.director.camera.CapabilityRegistry
@@ -28,10 +29,6 @@ interface SierraCloudJobRuntime {
     fun cancelCloudJob()
 }
 
-/**
- * Sierra AI cloud runtime. The APK knows only the Sierra Server origin and user session.
- * Provider endpoints, model names and provider credentials never exist in this runtime.
- */
 class SierraServerVlmRuntime(
     context: Context,
     private val server: SierraServerClient = SierraServerClient(context),
@@ -39,81 +36,51 @@ class SierraServerVlmRuntime(
 ) : VlmRuntime, SierraCloudJobRuntime {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val settlementPrefs = context.getSharedPreferences("sierra_ai_settlement_v1", Context.MODE_PRIVATE)
-    @Volatile private var maxImageDimension = 704
-    @Volatile private var activeJobId: String? = null
 
-    override suspend fun load(modelPath: String, projectorPath: String): Result<Unit> =
-        if (isReady()) Result.success(Unit) else Result.failure(IllegalStateException("Sign in to Sierra Vision"))
+    @Volatile
+    private var maxImageDimension = 704
+
+    @Volatile
+    private var activeJobId: String? = null
+
+    override suspend fun load(modelPath: String, projectorPath: String): Result<Unit> {
+        return if (isReady()) {
+            Result.success(Unit)
+        } else {
+            Result.failure(IllegalStateException("Sign in to Sierra Vision"))
+        }
+    }
 
     override suspend fun plan(
         image: Bitmap,
         capabilities: CapabilityRegistry,
         camera: CameraSnapshot,
         skillContext: String
-    ): Result<PlanOutput> = runCatching {
-        check(isReady()) { "Sierra AI requires a signed-in Sierra Server session" }
-        val capabilitySkill = withContext(Dispatchers.IO) {
-            deviceSkill.refresh(capabilities, camera)
-            File(deviceSkill.machineFilePath()).takeIf { it.isFile }?.readText() ?: "{}"
+    ): Result<PlanOutput> {
+        if (!isReady()) {
+            return Result.failure(IllegalStateException("Sierra AI requires a signed-in Sierra Server session"))
         }
-        val quality = PhotoQuality.analyze(image)
-        val localQuality = JSONObject().apply {
-            put("mean_luma", quality.meanLuma)
-            put("luma_std_dev", quality.lumaStdDev)
-            put("highlight_clip", quality.brightClipFraction)
-            put("shadow_clip", quality.darkClipFraction)
-            put("edge_energy", quality.edgeEnergy)
-            put("heuristic_score", quality.heuristicScore)
-            put("catastrophic", quality.catastrophic)
-        }.toString()
-        val cameraContext = JSONObject().apply {
-            put("snapshot", camera.compactDescription())
-            put("lens_facing", capabilities.lensFacing)
-            put("zoom", camera.zoomRatio)
-            put("exposure_index", camera.exposureCompensationIndex)
-            put("extension", camera.extension.wireName)
-        }.toString()
 
-        val created = server.createAnalysisJob(
-            imageJpeg = encode(image),
-            cameraContextJson = cameraContext,
-            deviceCapabilitiesJson = capabilitySkill,
-            localQualityJson = localQuality,
-            skillContext = skillContext,
-            idempotencyKey = UUID.randomUUID().toString()
-        ).getOrThrow()
-        activeJobId = created.id
-        var job = created
-        while (true) {
-            when (job.state) {
-                "ready" -> {
-                    val dto = checkNotNull(job.plan) { "Sierra Server returned ready without a plan" }
-                    val plan = PlanOutput(
-                        scene = dto.scene,
-                        objective = dto.objective,
-                        skillBranch = dto.branch,
-                        referenceScore = dto.reference_score,
-                        referenceAccept = dto.reference_accept,
-                        toolCalls = dto.calls.map { ToolCall(it.id, it.value, it.x, it.y, it.stringValue) },
-                        recapture = dto.recapture,
-                        aspectRatio = dto.aspect_ratio,
-                        cropCenterX = dto.crop_center_x,
-                        cropCenterY = dto.crop_center_y,
-                        planner = "sierra_ai_server"
-                    )
-                    return@runCatching VlmContractValidator.plan(plan)
-                }
-                "failed", "cancelled", "expired" -> {
-                    activeJobId = null
-                    error(job.error_message ?: "Sierra AI job ${job.state}")
-                }
-                "completed" -> {
-                    activeJobId = null
-                    error("Sierra AI job completed before camera capture")
-                }
-            }
-            delay(120)
-            job = server.job(created.id).getOrThrow()
+        return try {
+            val capabilityJson = readCapabilitySnapshot(capabilities, camera)
+            val localQualityJson = buildQualityJson(image)
+            val cameraContextJson = buildCameraContextJson(capabilities, camera)
+            val created = server.createAnalysisJob(
+                imageJpeg = encode(image),
+                cameraContextJson = cameraContextJson,
+                deviceCapabilitiesJson = capabilityJson,
+                localQualityJson = localQualityJson,
+                skillContext = skillContext,
+                idempotencyKey = UUID.randomUUID().toString()
+            ).getOrThrow()
+
+            activeJobId = created.id
+            val readyJob = awaitReady(created)
+            val plan = toPlanOutput(readyJob)
+            Result.success(VlmContractValidator.plan(plan))
+        } catch (t: Throwable) {
+            activeJobId = null
+            Result.failure(t)
         }
     }
 
@@ -125,9 +92,11 @@ class SierraServerVlmRuntime(
         previousIssues: List<String>,
         evaluationContext: String,
         capabilities: CapabilityRegistry
-    ): Result<EvaluationOutput> = Result.failure(
-        UnsupportedOperationException("Sierra Vision uses one cloud plan; final technical QA is local")
-    )
+    ): Result<EvaluationOutput> {
+        return Result.failure(
+            UnsupportedOperationException("Sierra Vision uses one cloud plan; final technical QA is local")
+        )
+    }
 
     override suspend fun completeFinalCapture(captureId: String): Result<Unit> {
         val jobId = activeJobId ?: return Result.success(Unit)
@@ -139,20 +108,25 @@ class SierraServerVlmRuntime(
         return retryPendingSettlement()
     }
 
-    override suspend fun retryPendingSettlement(): Result<Unit> = runCatching {
-        val jobId = settlementPrefs.getString(KEY_PENDING_JOB, null) ?: return@runCatching Unit
-        val captureId = settlementPrefs.getString(KEY_PENDING_CAPTURE, null) ?: return@runCatching Unit
-        var last: Throwable? = null
+    override suspend fun retryPendingSettlement(): Result<Unit> {
+        val jobId = settlementPrefs.getString(KEY_PENDING_JOB, null) ?: return Result.success(Unit)
+        val captureId = settlementPrefs.getString(KEY_PENDING_CAPTURE, null) ?: return Result.success(Unit)
+        var lastError: Throwable? = null
+
         repeat(3) { attempt ->
             val result = server.complete(jobId, captureId)
             if (result.isSuccess) {
-                settlementPrefs.edit().remove(KEY_PENDING_JOB).remove(KEY_PENDING_CAPTURE).apply()
-                return@runCatching Unit
+                settlementPrefs.edit()
+                    .remove(KEY_PENDING_JOB)
+                    .remove(KEY_PENDING_CAPTURE)
+                    .apply()
+                return Result.success(Unit)
             }
-            last = result.exceptionOrNull()
+            lastError = result.exceptionOrNull()
             delay(250L * (1 shl attempt))
         }
-        throw last ?: IllegalStateException("Sierra credit settlement is pending")
+
+        return Result.failure(lastError ?: IllegalStateException("Sierra credit settlement is pending"))
     }
 
     override fun cancelCloudJob() {
@@ -165,12 +139,93 @@ class SierraServerVlmRuntime(
         maxImageDimension = pixels.coerceIn(384, 896)
     }
 
-    override fun cancel() = cancelCloudJob()
+    override fun cancel() {
+        cancelCloudJob()
+    }
+
     override fun isReady(): Boolean = server.configured && server.authenticated
-    override fun unload() = cancelCloudJob()
+
+    override fun unload() {
+        cancelCloudJob()
+    }
+
     override fun close() {
         cancelCloudJob()
         scope.cancel()
+    }
+
+    private suspend fun readCapabilitySnapshot(
+        capabilities: CapabilityRegistry,
+        camera: CameraSnapshot
+    ): String = withContext(Dispatchers.IO) {
+        deviceSkill.refresh(capabilities, camera)
+        val file = File(deviceSkill.machineFilePath())
+        if (file.isFile) file.readText() else "{}"
+    }
+
+    private fun buildQualityJson(image: Bitmap): String {
+        val quality = PhotoQuality.analyze(image)
+        return JSONObject().apply {
+            put("mean_luma", quality.meanLuma)
+            put("luma_std_dev", quality.lumaStdDev)
+            put("highlight_clip", quality.brightClipFraction)
+            put("shadow_clip", quality.darkClipFraction)
+            put("edge_energy", quality.edgeEnergy)
+            put("heuristic_score", quality.heuristicScore)
+            put("catastrophic", quality.catastrophic)
+        }.toString()
+    }
+
+    private fun buildCameraContextJson(
+        capabilities: CapabilityRegistry,
+        camera: CameraSnapshot
+    ): String = JSONObject().apply {
+        put("snapshot", camera.compactDescription())
+        put("lens_facing", capabilities.lensFacing)
+        put("zoom", camera.zoomRatio)
+        put("exposure_index", camera.exposureCompensationIndex)
+        put("extension", camera.extension.wireName)
+    }.toString()
+
+    private suspend fun awaitReady(created: SierraJobDto): SierraJobDto {
+        var job = created
+        repeat(MAX_POLL_ATTEMPTS) {
+            when (job.state) {
+                "ready" -> return job
+                "failed", "cancelled", "expired" -> {
+                    throw IllegalStateException(job.error_message ?: "Sierra AI job ${job.state}")
+                }
+                "completed" -> throw IllegalStateException("Sierra AI job completed before camera capture")
+            }
+            delay(POLL_INTERVAL_MS)
+            job = server.job(created.id).getOrThrow()
+        }
+        throw IllegalStateException("Sierra AI job timed out")
+    }
+
+    private fun toPlanOutput(job: SierraJobDto): PlanOutput {
+        val dto = checkNotNull(job.plan) { "Sierra Server returned ready without a plan" }
+        return PlanOutput(
+            scene = dto.scene,
+            objective = dto.objective,
+            skillBranch = dto.branch,
+            referenceScore = dto.reference_score,
+            referenceAccept = dto.reference_accept,
+            toolCalls = dto.calls.map {
+                ToolCall(
+                    id = it.id,
+                    value = it.value,
+                    x = it.x,
+                    y = it.y,
+                    stringValue = it.stringValue
+                )
+            },
+            recapture = dto.recapture,
+            aspectRatio = dto.aspect_ratio,
+            cropCenterX = dto.crop_center_x,
+            cropCenterY = dto.crop_center_y,
+            planner = "sierra_ai_server"
+        )
     }
 
     private fun encode(source: Bitmap): ByteArray {
@@ -183,19 +238,28 @@ class SierraServerVlmRuntime(
                 (source.height * scale).toInt().coerceAtLeast(1),
                 true
             )
-        } else source
+        } else {
+            source
+        }
+
         return try {
             ByteArrayOutputStream().use { stream ->
-                check(output.compress(Bitmap.CompressFormat.JPEG, 76, stream)) { "Could not encode Sierra analysis frame" }
+                check(output.compress(Bitmap.CompressFormat.JPEG, 76, stream)) {
+                    "Could not encode Sierra analysis frame"
+                }
                 stream.toByteArray()
             }
         } finally {
-            if (output !== source && !output.isRecycled) output.recycle()
+            if (output !== source && !output.isRecycled) {
+                output.recycle()
+            }
         }
     }
 
     companion object {
         private const val KEY_PENDING_JOB = "pending_job_id"
         private const val KEY_PENDING_CAPTURE = "pending_capture_id"
+        private const val MAX_POLL_ATTEMPTS = 80
+        private const val POLL_INTERVAL_MS = 120L
     }
 }
