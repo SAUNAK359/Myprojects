@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
+import android.hardware.camera2.CameraMetadata
 import android.os.SystemClock
 import com.saunak.director.camera.CameraEngine
 
@@ -47,7 +48,7 @@ class ShutterMotionProbe(
         return runCatching {
             cameraManager?.getCameraCharacteristics(id)
                 ?.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE) ==
-                CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME
+                CameraMetadata.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME
         }.getOrDefault(false)
     }
 
