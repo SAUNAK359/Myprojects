@@ -3,6 +3,7 @@ package com.saunak.director.engine
 import android.content.ComponentCallbacks2
 import android.content.Context
 import com.saunak.director.engine.belief.SceneBeliefGraph
+import com.saunak.director.engine.device.BackendExecutionProfile
 import com.saunak.director.engine.device.DeviceTwin
 import com.saunak.director.engine.device.DeviceTwinBuilder
 import com.saunak.director.engine.experts.ExpertScheduler
@@ -11,16 +12,15 @@ import com.saunak.director.engine.models.ModelArtifactStore
 import com.saunak.director.engine.models.ModelRegistry
 import com.saunak.director.engine.models.SierraShippingManifests
 import com.saunak.director.engine.quality.QualityCouncil
+import com.saunak.director.engine.reconstruction.DeterministicBurstPipeline
 import com.saunak.director.engine.reconstruction.EvidenceLedger
+import com.saunak.director.engine.runtime.BackendProfiler
 import com.saunak.director.engine.runtime.ComputeHypervisor
 import com.saunak.director.engine.runtime.OnnxRuntimeEngine
+import com.saunak.director.engine.runtime.RuntimeProfileStore
 import java.util.concurrent.atomic.AtomicReference
 
-/**
- * Application-scoped ownership boundary for Sierra's camera intelligence. Heavy model sessions are
- * lazy; constructing Director never allocates neural weights. The current CameraX capture path can
- * therefore coexist safely while RAW/reconstruction backends are introduced incrementally.
- */
+/** Application-scoped ownership boundary for Sierra camera intelligence and image formation. */
 class SierraEngine private constructor(context: Context) : AutoCloseable {
     private val appContext = context.applicationContext
     private val twinRef = AtomicReference<DeviceTwin?>(null)
@@ -33,14 +33,14 @@ class SierraEngine private constructor(context: Context) : AutoCloseable {
     val experts = ExpertScheduler(hypervisor)
     val evidence = EvidenceLedger()
     val quality = QualityCouncil()
+    val deterministicBurst = DeterministicBurstPipeline(evidence)
+    val runtimeProfiles = RuntimeProfileStore(appContext)
+    val backendProfiler = BackendProfiler(appContext, runtimeProfiles, RUNTIME_VERSION)
 
     private val onnxLazy = lazy(LazyThreadSafetyMode.SYNCHRONIZED) { OnnxRuntimeEngine() }
     val onnx: OnnxRuntimeEngine get() = onnxLazy.value
 
-    init {
-        // Registration is lightweight metadata only. Artifact download/session creation remain lazy.
-        SierraShippingManifests.registerAll(models)
-    }
+    init { SierraShippingManifests.registerAll(models) }
 
     fun deviceTwin(refresh: Boolean = false): Result<DeviceTwin> {
         if (!refresh) twinRef.get()?.let { return Result.success(it) }
@@ -49,6 +49,14 @@ class SierraEngine private constructor(context: Context) : AutoCloseable {
     }
 
     fun currentDeviceTwin(): DeviceTwin? = twinRef.get()
+
+    fun measuredProfiles(modelId: String, inputSignature: String): List<BackendExecutionProfile> {
+        val fingerprint = currentDeviceTwin()?.fingerprint ?: android.os.Build.FINGERPRINT.orEmpty().ifBlank { "unknown" }
+        return runtimeProfiles.find(fingerprint, modelId, inputSignature).map { it.profile }
+    }
+
+    fun profileFingerprint(): String = currentDeviceTwin()?.fingerprint
+        ?: android.os.Build.FINGERPRINT.orEmpty().ifBlank { "unknown" }
 
     fun health(): SierraEngineHealth {
         val twin = twinRef.get()
@@ -59,6 +67,7 @@ class SierraEngine private constructor(context: Context) : AutoCloseable {
             provisionedModels = models.all().count { modelArtifacts.findVerified(it) != null },
             beliefCount = beliefs.snapshot(System.nanoTime()).size,
             evidenceRegions = evidence.snapshot().size,
+            measuredBackendProfiles = runtimeProfiles.snapshot().count { it.valid },
             onnxInitialized = onnxLazy.isInitialized()
         )
     }
@@ -82,6 +91,7 @@ class SierraEngine private constructor(context: Context) : AutoCloseable {
     }
 
     companion object {
+        private const val RUNTIME_VERSION = "onnxruntime-1.31.0+sierra-v4"
         @Volatile private var instance: SierraEngine? = null
 
         fun initialize(context: Context): SierraEngine = instance ?: synchronized(this) {
@@ -100,5 +110,6 @@ data class SierraEngineHealth(
     val provisionedModels: Int,
     val beliefCount: Int,
     val evidenceRegions: Int,
+    val measuredBackendProfiles: Int,
     val onnxInitialized: Boolean
 )
