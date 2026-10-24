@@ -55,9 +55,10 @@ class ComputationalRawSafetyOnly internal constructor(
 /**
  * High-level Sierra computational-photography transaction.
  *
- * Once a RAW+JPEG burst has physically succeeded, this API never asks the caller to capture again.
- * Reconstruction failure is represented as [ComputationalRawSafetyOnly] so the simultaneous JPEG
- * becomes the final truth-preserving fallback from that same shutter event.
+ * The only Result failure possible after validation is a failure before a physical RAW burst exists.
+ * Once the sensor has produced RAW+JPEG evidence, every subsequent failure becomes a same-capture
+ * [ComputationalRawSafetyOnly] outcome. This prevents reconstruction/storage setup faults from
+ * causing a second shutter event and preserves the exact JPEG paired with the captured RAW data.
  */
 class ComputationalRawPipeline(
     private val camera: CameraEngine,
@@ -78,26 +79,41 @@ class ComputationalRawPipeline(
                 evOffset = frame.evOffset
             )
         }
+
+        // From this point onward a real sensor capture exists. Never propagate a failure that could
+        // make orchestration perform another physical capture for the same shutter event.
         val capture = camera.captureRawJpegBurst(specs)
+        val sameCaptureJpeg = capture.frames.first().jpegFile
         val protectedSafety = storage.newPendingReference(sessionId)
-        capture.frames.first().jpegFile.copyTo(protectedSafety, overwrite = true)
-        check(protectedSafety.isFile && protectedSafety.length() > 0) { "Could not protect RAW safety JPEG" }
+        val safetyFile = runCatching {
+            sameCaptureJpeg.copyTo(protectedSafety, overwrite = true)
+            check(protectedSafety.isFile && protectedSafety.length() > 0) { "Could not protect RAW safety JPEG" }
+            protectedSafety
+        }.getOrElse { protectionError ->
+            return@runCatching ComputationalRawSafetyOnly(
+                safetyJpeg = sameCaptureJpeg,
+                capture = capture,
+                reason = "safety_reference_protection_failed:${protectionError.message ?: protectionError::class.java.simpleName}",
+                safetyQuality = analyzeSafetyOrNull(sameCaptureJpeg)
+            )
+        }
 
         try {
-            reconstructAndJudge(capture, protectedSafety)
+            reconstructAndJudge(capture, safetyFile)
         } catch (t: Throwable) {
-            val safetyQuality = runCatching {
-                val safetyBitmap = storage.decodeOriented(protectedSafety, QUALITY_LONG_SIDE)
-                try { PhotoQuality.analyze(safetyBitmap) } finally { if (!safetyBitmap.isRecycled) safetyBitmap.recycle() }
-            }.getOrNull()
             ComputationalRawSafetyOnly(
-                safetyJpeg = protectedSafety,
+                safetyJpeg = safetyFile,
                 capture = capture,
                 reason = t.message ?: t::class.java.simpleName,
-                safetyQuality = safetyQuality
+                safetyQuality = analyzeSafetyOrNull(safetyFile)
             )
         }
     }
+
+    private fun analyzeSafetyOrNull(file: File): TechnicalQuality? = runCatching {
+        val safetyBitmap = storage.decodeOriented(file, QUALITY_LONG_SIDE)
+        try { PhotoQuality.analyze(safetyBitmap) } finally { if (!safetyBitmap.isRecycled) safetyBitmap.recycle() }
+    }.getOrNull()
 
     private suspend fun reconstructAndJudge(
         capture: RawJpegBurstCapture,
@@ -114,7 +130,9 @@ class ComputationalRawPipeline(
         val sink = SierraIspBitmapSink(ispPlan)
         val summary = withContext(Dispatchers.Default) { reconstructor.reconstruct(capture, twin, sink) }
         var rendered = sink.bitmap()
-        val rotation = SierraRawContainer.open(capture.frames[summary.referenceFrameIndex].rawFile).use { it.header.rotationDegrees }
+        val rotation = SierraRawContainer.open(capture.frames[summary.referenceFrameIndex].rawFile).use {
+            it.header.rotationDegrees
+        }
         if (rotation != 0) {
             val rotated = Bitmap.createBitmap(
                 rendered,
@@ -132,7 +150,11 @@ class ComputationalRawPipeline(
         val comparisonJpeg = capture.frames[summary.referenceFrameIndex].jpegFile
         val computationalQuality = analyzeBounded(rendered)
         val safetyBitmap = storage.decodeOriented(comparisonJpeg, QUALITY_LONG_SIDE)
-        val safetyQuality = try { PhotoQuality.analyze(safetyBitmap) } finally { if (!safetyBitmap.isRecycled) safetyBitmap.recycle() }
+        val safetyQuality = try {
+            PhotoQuality.analyze(safetyBitmap)
+        } finally {
+            if (!safetyBitmap.isRecycled) safetyBitmap.recycle()
+        }
         val rejection = qualityRejection(summary, computationalQuality, safetyQuality)
 
         return ComputationalRawResult(
@@ -158,7 +180,11 @@ class ComputationalRawPipeline(
             maxOf(1, (bitmap.height * scale).toInt()),
             true
         )
-        return try { PhotoQuality.analyze(sampled) } finally { if (!sampled.isRecycled) sampled.recycle() }
+        return try {
+            PhotoQuality.analyze(sampled)
+        } finally {
+            if (!sampled.isRecycled) sampled.recycle()
+        }
     }
 
     private fun qualityRejection(
