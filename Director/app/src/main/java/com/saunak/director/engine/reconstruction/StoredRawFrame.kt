@@ -32,7 +32,7 @@ data class StoredRawFrame(
     fun openReader(): StoredRawReader = StoredRawReader(this)
 }
 
-/** Writes RAW_SENSOR into a canonical little-endian, padding-free unsigned-16 file. */
+/** Writes Android RAW16 into a canonical little-endian, padding-free unsigned-16 file. */
 object StoredRawWriter {
     fun write(
         image: ImageProxy,
@@ -51,7 +51,7 @@ object StoredRawWriter {
             ?.let { CfaBlackLevel(it.copyOf()) }
             ?: calibration.staticBlackLevel
 
-        val input = plane.buffer.duplicate().order(ByteOrder.nativeOrder())
+        val input = plane.buffer.duplicate().order(ByteOrder.LITTLE_ENDIAN)
         RandomAccessFile(output, "rw").use { raf ->
             raf.setLength(image.width.toLong() * image.height.toLong() * 2L)
             val channel = raf.channel
