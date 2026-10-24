@@ -85,18 +85,23 @@ class ComputationalRawPipeline(
         val capture = camera.captureRawJpegBurst(specs)
         val sameCaptureJpeg = capture.frames.first().jpegFile
         val protectedSafety = storage.newPendingReference(sessionId)
-        val safetyFile = runCatching {
+        val protection = runCatching {
             sameCaptureJpeg.copyTo(protectedSafety, overwrite = true)
-            check(protectedSafety.isFile && protectedSafety.length() > 0) { "Could not protect RAW safety JPEG" }
+            check(protectedSafety.isFile && protectedSafety.length() > 0) {
+                "Could not protect RAW safety JPEG"
+            }
             protectedSafety
-        }.getOrElse { protectionError ->
+        }
+        if (protection.isFailure) {
+            val protectionError = protection.exceptionOrNull()
             return@runCatching ComputationalRawSafetyOnly(
                 safetyJpeg = sameCaptureJpeg,
                 capture = capture,
-                reason = "safety_reference_protection_failed:${protectionError.message ?: protectionError::class.java.simpleName}",
+                reason = "safety_reference_protection_failed:${protectionError?.message ?: protectionError?.javaClass?.simpleName ?: "unknown"}",
                 safetyQuality = analyzeSafetyOrNull(sameCaptureJpeg)
             )
         }
+        val safetyFile = protection.getOrThrow()
 
         try {
             reconstructAndJudge(capture, safetyFile)
@@ -112,7 +117,11 @@ class ComputationalRawPipeline(
 
     private fun analyzeSafetyOrNull(file: File): TechnicalQuality? = runCatching {
         val safetyBitmap = storage.decodeOriented(file, QUALITY_LONG_SIDE)
-        try { PhotoQuality.analyze(safetyBitmap) } finally { if (!safetyBitmap.isRecycled) safetyBitmap.recycle() }
+        try {
+            PhotoQuality.analyze(safetyBitmap)
+        } finally {
+            if (!safetyBitmap.isRecycled) safetyBitmap.recycle()
+        }
     }.getOrNull()
 
     private suspend fun reconstructAndJudge(
