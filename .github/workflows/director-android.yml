@@ -6,6 +6,7 @@ on:
       - director-gemini-v1
       - director-sierra-v3
       - director-sierra-v4-camera-os
+      - director-sierra-v5-temporal-scene
     paths:
       - 'Director/**'
       - '.github/workflows/director-android.yml'
