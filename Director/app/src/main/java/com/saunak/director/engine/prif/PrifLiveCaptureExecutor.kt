@@ -5,6 +5,10 @@ import com.saunak.director.camera.ManualRawFrameSpec
 import com.saunak.director.camera.RawJpegCaptureFrame
 import com.saunak.director.engine.SierraEngine
 import com.saunak.director.engine.capture.CaptureProgram
+import com.saunak.director.engine.quality.QualityAxis
+import com.saunak.director.engine.quality.QualityDisposition
+import com.saunak.director.engine.quality.QualitySignal
+import com.saunak.director.engine.reconstruction.RegionId
 import com.saunak.director.engine.reconstruction.StoredRawBurstFrame
 import com.saunak.director.engine.reconstruction.StoredRawWriter
 import com.saunak.director.platform.MemoryPressureBus
@@ -104,6 +108,7 @@ class PrifLiveCaptureExecutor(
                 ledger = engine.evidence,
                 tileSize = liveProgram.tileSize
             )
+            val evidenceBefore = engine.evidence.snapshot().mapTo(HashSet()) { it.regionId }
             val reconstruction = runCatching {
                 pipeline.reconstruct(
                     frames = storedFrames,
@@ -115,6 +120,7 @@ class PrifLiveCaptureExecutor(
             }.getOrNull()
 
             if (reconstruction == null) {
+                rollbackNewPrifEvidence(evidenceBefore)
                 return PrifLiveCaptureResult(
                     reconstruction = null,
                     safeJpegBytes = safe,
@@ -123,7 +129,36 @@ class PrifLiveCaptureExecutor(
                     reason = "P-RIF reconstruction failed; preserved RAW+JPEG safety observation"
                 )
             }
-            if (!reconstruction.integrity.accepted) {
+
+            val qualityVerdict = engine.quality.evaluate(
+                signals = listOf(
+                    QualitySignal(
+                        axis = QualityAxis.EVIDENCE,
+                        score = reconstruction.integrity.sensorConsistency,
+                        confidence = 0.98,
+                        source = "prif_sensor_consistency",
+                        issue = "reconstruction does not sufficiently explain RAW measurements"
+                    ),
+                    QualitySignal(
+                        axis = QualityAxis.GEOMETRY,
+                        score = (1.0 - reconstruction.meanOcclusionProbability).coerceIn(0.0, 1.0),
+                        confidence = 0.88,
+                        source = "prif_occlusion_posterior",
+                        issue = "temporal geometry or visibility is unstable"
+                    ),
+                    QualitySignal(
+                        axis = QualityAxis.TECHNICAL,
+                        score = reconstruction.integrity.physicalSupport,
+                        confidence = 0.90,
+                        source = "prif_physical_support",
+                        issue = "insufficient sensor support for physical reconstruction"
+                    )
+                ),
+                requireEvidenceForPass = true
+            )
+            val releaseAccepted = reconstruction.integrity.accepted &&
+                qualityVerdict.disposition == QualityDisposition.PASS
+            if (!releaseAccepted) {
                 reconstruction.evidenceRegionIds.forEach(engine.evidence::remove)
                 reconstruction.bitmap.recycle()
                 return PrifLiveCaptureResult(
@@ -131,7 +166,7 @@ class PrifLiveCaptureExecutor(
                     safeJpegBytes = safe,
                     capturedFrameCount = capturedCount,
                     accepted = false,
-                    reason = "P-RIF sensor-consistency/integrity gate rejected reconstruction"
+                    reason = "P-RIF integrity/Quality Council gate retained sensor JPEG"
                 )
             }
             return PrifLiveCaptureResult(
@@ -139,12 +174,21 @@ class PrifLiveCaptureExecutor(
                 safeJpegBytes = safe,
                 capturedFrameCount = capturedCount,
                 accepted = true,
-                reason = "P-RIF physical reconstruction accepted"
+                reason = "P-RIF physical reconstruction accepted by sensor consistency and Quality Council"
             )
         } finally {
             captured = emptyList()
             runCatching { scratch.deleteRecursively() }
         }
+    }
+
+    private fun rollbackNewPrifEvidence(before: Set<RegionId>) {
+        engine.evidence.snapshot()
+            .asSequence()
+            .map { it.regionId }
+            .filter { it !in before && it.value.startsWith("prif/") }
+            .toList()
+            .forEach(engine.evidence::remove)
     }
 
     /**
@@ -159,8 +203,6 @@ class PrifLiveCaptureExecutor(
         val runtime = Runtime.getRuntime()
         val used = runtime.totalMemory() - runtime.freeMemory()
         val headroom = (runtime.maxMemory() - used).coerceAtLeast(0L)
-        // RAW FloatArray (4 B/px) + concurrent JPEG/native/callback overhead. This is deliberately
-        // conservative because one unsupported giant allocation can terminate the process.
         val estimatedPerFrame = max(MIN_FRAME_BYTES, (pixels * ESTIMATED_CAPTURE_BYTES_PER_PIXEL).toLong())
         val allocationBudget = (headroom * LIVE_CAPTURE_HEAP_FRACTION).toLong()
         if (allocationBudget < estimatedPerFrame) return 0
@@ -172,8 +214,6 @@ class PrifLiveCaptureExecutor(
         val runtime = Runtime.getRuntime()
         val used = runtime.totalMemory() - runtime.freeMemory()
         val headroom = (runtime.maxMemory() - used).coerceAtLeast(0L)
-        // Final ARGB bitmap plus haloed per-frame tiles and temporary RGB tile. Keep a strong reserve
-        // for CameraX, UI, ORT and GC fragmentation.
         val byHeap = (headroom * LIVE_OUTPUT_HEAP_FRACTION / OUTPUT_BYTES_PER_PIXEL_ESTIMATE).toLong()
         return minOf(width.toLong() * height.toLong(), byHeap.coerceAtLeast(MIN_OUTPUT_PIXELS))
     }
