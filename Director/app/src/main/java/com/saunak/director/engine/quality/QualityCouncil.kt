@@ -33,19 +33,27 @@ data class RepairAction(
 
 data class QualityVerdict(
     val disposition: QualityDisposition,
+    /** Missing axes are intentionally absent; absence must never be interpreted as a perfect score. */
     val axisScores: Map<QualityAxis, Double>,
+    val unknownAxes: Set<QualityAxis>,
     val repairs: List<RepairAction>,
     val criticalReasons: List<String>
 )
 
 /** Independent judges vote by axis. Low-confidence model opinions cannot overrule strong physical checks. */
 class QualityCouncil {
-    fun evaluate(signals: List<QualitySignal>): QualityVerdict {
+    fun evaluate(
+        signals: List<QualitySignal>,
+        requireEvidenceForPass: Boolean = true
+    ): QualityVerdict {
         require(signals.isNotEmpty())
-        val axisScores = QualityAxis.entries.associateWith { axis ->
-            val votes = signals.filter { it.axis == axis }
-            if (votes.isEmpty()) 1.0 else weightedRobustScore(votes)
+        val axisScores = buildMap {
+            QualityAxis.entries.forEach { axis ->
+                val votes = signals.filter { it.axis == axis }
+                if (votes.isNotEmpty()) put(axis, weightedRobustScore(votes))
+            }
         }
+        val unknown = QualityAxis.entries.filterNot(axisScores::containsKey).toSet()
         val critical = mutableListOf<String>()
         val repairs = mutableListOf<RepairAction>()
 
@@ -61,29 +69,35 @@ class QualityCouncil {
             }
         }
 
-        val evidence = axisScores.getValue(QualityAxis.EVIDENCE)
-        val human = axisScores.getValue(QualityAxis.HUMAN)
-        val geometry = axisScores.getValue(QualityAxis.GEOMETRY)
-        val technical = axisScores.getValue(QualityAxis.TECHNICAL)
-        if (evidence < 0.30) critical += "captured evidence does not support the rendered result"
-        if (human < 0.25) critical += "human fidelity is below the release threshold"
-        if (geometry < 0.25) critical += "geometric reconstruction is unstable"
-        if (technical < 0.20) critical += "technical image quality is catastrophically low"
+        axisScores[QualityAxis.EVIDENCE]?.let { if (it < 0.30) critical += "captured evidence does not support the rendered result" }
+        axisScores[QualityAxis.HUMAN]?.let { if (it < 0.25) critical += "human fidelity is below the release threshold" }
+        axisScores[QualityAxis.GEOMETRY]?.let { if (it < 0.25) critical += "geometric reconstruction is unstable" }
+        axisScores[QualityAxis.TECHNICAL]?.let { if (it < 0.20) critical += "technical image quality is catastrophically low" }
+
+        // Absence of evidence is not itself proof that a deterministic image is bad, but it prevents
+        // a neural/rewritten result from being declared fully validated.
+        if (requireEvidenceForPass && QualityAxis.EVIDENCE in unknown) {
+            repairs += RepairAction(
+                RepairStage.RECONSTRUCTION,
+                region = null,
+                reason = "evidence judge unavailable; retain or compare against deterministic reconstruction",
+                magnitude = -0.20
+            )
+        }
 
         val disposition = when {
             critical.isNotEmpty() -> QualityDisposition.REJECT
             repairs.isNotEmpty() || axisScores.values.any { it < 0.62 } -> QualityDisposition.LOCAL_REPAIR
+            requireEvidenceForPass && QualityAxis.EVIDENCE in unknown -> QualityDisposition.LOCAL_REPAIR
             else -> QualityDisposition.PASS
         }
-        return QualityVerdict(disposition, axisScores, repairs.distinct(), critical.distinct())
+        return QualityVerdict(disposition, axisScores, unknown, repairs.distinct(), critical.distinct())
     }
 
     private fun weightedRobustScore(votes: List<QualitySignal>): Double {
         val credible = votes.filter { it.confidence > 0.0 }
-        if (credible.isEmpty()) return 1.0
+        if (credible.isEmpty()) return 0.5 // unknown/neutral, never perfect
         val sorted = credible.sortedBy { it.score }
-        // A high-confidence low score should matter more than an optimistic average. Blend weighted
-        // mean with the lower quartile to make the council sensitive to localized failures.
         val totalWeight = sorted.sumOf { it.confidence }.coerceAtLeast(1e-9)
         val mean = sorted.sumOf { it.score * it.confidence } / totalWeight
         val lowerQuartile = sorted[((sorted.size - 1) * 0.25).toInt()].score
