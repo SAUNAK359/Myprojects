@@ -20,7 +20,11 @@ data class CaptureObservation(
     val subjectMotion: MotionClass,
     val facePresent: Boolean,
     val digitalZoomRatio: Double = 1.0,
-    val confidence: Double = 1.0
+    val confidence: Double = 1.0,
+    /** Continuous physics-derived cap from the temporal motion subsystem. */
+    val motionExposureCapNs: Long? = null,
+    /** Continuous upper-bound motion risk retained for diagnostics/future policy. */
+    val motionRisk: Double? = null
 ) {
     init {
         require(dynamicRangeStops >= 0)
@@ -28,6 +32,8 @@ data class CaptureObservation(
         require(shadowNoiseRisk in 0.0..1.0)
         require(digitalZoomRatio >= 1.0)
         require(confidence in 0.0..1.0)
+        require(motionExposureCapNs == null || motionExposureCapNs > 0)
+        require(motionRisk == null || motionRisk in 0.0..1.0)
     }
 }
 
@@ -80,8 +86,6 @@ class CaptureCompiler {
         val candidates = mutableListOf<CaptureProgram>()
         candidates += safeSingle(camera, autoExposure, observation, oemExtensionAvailable)
 
-        // Severe thermal/memory policies may explicitly allow only one or two physical captures.
-        // In that state a "burst" would add complexity without enough samples to justify custom fusion.
         if (budget.maxBurstFrames >= MIN_COMPUTATIONAL_BURST) {
             if (camera.manualSensorSupported && camera.rawSupported && CapturePath.RAW_CUSTOM in camera.preferredCapturePaths) {
                 candidates += constantRawBurst(camera, autoExposure, observation, budget)
@@ -187,11 +191,14 @@ class CaptureCompiler {
         return minOf(target, budget.maxBurstFrames, pressureCap).coerceAtLeast(MIN_COMPUTATIONAL_BURST)
     }
 
-    private fun maxExposureNs(observation: CaptureObservation): Long = when (maxMotion(observation)) {
-        MotionClass.HIGH -> 8_000_000L
-        MotionClass.MEDIUM -> 12_500_000L
-        MotionClass.LOW -> 25_000_000L
-        MotionClass.STATIC -> 66_666_667L
+    private fun maxExposureNs(observation: CaptureObservation): Long {
+        observation.motionExposureCapNs?.let { return it }
+        return when (maxMotion(observation)) {
+            MotionClass.HIGH -> 8_000_000L
+            MotionClass.MEDIUM -> 12_500_000L
+            MotionClass.LOW -> 25_000_000L
+            MotionClass.STATIC -> 66_666_667L
+        }
     }
 
     private fun maxMotion(observation: CaptureObservation): MotionClass = maxOf(observation.cameraMotion, observation.subjectMotion)
