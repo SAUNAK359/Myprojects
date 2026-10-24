@@ -51,4 +51,5 @@ workflows:
       - compile-probe:
           filters:
             branches:
-              only: director-sierra-v4-ci-bisect
+              only:
+                - director-sierra-v4-ci-extractor
