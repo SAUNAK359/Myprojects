@@ -6,6 +6,7 @@ import com.saunak.director.engine.capture.AutoExposureSnapshot
 import com.saunak.director.engine.capture.CaptureBudget
 import com.saunak.director.engine.capture.CaptureCompiler
 import com.saunak.director.engine.capture.CaptureObservation
+import com.saunak.director.engine.motion.MotionExposurePolicy
 import com.saunak.director.engine.state.SceneState
 import com.saunak.director.engine.state.SceneStateAssembler
 import com.saunak.director.platform.ThermalPolicy
@@ -31,7 +32,6 @@ class SierraCaptureBridge(
         thermal: ThermalPolicy
     ): Result<CaptureProgram> = withContext(Dispatchers.Default) {
         runCatching {
-            // Refresh the rapidly changing part of the world model immediately before planning.
             val motion = engine.motionProbe.measure(camera)
             val telemetry = requireNotNull(camera.sensorTelemetry()) {
                 "No synchronized Camera2 sensor telemetry is available yet"
@@ -69,7 +69,6 @@ class SierraCaptureBridge(
         val scene = state.sceneSignals
         val p05 = quality.shadowP05.coerceIn(0.0, 255.0)
         val p95 = quality.highlightP95.coerceIn(0.0, 255.0)
-        // Scene-luminance proxy only; not a claim about physical sensor dynamic range.
         val rangeProxyStops = log2((p95 + 1.0) / (p05 + 1.0)).coerceIn(0.0, 14.0)
         val highlightTailRisk = ((p95 - 230.0) / 25.0).coerceIn(0.0, 1.0)
         val highlightRisk = max(quality.brightClipFraction.coerceIn(0.0, 1.0), highlightTailRisk)
@@ -85,7 +84,9 @@ class SierraCaptureBridge(
             subjectMotion = state.motion.subject.toMotionClass(),
             facePresent = scene.faceCount > 0,
             digitalZoomRatio = state.zoomRatio.toDouble().coerceAtLeast(1.0),
-            confidence = effectiveConfidence
+            confidence = effectiveConfidence,
+            motionExposureCapNs = MotionExposurePolicy.exposureCapNs(state.motion),
+            motionRisk = state.motion.conservativeRisk
         )
     }
 }
