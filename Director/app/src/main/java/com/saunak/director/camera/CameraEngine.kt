@@ -47,7 +47,6 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
-import kotlin.math.max
 
 @OptIn(ExperimentalCamera2Interop::class, ExperimentalImageCaptureOutputFormat::class)
 class CameraEngine(private val context: Context) : AutoCloseable {
@@ -160,8 +159,6 @@ class CameraEngine(private val context: Context) : AutoCloseable {
     private fun buildImageAnalysis(view: PreviewView): ImageAnalysis {
         val analysis = ImageAnalysis.Builder()
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-            // Keep the continuously bound stream in its native YUV form; conversion occurs only for
-            // the single frame requested by the perception fabric.
             .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
             .setTargetRotation(view.display?.rotation ?: Surface.ROTATION_0)
             .build()
@@ -591,7 +588,7 @@ class CameraEngine(private val context: Context) : AutoCloseable {
     }
 
     suspend fun captureRawJpegBurst(specs: List<ManualRawFrameSpec>): List<RawJpegCaptureFrame> = captureMutex.withLock {
-        require(specs in 1..MAX_RAW_BURST_FRAMES) { "RAW burst must contain 1..$MAX_RAW_BURST_FRAMES frames" }
+        require(specs.size in 1..MAX_RAW_BURST_FRAMES) { "RAW burst must contain 1..$MAX_RAW_BURST_FRAMES frames" }
         check(currentExtension == DirectorExtension.NONE) { "RAW capture is mutually exclusive with OEM camera extensions" }
         val caps = capabilities()
         check(caps.rawSupported && caps.manualSensorSupported) { "RAW + MANUAL_SENSOR capability required" }
@@ -649,8 +646,6 @@ class CameraEngine(private val context: Context) : AutoCloseable {
             results.toList()
         } finally {
             runCatching { rawControl?.clearCaptureRequestOptions()?.await() }
-            // Always rebuild the normal session. Manual Camera2 request options are never allowed to
-            // leak into the user's ordinary CameraX/OEM preview.
             runCatching { bindInternal(userExtension) }
             runCatching { restoreUserState() }
         }
@@ -736,8 +731,6 @@ class CameraEngine(private val context: Context) : AutoCloseable {
             delay(10)
             rawMetadataByTimestamp[timestampNs]?.let { return it }
         }
-        // A very small timestamp mismatch can happen on vendor implementations. Only accept an
-        // unambiguous near match; never attach arbitrary "latest" metadata to a RAW frame.
         return rawMetadataByTimestamp.entries
             .map { it.key to it.value }
             .filter { kotlin.math.abs(it.first - timestampNs) <= METADATA_TIMESTAMP_TOLERANCE_NS }
