@@ -19,6 +19,7 @@ import androidx.camera.camera2.interop.CaptureRequestOptions
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.ExperimentalImageCaptureOutputFormat
 import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
@@ -49,7 +50,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
 
-@OptIn(ExperimentalCamera2Interop::class)
+@OptIn(ExperimentalCamera2Interop::class, ExperimentalImageCaptureOutputFormat::class)
 class CameraEngine(private val context: Context) : AutoCloseable {
     private var provider: ProcessCameraProvider? = null
     private var camera: Camera? = null
