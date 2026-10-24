@@ -9,6 +9,7 @@ import com.saunak.director.engine.capture.CaptureObservation
 import com.saunak.director.engine.motion.MotionExposurePolicy
 import com.saunak.director.engine.state.SceneState
 import com.saunak.director.engine.state.SceneStateAssembler
+import com.saunak.director.platform.MemoryPressureBus
 import com.saunak.director.platform.ThermalPolicy
 import com.saunak.director.processing.TechnicalQuality
 import kotlinx.coroutines.Dispatchers
@@ -51,7 +52,7 @@ class SierraCaptureBridge(
             val observation = estimateObservation(state)
             val budget = CaptureBudget(
                 thermalPressure = thermal.thermalPressure,
-                memoryPressure = 0.0,
+                memoryPressure = MemoryPressureBus.normalizedPressure(),
                 maxBurstFrames = thermal.maxSierraBurstFrames
             )
             compiler.compile(
