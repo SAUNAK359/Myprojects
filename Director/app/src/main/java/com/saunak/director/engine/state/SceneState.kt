@@ -37,10 +37,13 @@ object SceneStateAssembler {
         nowNs: Long = System.nanoTime()
     ): SceneState {
         val motionConfidence = motion.fusionConfidence
+        // Camera telemetry is captured immediately after the shutter-time motion probe. We avoid
+        // comparing clock domains unless the HAL has explicitly declared timestamp comparability.
+        val telemetryConfidence = if (motion.timestampComparableToImu) 1.0 else 0.88
         val confidence = (
             0.48 * scene.confidence +
                 0.22 * motionConfidence +
-                0.30 * telemetryConfidence(telemetry, nowNs)
+                0.30 * telemetryConfidence
             ).coerceIn(0.0, 1.0)
         val uncertainty = (
             0.56 * maxOf(motion.camera.uncertainty, motion.subject.uncertainty) +
@@ -56,15 +59,5 @@ object SceneStateAssembler {
             confidence = confidence,
             uncertainty = uncertainty
         )
-    }
-
-    private fun telemetryConfidence(telemetry: CameraSensorTelemetry, nowNs: Long): Double {
-        val ageNs = (nowNs - telemetry.sensorTimestampNs).coerceAtLeast(0L)
-        return when {
-            ageNs <= 80_000_000L -> 1.0
-            ageNs <= 180_000_000L -> 0.82
-            ageNs <= 350_000_000L -> 0.55
-            else -> 0.25
-        }
     }
 }
