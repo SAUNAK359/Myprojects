@@ -47,6 +47,38 @@ jobs:
             grep -q 'SIERRA_SERVER_BASE_URL' Director/app/build.gradle.kts
             echo 'Sierra Server boundary verified.'
 
+  director-compile-core:
+    docker:
+      - image: cimg/android:2026.08
+    resource_class: medium+
+    working_directory: ~/project
+    environment:
+      GRADLE_USER_HOME: /home/circleci/.gradle
+      TERM: dumb
+    steps:
+      - prepare-android
+      - run:
+          name: Compile Sierra backend runtime with UI isolated
+          command: |
+            set -euo pipefail
+            cat > Director/app/src/main/java/com/saunak/director/ui/DirectorViewModel.kt <<'EOF'
+            package com.saunak.director.ui
+            import android.app.Application
+            import androidx.lifecycle.AndroidViewModel
+            class DirectorViewModel(app: Application) : AndroidViewModel(app)
+            EOF
+            cat > Director/app/src/main/java/com/saunak/director/ui/SierraVisionApp.kt <<'EOF'
+            package com.saunak.director.ui
+            import androidx.compose.runtime.Composable
+            @Composable fun SierraVisionApp() = Unit
+            EOF
+            source "$BASH_ENV"
+            cd Director
+            ./gradlew --no-daemon --no-parallel --stacktrace --max-workers=2 \
+              -Dorg.gradle.jvmargs='-Xmx2560m -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8 -XX:+UseParallelGC' \
+              -Pkotlin.compiler.execution.strategy=in-process \
+              compileDebugKotlin
+
   director-compile:
     docker:
       - image: cimg/android:2026.08
@@ -167,6 +199,8 @@ workflows:
             branches:
               only:
                 - director-gemini-v1
+      - director-compile-core:
+          filters: *director_filter
       - director-compile:
           filters: *director_filter
       - director-unit-tests:
