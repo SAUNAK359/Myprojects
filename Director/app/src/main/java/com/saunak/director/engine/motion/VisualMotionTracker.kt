@@ -39,12 +39,16 @@ class VisualMotionTracker {
         val globalSpeed = hypot(globalDx, globalDy) / dt
 
         val residualSpeeds = local.map { shift ->
-            hypot(shift.dx - globalDx, shift.dy - globalDy) / dt
+            hypot(shift.dx.toDouble() - globalDx, shift.dy.toDouble() - globalDy) / dt
         }.sorted()
         val subjectSpeed = percentile(residualSpeeds, 0.82)
-        val subjectShift = local.maxByOrNull { shift -> hypot(shift.dx - globalDx, shift.dy - globalDy) }
-        val subjectVx = ((subjectShift?.dx ?: globalDx) - globalDx) / dt
-        val subjectVy = ((subjectShift?.dy ?: globalDy) - globalDy) / dt
+        val subjectShift = local.maxByOrNull { shift ->
+            hypot(shift.dx.toDouble() - globalDx, shift.dy.toDouble() - globalDy)
+        }
+        val subjectDx = subjectShift?.dx?.toDouble() ?: globalDx
+        val subjectDy = subjectShift?.dy?.toDouble() ?: globalDy
+        val subjectVx = (subjectDx - globalDx) / dt
+        val subjectVy = (subjectDy - globalDy) / dt
 
         val scoreMedian = medianDouble(local.map { it.score }.sorted())
         val textureConfidence = (1.0 - scoreMedian / 48.0).coerceIn(0.0, 1.0)
