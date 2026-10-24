@@ -23,10 +23,6 @@ class Settings(BaseSettings):
     min_user_age: int = Field(0, ge=0, le=21)
     allowed_origins: str = ""
     public_base_url: str = ""
-    admin_bootstrap_email: str = ""
-    admin_bootstrap_password: SecretStr = SecretStr("")
-    admin_bootstrap_phone: str = ""
-    admin_bootstrap_dob: str = "1990-01-01"
     domain: str = ""
     runtime_dir: Path = Path("runtime")
 
