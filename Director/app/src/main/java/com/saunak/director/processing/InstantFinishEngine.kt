@@ -2,23 +2,26 @@ package com.saunak.director.processing
 
 import com.saunak.director.director.PlanOutput
 import com.saunak.director.director.ToolCall
+import com.saunak.director.engine.SierraEngine
+import com.saunak.director.engine.subject.PredictiveSubjectPolicy
 import com.saunak.director.tools.ToolIds
 
 /** Local finishing intelligence for the post-ready straight-from-camera path. */
 object InstantFinishEngine {
     fun enrich(plan: PlanOutput, quality: TechnicalQuality): PlanOutput {
-        val calls = plan.toolCalls.toMutableList()
+        val framedPlan = applyPredictiveFraming(plan)
+        val calls = framedPlan.toolCalls.toMutableList()
         val existingLookIndex = calls.indexOfLast { it.id in ToolIds.LOOK_IDS }
 
         if (existingLookIndex >= 0) {
             val current = calls[existingLookIndex]
             val base = current.value ?: defaultStrength(current.id)
             calls[existingLookIndex] = current.copy(value = adaptStrength(base, quality))
-            return plan.copy(toolCalls = calls)
+            return framedPlan.copy(toolCalls = calls)
         }
 
-        val branch = plan.skillBranch.lowercase()
-        val intent = "${plan.scene} ${plan.objective}".lowercase()
+        val branch = framedPlan.skillBranch.lowercase()
+        val intent = "${framedPlan.scene} ${framedPlan.objective}".lowercase()
         val lookId = when {
             "natural" in intent || "documentary" in intent || "true to life" in intent -> ToolIds.LOOK_NATURAL
             "neon" in intent || "nightlife" in intent || (branch == "low_light" && ("city" in intent || "street" in intent)) -> ToolIds.LOOK_NIGHT_NEON
@@ -38,7 +41,23 @@ object InstantFinishEngine {
         if (lookId != ToolIds.LOOK_NATURAL) {
             calls += ToolCall(id = lookId, value = adaptStrength(defaultStrength(lookId), quality))
         }
-        return plan.copy(toolCalls = calls.take(8))
+        return framedPlan.copy(toolCalls = calls.take(8))
+    }
+
+    private fun applyPredictiveFraming(plan: PlanOutput): PlanOutput {
+        val branch = plan.skillBranch.lowercase()
+        // A single primary-subject lead-room crop is inappropriate for group scenes.
+        if (branch != "portrait" && branch != "selfie") return plan
+        val track = SierraEngine.getOrNull()?.subjects?.latest() ?: return plan
+        val directive = PredictiveSubjectPolicy.evaluate(track)
+        if (directive.confidence < FRAMING_MIN_CONFIDENCE) return plan
+
+        val influence = (0.26 + 0.34 * directive.confidence + 0.24 * directive.edgeRisk)
+            .coerceIn(0.0, MAX_FRAMING_INFLUENCE)
+        val target = directive.cropCenter
+        val x = (plan.cropCenterX * (1.0 - influence) + target.x * influence).coerceIn(0.08, 0.92)
+        val y = (plan.cropCenterY * (1.0 - influence) + target.y * influence).coerceIn(0.08, 0.92)
+        return plan.copy(cropCenterX = x, cropCenterY = y)
     }
 
     private fun defaultStrength(id: Int): Double = when (id) {
@@ -65,4 +84,7 @@ object InstantFinishEngine {
         if (quality.edgeEnergy < 1.2) strength *= .88
         return strength.coerceIn(0.12, 0.70)
     }
+
+    private const val FRAMING_MIN_CONFIDENCE = 0.52
+    private const val MAX_FRAMING_INFLUENCE = 0.72
 }
