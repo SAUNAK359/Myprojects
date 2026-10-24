@@ -16,12 +16,16 @@ object MemoryPressureBus {
         listeners.forEach { runCatching { it(level) } }
     }
 
-    /** Capture-facing pressure in [0,1], intentionally coarse and monotonic by Android severity. */
-    fun normalizedPressure(): Double = when (val level = currentLevel.get()) {
-        in ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL..Int.MAX_VALUE -> 1.0
-        in ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW until ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL -> 0.78
-        in ComponentCallbacks2.TRIM_MEMORY_BACKGROUND until ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW -> 0.55
-        in ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN until ComponentCallbacks2.TRIM_MEMORY_BACKGROUND -> 0.35
-        else -> if (level > 0) 0.18 else 0.0
+    /** Capture-facing pressure in [0,1]. Android trim constants are not a simple severity ordinal. */
+    @Suppress("DEPRECATION")
+    fun normalizedPressure(): Double = when (currentLevel.get()) {
+        ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL,
+        ComponentCallbacks2.TRIM_MEMORY_COMPLETE -> 1.0
+        ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW,
+        ComponentCallbacks2.TRIM_MEMORY_MODERATE -> 0.78
+        ComponentCallbacks2.TRIM_MEMORY_BACKGROUND -> 0.62
+        ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN -> 0.38
+        ComponentCallbacks2.TRIM_MEMORY_RUNNING_MODERATE -> 0.32
+        else -> 0.0
     }
 }
