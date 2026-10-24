@@ -206,15 +206,6 @@ jobs:
             grep -qE '(^|[[:space:]])classes\.dex$' /tmp/director-diagnostics/apk-file-list.txt
             cp "$APK" /tmp/director-artifacts/Sierra-Vision-debug.apk
             sha256sum /tmp/director-artifacts/Sierra-Vision-debug.apk > /tmp/director-artifacts/Sierra-Vision-debug.apk.sha256
-      - run:
-          name: Android lint audit
-          command: |
-            set -euo pipefail
-            source "$BASH_ENV"
-            cd Director
-            ./gradlew --no-daemon --no-parallel --stacktrace --max-workers=1 \
-              -Dorg.gradle.jvmargs='-Xmx2048m -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8' \
-              -Pkotlin.compiler.execution.strategy=in-process lintDebug
       - store_artifacts:
           path: /tmp/director-artifacts
           destination: sierra-vision-apk
@@ -227,6 +218,29 @@ jobs:
             - ~/.gradle/caches
             - ~/.gradle/wrapper
             - ~/.gradle/director-wrapper
+
+  director-lint:
+    docker:
+      - image: cimg/android:2026.08
+    resource_class: medium+
+    working_directory: ~/project
+    environment:
+      GRADLE_USER_HOME: /home/circleci/.gradle
+      TERM: dumb
+    steps:
+      - prepare-android
+      - run:
+          name: Strict Android lint audit
+          command: |
+            set -euo pipefail
+            source "$BASH_ENV"
+            cd Director
+            ./gradlew --no-daemon --no-parallel --stacktrace --max-workers=1 \
+              -Dorg.gradle.jvmargs='-Xmx2048m -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8' \
+              -Pkotlin.compiler.execution.strategy=in-process lintDebug
+      - store_artifacts:
+          path: Director/app/build/reports
+          destination: lint-reports
 
 workflows:
   director-build:
@@ -249,4 +263,6 @@ workflows:
       - director-unit-tests:
           filters: *director_filter
       - build-director-apk:
+          filters: *director_filter
+      - director-lint:
           filters: *director_filter
