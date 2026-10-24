@@ -30,7 +30,7 @@ data class RawSensorFrame(
     }
 }
 
-/** Copies RAW_SENSOR bytes before ImageProxy.close(), respecting arbitrary plane strides. */
+/** Copies RAW_SENSOR/RAW16 bytes before ImageProxy.close(), respecting arbitrary plane strides. */
 object RawSensorExtractor {
     fun calibration(characteristics: CameraCharacteristics): RawSensorCalibration? {
         val cfa = characteristics.get(CameraCharacteristics.SENSOR_INFO_COLOR_FILTER_ARRANGEMENT)
@@ -62,7 +62,9 @@ object RawSensorExtractor {
         require(plane.pixelStride >= 2) { "RAW pixel stride ${plane.pixelStride} cannot hold 16-bit samples" }
         require(plane.rowStride >= image.width * plane.pixelStride)
 
-        val buffer = plane.buffer.duplicate().order(ByteOrder.nativeOrder())
+        // Android RAW16 is explicitly little-endian. Do not inherit CPU-native order into Sierra's
+        // evidence representation even though current Android ARM devices are also little-endian.
+        val buffer = plane.buffer.duplicate().order(ByteOrder.LITTLE_ENDIAN)
         val out = FloatArray(image.width * image.height)
         for (y in 0 until image.height) {
             val rowBase = y * plane.rowStride
