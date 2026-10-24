@@ -34,13 +34,13 @@ data class CaptureObservation(
 data class CaptureBudget(
     val thermalPressure: Double = 0.0,
     val memoryPressure: Double = 0.0,
-    /** Computational bursts below three frames are not useful enough to justify changing capture mode. */
+    /** A value below three explicitly disables computational burst candidates. */
     val maxBurstFrames: Int = 8
 ) {
     init {
         require(thermalPressure in 0.0..1.0)
         require(memoryPressure in 0.0..1.0)
-        require(maxBurstFrames in 3..16)
+        require(maxBurstFrames in 1..16)
     }
 }
 
@@ -79,14 +79,20 @@ class CaptureCompiler {
     ): CaptureProgram {
         val candidates = mutableListOf<CaptureProgram>()
         candidates += safeSingle(camera, autoExposure, observation, oemExtensionAvailable)
-        if (camera.manualSensorSupported && camera.rawSupported && CapturePath.RAW_CUSTOM in camera.preferredCapturePaths) {
-            candidates += constantRawBurst(camera, autoExposure, observation, budget)
-            if (observation.dynamicRangeStops >= 10.0 || observation.highlightClipRisk >= 0.35 || observation.shadowNoiseRisk >= 0.45) {
-                candidates += adaptiveRawBurst(camera, autoExposure, observation, budget)
+
+        // Severe thermal/memory policies may explicitly allow only one or two physical captures.
+        // In that state a "burst" would add complexity without enough samples to justify custom fusion.
+        if (budget.maxBurstFrames >= MIN_COMPUTATIONAL_BURST) {
+            if (camera.manualSensorSupported && camera.rawSupported && CapturePath.RAW_CUSTOM in camera.preferredCapturePaths) {
+                candidates += constantRawBurst(camera, autoExposure, observation, budget)
+                if (observation.dynamicRangeStops >= 10.0 || observation.highlightClipRisk >= 0.35 || observation.shadowNoiseRisk >= 0.45) {
+                    candidates += adaptiveRawBurst(camera, autoExposure, observation, budget)
+                }
+            } else if (CapturePath.YUV_REPROCESS in camera.preferredCapturePaths) {
+                candidates += yuvBurst(camera, autoExposure, observation, budget)
             }
-        } else if (CapturePath.YUV_REPROCESS in camera.preferredCapturePaths) {
-            candidates += yuvBurst(camera, autoExposure, observation, budget)
         }
+
         return candidates.maxWithOrNull(
             compareBy<CaptureProgram> { it.expectedUtility }.thenByDescending { -it.expectedCaptureDurationMs }
         ) ?: safeSingle(camera, autoExposure, observation, oemExtensionAvailable)
@@ -171,13 +177,14 @@ class CaptureCompiler {
     }
 
     private fun qualityPreservingFrameCount(target: Int, budget: CaptureBudget): Int {
+        require(budget.maxBurstFrames >= MIN_COMPUTATIONAL_BURST)
         val pressure = maxOf(budget.memoryPressure, budget.thermalPressure)
         val pressureCap = when {
-            pressure >= 0.90 -> maxOf(3, target - 2)
-            pressure >= 0.75 -> maxOf(3, target - 1)
+            pressure >= 0.90 -> maxOf(MIN_COMPUTATIONAL_BURST, target - 2)
+            pressure >= 0.75 -> maxOf(MIN_COMPUTATIONAL_BURST, target - 1)
             else -> target
         }
-        return minOf(target, budget.maxBurstFrames, pressureCap).coerceAtLeast(1)
+        return minOf(target, budget.maxBurstFrames, pressureCap).coerceAtLeast(MIN_COMPUTATIONAL_BURST)
     }
 
     private fun maxExposureNs(observation: CaptureObservation): Long = when (maxMotion(observation)) {
@@ -189,4 +196,6 @@ class CaptureCompiler {
 
     private fun maxMotion(observation: CaptureObservation): MotionClass = maxOf(observation.cameraMotion, observation.subjectMotion)
     private fun estimateDuration(frames: List<CaptureFrameSpec>): Double = frames.sumOf { maxOf(it.exposureTimeNs / 1_000_000.0, 8.0) } + 18.0 * frames.size
+
+    companion object { private const val MIN_COMPUTATIONAL_BURST = 3 }
 }
