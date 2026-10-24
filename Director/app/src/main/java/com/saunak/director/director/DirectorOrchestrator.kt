@@ -6,8 +6,10 @@ import com.saunak.director.ai.VlmRuntime
 import com.saunak.director.camera.CameraEngine
 import com.saunak.director.camera.DirectorExtension
 import com.saunak.director.camera.SierraCaptureBridge
+import com.saunak.director.engine.capture.CapturePath
 import com.saunak.director.engine.capture.CaptureProgram
 import com.saunak.director.engine.capture.SafeBurstExecutor
+import com.saunak.director.engine.prif.PrifLiveCaptureExecutor
 import com.saunak.director.platform.ThermalMonitor
 import com.saunak.director.processing.InstantFinishEngine
 import com.saunak.director.processing.LookProcessor
@@ -18,9 +20,12 @@ import com.saunak.director.skills.SkillEngine
 import com.saunak.director.storage.PhotoRepository
 import com.saunak.director.storage.RecipeMemory
 import com.saunak.director.storage.SierraCropPolicy
+import com.saunak.director.storage.savePrifReconstruction
 import com.saunak.director.tools.ToolExecutor
 import com.saunak.director.tools.ToolIds
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.util.concurrent.atomic.AtomicLong
@@ -39,6 +44,7 @@ class DirectorOrchestrator(
     private val perception = SierraPerceptionFabric()
     private val captureBridge = SierraCaptureBridge(camera)
     private val safeBurstExecutor = SafeBurstExecutor(camera, storage)
+    private val prifExecutor = PrifLiveCaptureExecutor(camera)
 
     private data class ApprovedState(
         val look: LookSpec,
@@ -223,6 +229,8 @@ class DirectorOrchestrator(
         val state = approved ?: return null
         val session = generation.get()
         var burst: SafeBurstExecutor.Result? = null
+        var prifSafety: File? = null
+        var prifBitmap: Bitmap? = null
         return try {
             val activeExtension = camera.snapshot().extension
             val executableProgram = state.captureProgram.takeIf { activeExtension == DirectorExtension.NONE }
@@ -244,6 +252,56 @@ class DirectorOrchestrator(
                 )
             )
             camera.awaitSettledState(550)
+
+            if (executableProgram?.path == CapturePath.RAW_CUSTOM && camera.rawJpegCaptureSupported()) {
+                val prif = runCatching { prifExecutor.execute(executableProgram, thermal.policy()) }.getOrNull()
+                if (prif != null) {
+                    assertCurrent(session)
+                    val safetyFile = storage.newPendingReference(session)
+                    withContext(Dispatchers.IO) {
+                        safetyFile.parentFile?.mkdirs()
+                        safetyFile.writeBytes(prif.safeJpegBytes)
+                    }
+                    prifSafety = safetyFile
+                    if (keepOriginal) runCatching { storage.saveOriginal(safetyFile) }
+
+                    val reconstruction = prif.reconstruction
+                    if (prif.accepted && reconstruction != null) {
+                        prifBitmap = reconstruction.bitmap
+                        val captureScore = (0.55 * state.score + 0.45 * reconstruction.integrity.score).coerceIn(0.0, 1.0)
+                        emit(session, DirectorUiState(DirectorStage.SAVING, state.mode == SierraMode.AI, "P-RIF radiance verified • finishing…", lastScore = captureScore, camera = camera.uiState(), sierraMode = state.mode, aspectRatio = state.plan.aspectRatio, aspectRatioOverride = aspectRatioOverride, sceneLabel = state.plan.scene, objective = state.plan.objective, keepOriginal = keepOriginal))
+                        val uri = storage.savePrifReconstruction(
+                            bitmap = reconstruction.bitmap,
+                            sourceJpeg = safetyFile,
+                            look = state.look,
+                            aspectRatio = state.plan.aspectRatio,
+                            cropCenterX = state.plan.cropCenterX,
+                            cropCenterY = state.plan.cropCenterY
+                        )
+                        recipeMemory.remember(state.plan, captureScore)
+                        approved = null
+                        tools.restoreUserState()
+                        storage.markFinalized(safetyFile)
+                        prifSafety = null
+                        if (!reconstruction.bitmap.isRecycled) reconstruction.bitmap.recycle()
+                        prifBitmap = null
+                        emit(session, DirectorUiState(DirectorStage.READY, cloudEnabled && vlm.isReady(), "Sierra P-RIF photo saved • ${prif.capturedFrameCount} RAW evidence frames", lastScore = captureScore, camera = camera.uiState(), lastSavedUri = uri.toString(), recipeCount = recipeMemory.count(), sierraMode = state.mode, aspectRatio = state.plan.aspectRatio, aspectRatioOverride = aspectRatioOverride, sceneLabel = state.plan.scene, objective = state.plan.objective, keepOriginal = keepOriginal))
+                        return uri
+                    }
+
+                    val captureScore = (0.78 * state.score + 0.22 * 0.55).coerceIn(0.0, 1.0)
+                    emit(session, DirectorUiState(DirectorStage.SAVING, state.mode == SierraMode.AI, "P-RIF integrity gate selected sensor JPEG…", lastScore = captureScore, camera = camera.uiState(), sierraMode = state.mode, aspectRatio = state.plan.aspectRatio, aspectRatioOverride = aspectRatioOverride, sceneLabel = state.plan.scene, objective = state.plan.objective, keepOriginal = keepOriginal))
+                    val uri = storage.saveFinal(safetyFile, state.look, state.plan.aspectRatio, state.plan.cropCenterX, state.plan.cropCenterY)
+                    recipeMemory.remember(state.plan, captureScore)
+                    approved = null
+                    tools.restoreUserState()
+                    storage.markFinalized(safetyFile)
+                    prifSafety = null
+                    emit(session, DirectorUiState(DirectorStage.READY, cloudEnabled && vlm.isReady(), "Sierra photo saved • sensor evidence preserved", lastScore = captureScore, camera = camera.uiState(), lastSavedUri = uri.toString(), recipeCount = recipeMemory.count(), sierraMode = state.mode, aspectRatio = state.plan.aspectRatio, aspectRatioOverride = aspectRatioOverride, sceneLabel = state.plan.scene, objective = state.plan.objective, keepOriginal = keepOriginal))
+                    return uri
+                }
+            }
+
             val burstResult = safeBurstExecutor.execute(
                 sessionId = session,
                 program = executableProgram,
@@ -285,7 +343,9 @@ class DirectorOrchestrator(
             uri
         } catch (t: Throwable) {
             approved = null
-            val fallbackUri = burst?.selected?.file?.takeIf { it.isFile && it.length() > 0L }?.let { file ->
+            val fallbackUri = prifSafety?.takeIf { it.isFile && it.length() > 0L }?.let { file ->
+                runCatching { storage.saveRawJpeg(file) }.getOrNull()
+            } ?: burst?.selected?.file?.takeIf { it.isFile && it.length() > 0L }?.let { file ->
                 runCatching { storage.saveRawJpeg(file) }.getOrNull()
             }
             runCatching { tools.restoreUserState() }
@@ -297,6 +357,8 @@ class DirectorOrchestrator(
                 null
             }
         } finally {
+            prifBitmap?.let { if (!it.isRecycled) it.recycle() }
+            prifSafety?.let { runCatching { it.delete() } }
             burst?.let { result -> storage.cleanup(result.frames.map { it.file }) }
         }
     }
