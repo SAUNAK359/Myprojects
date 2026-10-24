@@ -21,12 +21,18 @@ import com.saunak.director.engine.runtime.ComputeHypervisor
 import com.saunak.director.engine.runtime.OnnxRuntimeEngine
 import com.saunak.director.engine.runtime.RuntimeProfileStore
 import com.saunak.director.engine.subject.SubjectTracker
+import java.io.File
 import java.util.concurrent.atomic.AtomicReference
 
 /** Application-scoped ownership boundary for Sierra camera intelligence and image formation. */
 class SierraEngine private constructor(context: Context) : AutoCloseable {
     private val appContext = context.applicationContext
     private val twinRef = AtomicReference<DeviceTwin?>(null)
+    private val prifScratchRoot = File(appContext.cacheDir, "sierra_prif").apply {
+        mkdirs()
+        listFiles()?.filter { it.isDirectory && System.currentTimeMillis() - it.lastModified() > PRIF_STALE_MS }
+            ?.forEach { runCatching { it.deleteRecursively() } }
+    }
 
     val beliefs = SceneBeliefGraph()
     val coordinates = CoordinateGraph()
@@ -58,6 +64,11 @@ class SierraEngine private constructor(context: Context) : AutoCloseable {
 
     fun currentDeviceTwin(): DeviceTwin? = twinRef.get()
 
+    fun newPrifScratchSession(): File = File(
+        prifScratchRoot,
+        "capture_${System.currentTimeMillis()}_${System.nanoTime()}"
+    ).apply { check(mkdirs()) { "Could not create P-RIF scratch session" } }
+
     fun measuredProfiles(modelId: String, inputSignature: String): List<BackendExecutionProfile> {
         val fingerprint = currentDeviceTwin()?.fingerprint ?: android.os.Build.FINGERPRINT.orEmpty().ifBlank { "unknown" }
         return runtimeProfiles.find(fingerprint, modelId, inputSignature).map { it.profile }
@@ -82,13 +93,17 @@ class SierraEngine private constructor(context: Context) : AutoCloseable {
     }
 
     fun onTrimMemory(level: Int) {
-        if (!onnxLazy.isInitialized()) return
-        when {
-            level >= ComponentCallbacks2.TRIM_MEMORY_COMPLETE -> onnx.trimTo(0)
-            level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL -> onnx.trimTo(0)
-            level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW -> onnx.trimTo(1)
-            level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND -> onnx.trimTo(1)
-            level >= ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN -> onnx.trimTo(1)
+        if (onnxLazy.isInitialized()) {
+            when {
+                level >= ComponentCallbacks2.TRIM_MEMORY_COMPLETE -> onnx.trimTo(0)
+                level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL -> onnx.trimTo(0)
+                level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW -> onnx.trimTo(1)
+                level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND -> onnx.trimTo(1)
+                level >= ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN -> onnx.trimTo(1)
+            }
+        }
+        if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL) {
+            prifScratchRoot.listFiles()?.filter { it.isDirectory }?.forEach { runCatching { it.deleteRecursively() } }
         }
     }
 
@@ -98,11 +113,13 @@ class SierraEngine private constructor(context: Context) : AutoCloseable {
         if (onnxLazy.isInitialized()) onnx.close()
         evidence.clear()
         coordinates.clear()
+        runCatching { prifScratchRoot.deleteRecursively() }
         twinRef.set(null)
     }
 
     companion object {
-        private const val RUNTIME_VERSION = "onnxruntime-1.31.0+sierra-v6-subject"
+        private const val RUNTIME_VERSION = "onnxruntime-1.31.0+sierra-v7-prif"
+        private const val PRIF_STALE_MS = 6L * 60L * 60L * 1000L
         @Volatile private var instance: SierraEngine? = null
 
         fun initialize(context: Context): SierraEngine = instance ?: synchronized(this) {
