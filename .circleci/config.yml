@@ -1,0 +1,148 @@
+version: 2.1
+
+commands:
+  install-server:
+    steps:
+      - checkout
+      - run:
+          name: Configure deterministic Sierra test environment
+          command: |
+            cat >> "$BASH_ENV" <<'EOF'
+            export SIERRA_ENV=test
+            export SIERRA_DATABASE_URL=postgresql+asyncpg://sierra:test@127.0.0.1:5432/sierra_test
+            EOF
+            printf 'export SIERRA_JWT_SECRET=%s\n' "$(python -c "print('test-' + 'x' * 40)")" >> "$BASH_ENV"
+      - run:
+          name: Install Sierra server
+          command: |
+            set -euo pipefail
+            source "$BASH_ENV"
+            cd SierraServer
+            python -m pip install --upgrade pip
+            pip install '.[dev]'
+
+jobs:
+  sierra-core-import:
+    docker:
+      - image: cimg/python:3.12
+    resource_class: medium
+    working_directory: ~/project
+    steps:
+      - install-server
+      - run:
+          name: Import config database models schemas
+          command: |
+            source "$BASH_ENV"
+            cd SierraServer
+            python -c 'import app.config; import app.db; import app.models; import app.schemas; print("core OK")'
+
+  sierra-security-import:
+    docker:
+      - image: cimg/python:3.12
+    resource_class: medium
+    working_directory: ~/project
+    steps:
+      - install-server
+      - run:
+          name: Import security and credits
+          command: |
+            source "$BASH_ENV"
+            cd SierraServer
+            python -c 'import app.security; import app.credits; import app.provider_crypto; import app.network_security; print("security OK")'
+
+  sierra-provider-import:
+    docker:
+      - image: cimg/python:3.12
+    resource_class: medium
+    working_directory: ~/project
+    steps:
+      - install-server
+      - run:
+          name: Import provider and worker stack
+          command: |
+            source "$BASH_ENV"
+            cd SierraServer
+            python -c 'import app.provider_client; import app.provider_router; import app.job_worker; print("provider OK")'
+
+  sierra-app-import:
+    docker:
+      - image: cimg/python:3.12
+    resource_class: medium
+    working_directory: ~/project
+    steps:
+      - install-server
+      - run:
+          name: Import FastAPI application
+          command: |
+            source "$BASH_ENV"
+            cd SierraServer
+            python -c 'import app.main; print("app OK")'
+
+  sierra-static:
+    docker:
+      - image: cimg/python:3.12
+    resource_class: medium
+    working_directory: ~/project
+    steps:
+      - install-server
+      - run:
+          name: Static correctness
+          command: |
+            source "$BASH_ENV"
+            cd SierraServer
+            python -m compileall -q app tests scripts
+            ruff check app tests scripts
+
+  sierra-tests:
+    docker:
+      - image: cimg/python:3.12
+    resource_class: medium
+    working_directory: ~/project
+    steps:
+      - install-server
+      - run:
+          name: Unit tests
+          command: |
+            source "$BASH_ENV"
+            cd SierraServer
+            mkdir -p /tmp/sierra-test-results
+            pytest -q --junitxml=/tmp/sierra-test-results/results.xml
+      - store_test_results:
+          path: /tmp/sierra-test-results
+
+  sierra-dependency-audit:
+    docker:
+      - image: cimg/python:3.12
+    resource_class: medium
+    working_directory: ~/project
+    steps:
+      - install-server
+      - run:
+          name: Audit installed Python dependencies for known vulnerabilities
+          command: |
+            set -euo pipefail
+            source "$BASH_ENV"
+            python -m pip install pip-audit
+            cd SierraServer
+            pip-audit
+
+workflows:
+  sierra-server-build:
+    jobs:
+      - sierra-core-import:
+          filters: &server_filter
+            branches:
+              only:
+                - sierra-vision-server-v1
+      - sierra-security-import:
+          filters: *server_filter
+      - sierra-provider-import:
+          filters: *server_filter
+      - sierra-app-import:
+          filters: *server_filter
+      - sierra-static:
+          filters: *server_filter
+      - sierra-tests:
+          filters: *server_filter
+      - sierra-dependency-audit:
+          filters: *server_filter

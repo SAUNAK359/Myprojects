@@ -1,184 +1,352 @@
 package com.saunak.director.director
 
+import android.graphics.Bitmap
 import android.net.Uri
 import com.saunak.director.ai.VlmRuntime
 import com.saunak.director.camera.CameraEngine
 import com.saunak.director.platform.ThermalMonitor
+import com.saunak.director.processing.InstantFinishEngine
 import com.saunak.director.processing.LookProcessor
 import com.saunak.director.processing.LookSpec
 import com.saunak.director.processing.PhotoQuality
 import com.saunak.director.skills.SkillEngine
 import com.saunak.director.storage.PhotoRepository
+import com.saunak.director.storage.RecipeMemory
+import com.saunak.director.storage.SierraCropPolicy
 import com.saunak.director.tools.ToolExecutor
 import com.saunak.director.tools.ToolIds
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
+import java.util.UUID
 import java.util.concurrent.atomic.AtomicLong
 
+/**
+ * Sierra pipeline: Sierra β always owns execution and technical verification. Sierra AI may
+ * provide the semantic plan, but any unavailable/failed/disabled/slow cloud route falls back to
+ * the deterministic Sierra β planner using the same validated tool surface.
+ */
 class DirectorOrchestrator(
     private val camera: CameraEngine,
     private val vlm: VlmRuntime,
     private val skills: SkillEngine,
     private val tools: ToolExecutor,
     private val storage: PhotoRepository,
+    private val recipeMemory: RecipeMemory,
     private val thermal: ThermalMonitor,
     private val onState: (DirectorUiState) -> Unit
 ) {
     private val generation = AtomicLong(0L)
-    private data class Candidate(val file: File, val look: LookSpec, val score: Double, val valid: Boolean, val accepted: Boolean, val captureNumber: Int)
+    private data class ApprovedState(val look: LookSpec, val plan: PlanOutput, val score: Double, val mode: SierraMode)
+    @Volatile private var approved: ApprovedState? = null
+    @Volatile private var cloudEnabled: Boolean = true
+    @Volatile private var aspectRatioOverride: String? = null
+    @Volatile private var keepOriginal: Boolean = false
 
+    fun isPrepared(): Boolean = approved != null
+    fun setCloudEnabled(enabled: Boolean) {
+        cloudEnabled = enabled
+        if (!enabled) vlm.cancel()
+    }
+    fun setAspectRatioOverride(value: String?) {
+        aspectRatioOverride = value?.takeIf(SierraCropPolicy::isSupported)
+        approved = null
+    }
+    fun setKeepOriginal(enabled: Boolean) { keepOriginal = enabled }
     suspend fun recoverPendingReferences(): List<Uri> = storage.recoverPendingToGallery()
-    fun cancelForUserAction(): Long { val next = generation.incrementAndGet(); vlm.cancel(); return next }
 
-    suspend fun onShutterPressed(): Uri? {
+    fun cancelForUserAction(): Long {
+        approved = null
+        val next = generation.incrementAndGet()
+        vlm.cancel()
+        return next
+    }
+
+    suspend fun onPrimaryPressed(): Uri? {
+        if (approved != null) return captureFinal()
+        val completed = withTimeoutOrNull(HARD_PREPARE_DEADLINE_MS) {
+            prepareShot()
+            true
+        } ?: false
+        if (!completed && approved == null) {
+            vlm.cancel()
+            runCatching { tools.restoreUserState() }
+            val session = generation.incrementAndGet()
+            emit(
+                session,
+                DirectorUiState(
+                    stage = DirectorStage.READY,
+                    aiAvailable = cloudEnabled && vlm.isReady(),
+                    sierraMode = SierraMode.BETA,
+                    status = "Sierra β ready • preparation timed out",
+                    camera = camera.uiState(),
+                    recipeCount = recipeMemory.count(),
+                    aspectRatioOverride = aspectRatioOverride,
+                    keepOriginal = keepOriginal
+                )
+            )
+        }
+        return null
+    }
+
+    private suspend fun prepareShot(): Uri? {
         val session = cancelForUserAction()
-        var reference: File? = null
-        val attempts = mutableListOf<File>()
-        var finalized = false
+        val created = mutableListOf<File>()
+        var planningBitmap: Bitmap? = null
         try {
             tools.restoreUserState()
-            emit(session, DirectorUiState(DirectorStage.CAPTURING, vlm.isReady(), "Capturing reference…", camera = camera.uiState()))
-            if (!storage.hasWorkingSpace()) emit(session, DirectorUiState(DirectorStage.CAPTURING, vlm.isReady(), "Low storage • protecting capture", camera = camera.uiState()))
-            val ref = storage.newPendingReference(session); reference = ref
-            camera.capturePrivate(ref); assertCurrent(session)
-
             val thermalPolicy = thermal.policy()
-            if (!vlm.isReady() || !thermalPolicy.allowAi) {
-                val uri = storage.saveRawJpeg(ref); storage.markFinalized(ref); finalized = true
-                emit(session, DirectorUiState(DirectorStage.READY, vlm.isReady(), if (thermalPolicy.allowAi) "Saved • AI unavailable" else "Saved • AI paused for temperature", camera = camera.uiState(), lastSavedUri = uri.toString()))
-                return uri
+            val cloudAllowed = cloudEnabled && vlm.isReady() && thermalPolicy.allowAi
+
+            emit(
+                session,
+                DirectorUiState(
+                    DirectorStage.ANALYZING,
+                    cloudAllowed,
+                    if (cloudAllowed) "Sierra is reading the scene…" else "Sierra β is reading the scene…",
+                    camera = camera.uiState(),
+                    sierraMode = if (cloudAllowed) SierraMode.AI else SierraMode.BETA,
+                    aspectRatioOverride = aspectRatioOverride,
+                    keepOriginal = keepOriginal
+                )
+            )
+
+            planningBitmap = camera.captureAnalysisFrame(FAST_FRAME_TIMEOUT_MS)
+            if (planningBitmap == null) {
+                emit(session, DirectorUiState(DirectorStage.CAPTURING, cloudAllowed, "Sampling camera…", camera = camera.uiState(), sierraMode = if (cloudAllowed) SierraMode.AI else SierraMode.BETA, aspectRatioOverride = aspectRatioOverride, keepOriginal = keepOriginal))
+                val fallback = storage.newAttempt(session, 0).also { created += it }
+                camera.capturePrivate(fallback)
+                assertCurrent(session)
+                planningBitmap = storage.decodeOriented(fallback, 896)
             }
 
-            val referenceBitmap = runCatching { storage.decodeOriented(ref) }.getOrElse {
-                val uri = storage.saveRawJpeg(ref); storage.markFinalized(ref); finalized = true
-                emit(session, DirectorUiState(DirectorStage.READY, true, "Saved reference", camera = camera.uiState(), lastSavedUri = uri.toString()))
-                return uri
+            val frame = checkNotNull(planningBitmap)
+            val referenceQuality = PhotoQuality.analyze(frame)
+            if (referenceQuality.catastrophic) {
+                emit(session, DirectorUiState(DirectorStage.READY, cloudAllowed, "Scene too dark or blank • reframe", camera = camera.uiState(), sierraMode = SierraMode.BETA, aspectRatioOverride = aspectRatioOverride, keepOriginal = keepOriginal))
+                return null
             }
-            try {
-                val referenceQuality = PhotoQuality.analyze(referenceBitmap)
-                if (referenceQuality.catastrophic) {
-                    val uri = storage.saveRawJpeg(ref); storage.markFinalized(ref); finalized = true
-                    emit(session, DirectorUiState(DirectorStage.READY, true, "Saved reference", camera = camera.uiState(), lastSavedUri = uri.toString()))
-                    return uri
-                }
 
-                emit(session, DirectorUiState(DirectorStage.ANALYZING, true, "Analyzing captured photo…", camera = camera.uiState()))
+            var mode = SierraMode.BETA
+            val localPlan by lazy { SierraLocalPlanner.plan(referenceQuality, frame.width, frame.height) }
+            val basePlan = if (cloudAllowed) {
+                emit(session, DirectorUiState(DirectorStage.ANALYZING, true, "Sierra AI is composing…", camera = camera.uiState(), sierraMode = SierraMode.AI, aspectRatioOverride = aspectRatioOverride, keepOriginal = keepOriginal))
                 vlm.setMaxImageDimension(thermalPolicy.maxAiDimension)
-                var caps = camera.capabilities()
-                val plan = vlm.plan(referenceBitmap, caps, camera.snapshot(), skills.planningContext()).getOrElse {
-                    return fallbackReference(session, ref, "Saved • AI analysis unavailable").also { finalized = it != null }
+                val cloudResult = withTimeoutOrNull(CLOUD_PLAN_BUDGET_MS) {
+                    vlm.plan(
+                        frame,
+                        camera.capabilities(),
+                        camera.snapshot(),
+                        skills.planningContext(),
+                        referenceQuality
+                    )
                 }
-                assertCurrent(session)
-                val branch = skills.resolveBranch(plan.skillBranch)
-                val candidates = mutableListOf(Candidate(ref, LookSpec(), CapturePolicy.combinedFallbackScore(plan.referenceScore, referenceQuality.heuristicScore), true, plan.referenceAccept, 1))
-                val physicalBudget = CapturePolicy.physicalBudget(thermal.policy().maxPhysicalCaptures)
-
-                val initialCalls = if (physicalBudget > 1 && plan.recapture) plan.toolCalls else plan.toolCalls.filter { it.id in ToolIds.LOOK_IDS }
-                emit(session, DirectorUiState(DirectorStage.APPLYING, true, "Preparing improvement…", camera = camera.uiState()))
-                val initialExecution = tools.apply(initialCalls, caps); assertCurrent(session)
-                caps = camera.capabilities()
-                var look = initialExecution.look
-                var issues = initialExecution.rejected.map { "tool_${it.call.id}:${it.reason}" }.take(8)
-                var physicalCaptures = 1
-                var evaluationCount = 0
-                var currentFile = ref
-
-                if (initialExecution.requiresRecapture && physicalCaptures < physicalBudget) {
-                    assertCurrent(session); camera.awaitSettledState(); assertCurrent(session)
-                    physicalCaptures++
-                    emit(session, DirectorUiState(DirectorStage.RECAPTURING, true, "Capturing improvement…", attempt = physicalCaptures, camera = camera.uiState()))
-                    currentFile = storage.newAttempt(session, physicalCaptures).also { attempts += it }
-                    camera.capturePrivate(currentFile); assertCurrent(session)
-                } else if (plan.referenceAccept && look.isIdentity() && initialExecution.applied.none { it.id in ToolIds.LOOK_IDS }) {
-                    val uri = finalizeCandidate(session, candidates.first(), ref, attempts); finalized = uri != null; return uri
+                val cloudPlan = cloudResult?.getOrNull()
+                if (cloudPlan != null) {
+                    mode = SierraMode.AI
+                    consumeCompositionIntent(cloudPlan, localPlan)
+                } else {
+                    vlm.cancel()
+                    emit(session, DirectorUiState(DirectorStage.PLANNING, false, "Sierra β is taking over…", camera = camera.uiState(), sierraMode = SierraMode.BETA, aspectRatioOverride = aspectRatioOverride, keepOriginal = keepOriginal))
+                    localPlan
                 }
-
-                while (evaluationCount < CapturePolicy.MAX_EVALUATIONS) {
-                    assertCurrent(session); evaluationCount++
-                    val decoded = storage.decodeOriented(currentFile)
-                    val quality = PhotoQuality.analyze(decoded)
-                    val rendered = LookProcessor.apply(decoded, look)
-                    try {
-                        emit(session, DirectorUiState(DirectorStage.CHECKING, true, "Checking result…", attempt = physicalCaptures, camera = camera.uiState()))
-                        val eval = vlm.evaluate(rendered, plan.objective, physicalCaptures, camera.snapshot(), issues, skills.evaluationContext(branch), caps).getOrElse { break }
-                        assertCurrent(session)
-                        val score = CapturePolicy.combinedFallbackScore(eval.score, quality.heuristicScore)
-                        val accepted = CapturePolicy.accepted(eval, quality.catastrophic)
-                        candidates += Candidate(currentFile, look, score, !quality.catastrophic, accepted, physicalCaptures)
-                        if (accepted) { val uri = finalizeCandidate(session, candidates.last(), ref, attempts); finalized = uri != null; return uri }
-
-                        issues = (eval.issues + issues).distinct().take(8)
-                        if (evaluationCount >= CapturePolicy.MAX_EVALUATIONS) break
-                        val deltaInput = if (physicalCaptures < physicalBudget) eval.deltaCalls else eval.deltaCalls.filter { it.id in ToolIds.LOOK_IDS }
-                        if (deltaInput.isEmpty()) break
-                        emit(session, DirectorUiState(DirectorStage.CORRECTING, true, "Refining…", attempt = physicalCaptures, lastScore = eval.score, camera = camera.uiState()))
-                        val delta = tools.apply(deltaInput, caps, look); assertCurrent(session)
-                        if (delta.applied.isEmpty()) break
-                        caps = camera.capabilities()
-                        look = delta.look
-                        issues = (delta.rejected.map { "tool_${it.call.id}:${it.reason}" } + issues).distinct().take(8)
-                        if (delta.requiresRecapture) {
-                            if (physicalCaptures >= physicalBudget) break
-                            camera.awaitSettledState(); assertCurrent(session)
-                            physicalCaptures++
-                            emit(session, DirectorUiState(DirectorStage.RECAPTURING, true, "Capturing refinement…", attempt = physicalCaptures, camera = camera.uiState()))
-                            currentFile = storage.newAttempt(session, physicalCaptures).also { attempts += it }
-                            camera.capturePrivate(currentFile); assertCurrent(session)
-                        }
-                    } finally {
-                        if (rendered !== decoded && !rendered.isRecycled) rendered.recycle()
-                        if (!decoded.isRecycled) decoded.recycle()
-                    }
-                }
-
-                assertCurrent(session)
-                val best = candidates.filter { it.valid }.maxByOrNull { it.score } ?: candidates.first()
-                val uri = finalizeCandidate(session, best, ref, attempts); finalized = uri != null; return uri
-            } finally { if (!referenceBitmap.isRecycled) referenceBitmap.recycle() }
-        } catch (_: StaleSession) {
-            val ref = reference
-            if (!finalized && ref != null && ref.exists() && ref.length() > 0L) runCatching { storage.saveRawJpeg(ref) }.onSuccess { storage.markFinalized(ref); finalized = true }
-            return null
-        } catch (_: CancellationException) {
-            val ref = reference
-            if (!finalized && ref != null && ref.exists() && ref.length() > 0L) runCatching { storage.saveRawJpeg(ref) }.onSuccess { storage.markFinalized(ref); finalized = true }
-            return null
-        } catch (t: Throwable) {
-            val ref = reference
-            if (!finalized && ref != null && ref.exists() && ref.length() > 0L) {
-                val fallback = runCatching { storage.saveRawJpeg(ref) }.getOrNull()
-                if (fallback != null) {
-                    storage.markFinalized(ref); finalized = true
-                    emit(session, DirectorUiState(DirectorStage.ERROR, vlm.isReady(), "AI failed • reference saved", error = t.message, camera = camera.uiState(), lastSavedUri = fallback.toString()))
-                    return fallback
-                }
+            } else {
+                localPlan
             }
-            emit(session, DirectorUiState(DirectorStage.ERROR, vlm.isReady(), "Capture retained privately • storage action needed", error = t.message, camera = camera.uiState()))
+            assertCurrent(session)
+
+            val userConstrainedPlan = aspectRatioOverride?.let { basePlan.copy(aspectRatio = it) } ?: basePlan
+            val plan = InstantFinishEngine.enrich(userConstrainedPlan, referenceQuality)
+            emit(
+                session,
+                DirectorUiState(
+                    DirectorStage.APPLYING,
+                    mode == SierraMode.AI,
+                    if (mode == SierraMode.AI) "Sierra AI directed • Sierra β applying" else "Sierra β preparing the shot",
+                    camera = camera.uiState(),
+                    sierraMode = mode,
+                    aspectRatio = plan.aspectRatio,
+                    aspectRatioOverride = aspectRatioOverride,
+                    sceneLabel = plan.scene,
+                    objective = plan.objective,
+                    keepOriginal = keepOriginal
+                )
+            )
+
+            var caps = camera.capabilities()
+            val execution = tools.apply(plan.toolCalls, caps)
+            assertCurrent(session)
+            caps = camera.capabilities()
+            val look = execution.look
+            val appliedPlan = plan.copy(toolCalls = execution.applied)
+
+            if (execution.requiresRecapture) {
+                emit(session, DirectorUiState(DirectorStage.CHECKING, mode == SierraMode.AI, "Locking focus & exposure…", camera = camera.uiState(), sierraMode = mode, aspectRatio = plan.aspectRatio, aspectRatioOverride = aspectRatioOverride, sceneLabel = plan.scene, objective = plan.objective, keepOriginal = keepOriginal))
+                camera.awaitSettledState(LOCAL_SETTLE_TIMEOUT_MS)
+                assertCurrent(session)
+            }
+
+            emit(session, DirectorUiState(DirectorStage.CHECKING, mode == SierraMode.AI, "Sierra β checking quality…", camera = camera.uiState(), sierraMode = mode, aspectRatio = plan.aspectRatio, aspectRatioOverride = aspectRatioOverride, sceneLabel = plan.scene, objective = plan.objective, keepOriginal = keepOriginal))
+            val verification = camera.captureAnalysisFrame(FAST_VERIFY_TIMEOUT_MS)
+            val score = if (verification != null) {
+                try {
+                    val cameraQuality = PhotoQuality.analyze(verification)
+                    if (cameraQuality.catastrophic) {
+                        if (mode == SierraMode.AI) vlm.cancel()
+                        tools.restoreUserState()
+                        emit(session, DirectorUiState(DirectorStage.READY, mode == SierraMode.AI, "Hold steady or add light • try again", camera = camera.uiState(), sierraMode = mode, aspectRatioOverride = aspectRatioOverride, keepOriginal = keepOriginal))
+                        return null
+                    }
+                    val rendered = LookProcessor.apply(verification, look)
+                    try {
+                        val finishQuality = PhotoQuality.analyze(rendered)
+                        combinedReadyScore(plan.referenceScore, cameraQuality.heuristicScore, finishQuality.heuristicScore)
+                    } finally {
+                        if (rendered !== verification && !rendered.isRecycled) rendered.recycle()
+                    }
+                } finally {
+                    if (!verification.isRecycled) verification.recycle()
+                }
+            } else {
+                CapturePolicy.combinedFallbackScore(plan.referenceScore, referenceQuality.heuristicScore)
+            }
+
+            approve(session, appliedPlan, look, score, mode)
+            return null
+        } catch (_: StaleSession) {
+            vlm.cancel()
+            return null
+        } catch (t: CancellationException) {
+            vlm.cancel()
+            throw t
+        } catch (t: Throwable) {
+            vlm.cancel()
+            runCatching { tools.restoreUserState() }
+            emit(session, DirectorUiState(DirectorStage.ERROR, false, "Sierra could not prepare this shot", error = t.message, camera = camera.uiState(), sierraMode = SierraMode.BETA, aspectRatioOverride = aspectRatioOverride, keepOriginal = keepOriginal))
             return null
         } finally {
-            storage.cleanup(attempts)
-            if (isCurrent(session)) runCatching { tools.restoreUserState() }
+            planningBitmap?.let { if (!it.isRecycled) it.recycle() }
+            storage.cleanup(created)
         }
     }
 
-    private suspend fun finalizeCandidate(session: Long, candidate: Candidate, reference: File, attempts: List<File>): Uri? {
-        assertCurrent(session)
-        emit(session, DirectorUiState(DirectorStage.SAVING, true, "Saving best photo…", attempt = candidate.captureNumber, lastScore = candidate.score, camera = camera.uiState()))
-        val uri = storage.saveFinal(candidate.file, candidate.look)
-        storage.markFinalized(reference); storage.cleanup(attempts)
-        emit(session, DirectorUiState(DirectorStage.READY, vlm.isReady(), "Saved", lastScore = candidate.score, camera = camera.uiState(), lastSavedUri = uri.toString()))
-        return uri
+    private fun consumeCompositionIntent(ai: PlanOutput, local: PlanOutput): PlanOutput {
+        val composition = ai.toolCalls.lastOrNull { it.id == ToolIds.COMPOSITION }
+        val requestedRatio = composition?.stringValue?.trim().orEmpty()
+        val ratio = when {
+            SierraCropPolicy.isSupported(requestedRatio) -> requestedRatio
+            SierraCropPolicy.isSupported(ai.aspectRatio) && ai.aspectRatio != "4:3" -> ai.aspectRatio
+            else -> local.aspectRatio
+        }
+        val centerX = (composition?.x ?: ai.cropCenterX).coerceIn(0.08, 0.92)
+        val centerY = (composition?.y ?: ai.cropCenterY).coerceIn(0.08, 0.92)
+        return ai.copy(
+            aspectRatio = ratio,
+            cropCenterX = centerX,
+            cropCenterY = centerY,
+            toolCalls = ai.toolCalls.filterNot { it.id == ToolIds.COMPOSITION },
+            planner = "sierra_ai"
+        )
     }
 
-    private suspend fun fallbackReference(session: Long, reference: File, status: String): Uri? {
-        assertCurrent(session)
-        val uri = storage.saveRawJpeg(reference); storage.markFinalized(reference)
-        emit(session, DirectorUiState(DirectorStage.READY, vlm.isReady(), status, camera = camera.uiState(), lastSavedUri = uri.toString()))
-        return uri
+    private fun combinedReadyScore(ai: Double, camera: Double, finish: Double): Double =
+        (0.48 * ai.coerceIn(0.0, 1.0) + 0.34 * camera.coerceIn(0.0, 1.0) + 0.18 * finish.coerceIn(0.0, 1.0))
+            .coerceIn(0.0, 1.0)
+
+    private fun approve(session: Long, plan: PlanOutput, look: LookSpec, score: Double, mode: SierraMode) {
+        approved = ApprovedState(look, plan, score, mode)
+        emit(
+            session,
+            DirectorUiState(
+                DirectorStage.PREPARED,
+                mode == SierraMode.AI,
+                if (mode == SierraMode.AI) "Ready • Sierra AI + β" else "Ready • Sierra β",
+                lastScore = score,
+                camera = camera.uiState(),
+                recipeCount = recipeMemory.count(),
+                sierraMode = mode,
+                aspectRatio = plan.aspectRatio,
+                aspectRatioOverride = aspectRatioOverride,
+                sceneLabel = plan.scene,
+                objective = plan.objective,
+                keepOriginal = keepOriginal
+            )
+        )
     }
 
-    private fun emit(session: Long, state: DirectorUiState) { if (isCurrent(session)) onState(state) }
+    private suspend fun captureFinal(): Uri? {
+        val state = approved ?: return null
+        val session = generation.get()
+        var file: File? = null
+        return try {
+            emit(session, DirectorUiState(DirectorStage.FINAL_CAPTURING, state.mode == SierraMode.AI, "Capturing full quality…", lastScore = state.score, camera = camera.uiState(), sierraMode = state.mode, aspectRatio = state.plan.aspectRatio, aspectRatioOverride = aspectRatioOverride, sceneLabel = state.plan.scene, objective = state.plan.objective, keepOriginal = keepOriginal))
+            camera.awaitSettledState(550)
+            file = storage.newAttempt(session, 99)
+            camera.capturePrivate(file)
+            emit(session, DirectorUiState(DirectorStage.SAVING, state.mode == SierraMode.AI, "Sierra β finishing…", lastScore = state.score, camera = camera.uiState(), sierraMode = state.mode, aspectRatio = state.plan.aspectRatio, aspectRatioOverride = aspectRatioOverride, sceneLabel = state.plan.scene, objective = state.plan.objective, keepOriginal = keepOriginal))
+            if (keepOriginal) runCatching { storage.saveOriginal(file) }
+            val uri = storage.saveFinal(file, state.look, state.plan.aspectRatio, state.plan.cropCenterX, state.plan.cropCenterY)
+            recipeMemory.remember(state.plan, state.score)
+
+            val settlement = if (state.mode == SierraMode.AI) {
+                val captureId = UUID.randomUUID().toString()
+                withTimeoutOrNull(CLOUD_SETTLEMENT_BUDGET_MS) {
+                    vlm.confirmFinalCapture(captureId)
+                }
+            } else {
+                Result.success(Unit)
+            }
+
+            approved = null
+            tools.restoreUserState()
+            val settlementPending = state.mode == SierraMode.AI && settlement?.isSuccess != true
+            emit(
+                session,
+                DirectorUiState(
+                    DirectorStage.READY,
+                    cloudEnabled && vlm.isReady(),
+                    if (settlementPending) "Sierra photo saved • credit sync pending" else "Sierra photo saved",
+                    lastScore = state.score,
+                    camera = camera.uiState(),
+                    lastSavedUri = uri.toString(),
+                    recipeCount = recipeMemory.count(),
+                    sierraMode = state.mode,
+                    aspectRatio = state.plan.aspectRatio,
+                    aspectRatioOverride = aspectRatioOverride,
+                    sceneLabel = state.plan.scene,
+                    objective = state.plan.objective,
+                    keepOriginal = keepOriginal
+                )
+            )
+            uri
+        } catch (t: Throwable) {
+            if (state.mode == SierraMode.AI) vlm.cancel()
+            approved = null
+            runCatching { tools.restoreUserState() }
+            emit(session, DirectorUiState(DirectorStage.ERROR, cloudEnabled && vlm.isReady(), "Final capture failed", error = t.message, camera = camera.uiState(), sierraMode = state.mode, aspectRatioOverride = aspectRatioOverride, keepOriginal = keepOriginal))
+            null
+        } finally {
+            file?.let { storage.cleanup(listOf(it)) }
+        }
+    }
+
+    private fun emit(session: Long, state: DirectorUiState) {
+        if (isCurrent(session)) onState(state)
+    }
+
     private fun isCurrent(session: Long): Boolean = generation.get() == session
-    private fun assertCurrent(session: Long) { if (!isCurrent(session)) throw StaleSession() }
+    private fun assertCurrent(session: Long) {
+        if (!isCurrent(session)) throw StaleSession()
+    }
+
     private class StaleSession : RuntimeException()
+
+    companion object {
+        private const val HARD_PREPARE_DEADLINE_MS = 6_500L
+        private const val CLOUD_PLAN_BUDGET_MS = 3_400L
+        private const val CLOUD_SETTLEMENT_BUDGET_MS = 1_200L
+        private const val FAST_FRAME_TIMEOUT_MS = 650L
+        private const val FAST_VERIFY_TIMEOUT_MS = 500L
+        private const val LOCAL_SETTLE_TIMEOUT_MS = 650L
+    }
 }

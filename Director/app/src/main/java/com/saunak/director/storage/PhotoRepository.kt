@@ -1,5 +1,6 @@
 package com.saunak.director.storage
 
+import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
 import android.graphics.Bitmap
@@ -17,10 +18,11 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Locale
 import kotlin.math.max
+import kotlin.math.roundToInt
 
 class PhotoRepository(private val context: Context) {
-    private val pendingDir = File(context.noBackupFilesDir, "director_pending").apply { mkdirs() }
-    private val attemptDir = File(context.cacheDir, "director_attempts").apply { mkdirs() }
+    private val pendingDir = File(context.noBackupFilesDir, "sierra_pending").apply { mkdirs() }
+    private val attemptDir = File(context.cacheDir, "sierra_attempts").apply { mkdirs() }
 
     fun newPendingReference(sessionId: Long): File = File(pendingDir, "reference_${sessionId}_${System.currentTimeMillis()}.jpg")
     fun newAttempt(sessionId: Long, index: Int): File = File(attemptDir, "attempt_${sessionId}_${index}_${System.nanoTime()}.jpg")
@@ -65,24 +67,95 @@ class PhotoRepository(private val context: Context) {
         bitmap
     }
 
-    suspend fun saveFinal(file: File, look: LookSpec): Uri = if (look.isIdentity()) {
-        // Identity results remain byte-for-byte full-resolution JPEGs from CameraX.
-        saveRawJpeg(file)
-    } else {
-        // Creative processing is bounded to a high-quality 4096px long edge to avoid
-        // catastrophic bitmap spikes on 48/108/200MP sensors. The untouched reference remains
-        // recoverable until this processed MediaStore write succeeds.
+    suspend fun saveFinal(
+        file: File,
+        look: LookSpec,
+        aspectRatio: String = "4:3",
+        cropCenterX: Double = 0.5,
+        cropCenterY: Double = 0.5
+    ): Uri {
+        val ratio = SierraCropPolicy.ratioOrNull(aspectRatio)
+        if (look.isIdentity() && ratio == null) return saveRawJpeg(file)
+
         val source = decodeOriented(file, PROCESSED_MAX_DIMENSION)
-        val rendered = LookProcessor.apply(source, look)
-        try { saveProcessed(rendered, file) } finally {
-            if (rendered !== source && !rendered.isRecycled) rendered.recycle()
+        val cropped = if (ratio == null) source else cropToRatio(source, ratio.first, ratio.second, cropCenterX, cropCenterY)
+        val rendered = LookProcessor.apply(cropped, look)
+        return try {
+            saveProcessed(rendered, file)
+        } finally {
+            if (rendered !== cropped && !rendered.isRecycled) rendered.recycle()
+            if (cropped !== source && !cropped.isRecycled) cropped.recycle()
             if (!source.isRecycled) source.recycle()
         }
     }
 
-    suspend fun saveRawJpeg(file: File): Uri = withContext(Dispatchers.IO) {
+    suspend fun saveOriginal(file: File): Uri = saveRawJpeg(
+        file = file,
+        relativePath = "Pictures/Sierra Vision/Originals",
+        prefix = "SIERRA_ORIGINAL"
+    )
+
+    suspend fun recentFinals(limit: Int = 60): List<Uri> = withContext(Dispatchers.IO) {
+        val collection = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+        val projection = arrayOf(MediaStore.Images.Media._ID, MediaStore.Images.Media.DISPLAY_NAME)
+        val selection = "${MediaStore.Images.Media.RELATIVE_PATH}=?"
+        val args = arrayOf("Pictures/Sierra Vision/")
+        val result = ArrayList<Uri>(limit.coerceAtLeast(1))
+        context.contentResolver.query(
+            collection,
+            projection,
+            selection,
+            args,
+            "${MediaStore.Images.Media.DATE_ADDED} DESC"
+        )?.use { cursor ->
+            val idColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
+            val nameColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DISPLAY_NAME)
+            while (cursor.moveToNext() && result.size < limit) {
+                val name = cursor.getString(nameColumn).orEmpty()
+                if (!name.startsWith("SIERRA_") || name.startsWith("SIERRA_ORIGINAL_")) continue
+                result += ContentUris.withAppendedId(collection, cursor.getLong(idColumn))
+            }
+        }
+        result
+    }
+
+    private fun cropToRatio(
+        source: Bitmap,
+        ratioWidth: Int,
+        ratioHeight: Int,
+        centerX: Double,
+        centerY: Double
+    ): Bitmap {
+        val target = ratioWidth.toDouble() / ratioHeight.toDouble()
+        val current = source.width.toDouble() / source.height.toDouble()
+        if (kotlin.math.abs(target - current) < 0.015) return source
+
+        val cropWidth: Int
+        val cropHeight: Int
+        if (current > target) {
+            cropHeight = source.height
+            cropWidth = (cropHeight * target).roundToInt().coerceIn(1, source.width)
+        } else {
+            cropWidth = source.width
+            cropHeight = (cropWidth / target).roundToInt().coerceIn(1, source.height)
+        }
+
+        val safeCx = centerX.coerceIn(0.0, 1.0)
+        val safeCy = centerY.coerceIn(0.0, 1.0)
+        val idealLeft = (safeCx * source.width - cropWidth / 2.0).roundToInt()
+        val idealTop = (safeCy * source.height - cropHeight / 2.0).roundToInt()
+        val left = idealLeft.coerceIn(0, source.width - cropWidth)
+        val top = idealTop.coerceIn(0, source.height - cropHeight)
+        return Bitmap.createBitmap(source, left, top, cropWidth, cropHeight)
+    }
+
+    suspend fun saveRawJpeg(
+        file: File,
+        relativePath: String = "Pictures/Sierra Vision",
+        prefix: String = "SIERRA"
+    ): Uri = withContext(Dispatchers.IO) {
         require(file.isFile && file.length() > 0) { "Reference JPEG missing" }
-        val uri = createPendingMediaUri(file.nameWithoutExtension)
+        val uri = createPendingMediaUri(file.nameWithoutExtension, relativePath, prefix)
         try {
             context.contentResolver.openOutputStream(uri, "w")!!.use { out -> file.inputStream().use { it.copyTo(out) } }
             commitMediaUri(uri)
@@ -94,7 +167,7 @@ class PhotoRepository(private val context: Context) {
     }
 
     suspend fun saveProcessed(bitmap: Bitmap, sourceFile: File): Uri = withContext(Dispatchers.IO) {
-        val uri = createPendingMediaUri(sourceFile.nameWithoutExtension)
+        val uri = createPendingMediaUri(sourceFile.nameWithoutExtension, "Pictures/Sierra Vision", "SIERRA")
         try {
             context.contentResolver.openOutputStream(uri, "w")!!.use { out -> check(bitmap.compress(Bitmap.CompressFormat.JPEG, 96, out)) }
             copySafeExif(sourceFile, uri)
@@ -106,12 +179,12 @@ class PhotoRepository(private val context: Context) {
         }
     }
 
-    private fun createPendingMediaUri(stem: String): Uri {
+    private fun createPendingMediaUri(stem: String, relativePath: String, prefix: String): Uri {
         val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(System.currentTimeMillis())
         val values = ContentValues().apply {
-            put(MediaStore.Images.Media.DISPLAY_NAME, "DIRECTOR_${timestamp}_${stem.takeLast(10)}.jpg")
+            put(MediaStore.Images.Media.DISPLAY_NAME, "${prefix}_${timestamp}_${stem.takeLast(10)}.jpg")
             put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-            put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/Director")
+            put(MediaStore.Images.Media.RELATIVE_PATH, relativePath)
             put(MediaStore.Images.Media.IS_PENDING, 1)
         }
         return context.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: error("Could not create gallery image")
@@ -161,4 +234,20 @@ class PhotoRepository(private val context: Context) {
         const val AI_DECODE_MAX_DIMENSION = 1024
         const val PROCESSED_MAX_DIMENSION = 4096
     }
+}
+
+object SierraCropPolicy {
+    private val ratios = linkedMapOf(
+        "4:3" to (4 to 3),
+        "3:2" to (3 to 2),
+        "4:5" to (4 to 5),
+        "1:1" to (1 to 1),
+        "16:9" to (16 to 9),
+        "9:16" to (9 to 16),
+        "2.39:1" to (239 to 100)
+    )
+
+    val supported: List<String> = ratios.keys.toList()
+    fun ratioOrNull(value: String): Pair<Int, Int>? = ratios[value.trim()]
+    fun isSupported(value: String): Boolean = ratioOrNull(value) != null
 }

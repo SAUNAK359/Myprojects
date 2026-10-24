@@ -21,7 +21,11 @@ data class PlanOutput(
     @SerialName("reference_score") val referenceScore: Double = 0.5,
     @SerialName("reference_accept") val referenceAccept: Boolean = false,
     @SerialName("calls") val toolCalls: List<ToolCall> = emptyList(),
-    @SerialName("recapture") val recapture: Boolean = true
+    @SerialName("recapture") val recapture: Boolean = true,
+    @SerialName("aspect_ratio") val aspectRatio: String = "4:3",
+    @SerialName("crop_center_x") val cropCenterX: Double = 0.5,
+    @SerialName("crop_center_y") val cropCenterY: Double = 0.5,
+    @SerialName("planner") val planner: String = "sierra_ai"
 )
 
 @Serializable
@@ -36,7 +40,24 @@ data class EvaluationOutput(
     @SerialName("delta") val deltaCalls: List<ToolCall> = emptyList()
 )
 
-enum class DirectorStage { CAMERA_ONLY, AI_DOWNLOAD_REQUIRED, LOADING_AI, READY, CAPTURING, ANALYZING, PLANNING, APPLYING, RECAPTURING, CHECKING, CORRECTING, SAVING, ERROR, OBSERVING }
+enum class DirectorStage {
+    CAMERA_ONLY,
+    READY,
+    CAPTURING,
+    ANALYZING,
+    PLANNING,
+    APPLYING,
+    RECAPTURING,
+    CHECKING,
+    CORRECTING,
+    PREPARED,
+    FINAL_CAPTURING,
+    SAVING,
+    ERROR,
+    OBSERVING
+}
+
+enum class SierraMode { AI, BETA }
 
 data class DirectorUiState(
     val stage: DirectorStage = DirectorStage.CAMERA_ONLY,
@@ -44,9 +65,31 @@ data class DirectorUiState(
     val status: String = "Camera ready",
     val attempt: Int = 0,
     val lastScore: Double? = null,
-    val modelProgress: Float? = null,
-    val requestModelDownload: Boolean = false,
     val error: String? = null,
     val camera: CameraUiState = CameraUiState(),
-    val lastSavedUri: String? = null
+    val lastSavedUri: String? = null,
+    val hasApiKey: Boolean = false,
+    val recipeCount: Int = 0,
+    val showSettings: Boolean = false,
+    val showTools: Boolean = false,
+    val showGallery: Boolean = false,
+    val showAccount: Boolean = false,
+    val galleryItems: List<String> = emptyList(),
+    val gridEnabled: Boolean = false,
+    val levelEnabled: Boolean = false,
+    val sierraMode: SierraMode = SierraMode.BETA,
+    val aspectRatio: String = "4:3",
+    val aspectRatioOverride: String? = null,
+    val sceneLabel: String? = null,
+    val objective: String? = null,
+    val privateMode: Boolean = false,
+    val keepOriginal: Boolean = false,
+    val serverConfigured: Boolean = false,
+    val signedIn: Boolean = false,
+    val accountBusy: Boolean = false,
+    val accountError: String? = null,
+    val userDisplayName: String? = null,
+    val userEmail: String? = null,
+    val creditsAvailable: Int? = null,
+    val creditsReserved: Int = 0
 )

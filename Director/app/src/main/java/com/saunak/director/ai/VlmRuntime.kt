@@ -5,11 +5,37 @@ import com.saunak.director.camera.CameraSnapshot
 import com.saunak.director.camera.CapabilityRegistry
 import com.saunak.director.director.EvaluationOutput
 import com.saunak.director.director.PlanOutput
+import com.saunak.director.processing.TechnicalQuality
 
 interface VlmRuntime {
     suspend fun load(modelPath: String, projectorPath: String): Result<Unit>
-    suspend fun plan(image: Bitmap, capabilities: CapabilityRegistry, camera: CameraSnapshot, skillContext: String): Result<PlanOutput>
-    suspend fun evaluate(image: Bitmap, objective: String, attempt: Int, camera: CameraSnapshot, previousIssues: List<String>, evaluationContext: String, capabilities: CapabilityRegistry): Result<EvaluationOutput>
+
+    suspend fun plan(
+        image: Bitmap,
+        capabilities: CapabilityRegistry,
+        camera: CameraSnapshot,
+        skillContext: String
+    ): Result<PlanOutput>
+
+    suspend fun plan(
+        image: Bitmap,
+        capabilities: CapabilityRegistry,
+        camera: CameraSnapshot,
+        skillContext: String,
+        localQuality: TechnicalQuality?
+    ): Result<PlanOutput> = plan(image, capabilities, camera, skillContext)
+
+    suspend fun evaluate(
+        image: Bitmap,
+        objective: String,
+        attempt: Int,
+        camera: CameraSnapshot,
+        previousIssues: List<String>,
+        evaluationContext: String,
+        capabilities: CapabilityRegistry
+    ): Result<EvaluationOutput>
+
+    suspend fun confirmFinalCapture(captureId: String): Result<Unit> = Result.success(Unit)
     fun setMaxImageDimension(pixels: Int)
     fun cancel()
     fun isReady(): Boolean

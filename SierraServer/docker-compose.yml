@@ -1,0 +1,70 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: sierra
+      POSTGRES_USER: sierra
+      POSTGRES_PASSWORD: ${SIERRA_DB_PASSWORD:-sierra_change_me}
+    volumes:
+      - sierra_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sierra -d sierra"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [backend]
+
+  api:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      SIERRA_DATABASE_URL: postgresql+asyncpg://sierra:${SIERRA_DB_PASSWORD:-sierra_change_me}@db:5432/sierra
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - sierra_runtime:/srv/sierra/runtime
+    ports:
+      - "127.0.0.1:8080:8080"
+    networks: [backend, edge]
+
+  # Preferred home/laptop public path: outbound-only tunnel. Configure the public hostname
+  # in Cloudflare Zero Trust to target http://api:8080 and keep router ports closed.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    profiles: ["tunnel"]
+    command: tunnel --no-autoupdate run --token ${SIERRA_CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on: [api]
+    networks: [edge]
+
+  # Alternative when the laptop has normal public ingress and ports 80/443 are forwarded.
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    profiles: ["public"]
+    environment:
+      SIERRA_DOMAIN: ${SIERRA_DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on: [api]
+    networks: [edge]
+
+volumes:
+  sierra_pgdata:
+  sierra_runtime:
+  caddy_data:
+  caddy_config:
+
+networks:
+  backend:
+    internal: true
+  edge:

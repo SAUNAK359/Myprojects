@@ -1,0 +1,48 @@
+name: Sierra Vision Server CI
+
+on:
+  push:
+    branches: [sierra-vision-server-v1]
+    paths:
+      - 'SierraServer/**'
+      - '.github/workflows/sierra-server.yml'
+  pull_request:
+    paths:
+      - 'SierraServer/**'
+      - '.github/workflows/sierra-server.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sierra-server-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: SierraServer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: SierraServer/pyproject.toml
+      - name: Install
+        run: python -m pip install --upgrade pip && pip install '.[dev]'
+      - name: Ruff
+        run: ruff check app tests scripts
+      - name: Unit tests
+        env:
+          SIERRA_JWT_SECRET: 0123456789012345678901234567890123456789
+          SIERRA_PROVIDER_MASTER_KEY: j9fYzPzGZRXnZN4oWg_2-ZE6fAKh4CrJz8X3rOMbTgI=
+        run: pytest -q
+      - name: Compile all Python
+        run: python -m compileall -q app tests scripts
+      - name: Build container
+        run: docker build -t sierra-vision-server:ci .
