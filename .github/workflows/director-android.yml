@@ -5,6 +5,7 @@ on:
     branches:
       - director-gemini-v1
       - director-sierra-v3
+      - director-sierra-computational-v4
     paths:
       - 'Director/**'
       - '.github/workflows/director-android.yml'
