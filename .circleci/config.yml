@@ -24,6 +24,36 @@ commands:
             printf 'sdk.dir=%s\n' "$ANDROID_HOME" > local.properties
             chmod +x gradlew
 
+  stub-ui:
+    steps:
+      - run:
+          name: Stub Sierra UI for compile isolation
+          command: |
+            set -euo pipefail
+            printf '%s\n' \
+              'package com.saunak.director.ui' \
+              'import android.app.Application' \
+              'import androidx.lifecycle.AndroidViewModel' \
+              'class DirectorViewModel(app: Application) : AndroidViewModel(app)' \
+              > Director/app/src/main/java/com/saunak/director/ui/DirectorViewModel.kt
+            printf '%s\n' \
+              'package com.saunak.director.ui' \
+              'import androidx.compose.runtime.Composable' \
+              '@Composable fun SierraVisionApp() = Unit' \
+              > Director/app/src/main/java/com/saunak/director/ui/SierraVisionApp.kt
+
+  compile-kotlin:
+    steps:
+      - run:
+          name: Compile Kotlin
+          command: |
+            set -euo pipefail
+            source "$BASH_ENV"
+            cd Director
+            ./gradlew --no-daemon --no-parallel --stacktrace --max-workers=2 \
+              -Dorg.gradle.jvmargs='-Xmx2560m -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8 -XX:+UseParallelGC' \
+              -Pkotlin.compiler.execution.strategy=in-process compileDebugKotlin
+
 jobs:
   director-provider-boundary:
     docker:
@@ -57,26 +87,47 @@ jobs:
       TERM: dumb
     steps:
       - prepare-android
+      - stub-ui
+      - compile-kotlin
+
+  director-compile-no-runtime:
+    docker:
+      - image: cimg/android:2026.08
+    resource_class: medium+
+    working_directory: ~/project
+    environment:
+      GRADLE_USER_HOME: /home/circleci/.gradle
+      TERM: dumb
+    steps:
+      - prepare-android
+      - stub-ui
       - run:
-          name: Compile Sierra backend with UI stubbed
+          name: Stub Sierra cloud runtime
           command: |
             set -euo pipefail
-            printf '%s\n' \
-              'package com.saunak.director.ui' \
-              'import android.app.Application' \
-              'import androidx.lifecycle.AndroidViewModel' \
-              'class DirectorViewModel(app: Application) : AndroidViewModel(app)' \
-              > Director/app/src/main/java/com/saunak/director/ui/DirectorViewModel.kt
-            printf '%s\n' \
-              'package com.saunak.director.ui' \
-              'import androidx.compose.runtime.Composable' \
-              '@Composable fun SierraVisionApp() = Unit' \
-              > Director/app/src/main/java/com/saunak/director/ui/SierraVisionApp.kt
-            source "$BASH_ENV"
-            cd Director
-            ./gradlew --no-daemon --no-parallel --stacktrace --max-workers=2 \
-              -Dorg.gradle.jvmargs='-Xmx2560m -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8 -XX:+UseParallelGC' \
-              -Pkotlin.compiler.execution.strategy=in-process compileDebugKotlin
+            printf '%s\n' 'package com.saunak.director.ai' > Director/app/src/main/java/com/saunak/director/ai/SierraServerVlmRuntime.kt
+      - compile-kotlin
+
+  director-compile-no-backend:
+    docker:
+      - image: cimg/android:2026.08
+    resource_class: medium+
+    working_directory: ~/project
+    environment:
+      GRADLE_USER_HOME: /home/circleci/.gradle
+      TERM: dumb
+    steps:
+      - prepare-android
+      - stub-ui
+      - run:
+          name: Remove Sierra server client layer
+          command: |
+            set -euo pipefail
+            printf '%s\n' 'package com.saunak.director.ai' > Director/app/src/main/java/com/saunak/director/ai/SierraServerVlmRuntime.kt
+            rm -f Director/app/src/main/java/com/saunak/director/backend/SierraServerClient.kt
+            rm -f Director/app/src/main/java/com/saunak/director/backend/SierraSessionStore.kt
+            rm -f Director/app/src/main/java/com/saunak/director/backend/DeviceProfileCollector.kt
+      - compile-kotlin
 
   director-compile:
     docker:
@@ -88,16 +139,7 @@ jobs:
       TERM: dumb
     steps:
       - prepare-android
-      - run:
-          name: Compile Sierra Vision Kotlin
-          command: |
-            set -euo pipefail
-            source "$BASH_ENV"
-            cd Director
-            ./gradlew --no-daemon --no-parallel --stacktrace --max-workers=2 \
-              -Dorg.gradle.jvmargs='-Xmx2560m -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8 -XX:+UseParallelGC' \
-              -Pkotlin.compiler.execution.strategy=in-process \
-              compileDebugKotlin
+      - compile-kotlin
       - save_cache:
           key: director-gradle-v8-{{ checksum "Director/gradle.properties" }}
           paths:
@@ -123,8 +165,7 @@ jobs:
             cd Director
             ./gradlew --no-daemon --no-parallel --stacktrace --max-workers=2 \
               -Dorg.gradle.jvmargs='-Xmx2560m -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8 -XX:+UseParallelGC' \
-              -Pkotlin.compiler.execution.strategy=in-process \
-              testDebugUnitTest
+              -Pkotlin.compiler.execution.strategy=in-process testDebugUnitTest
       - store_test_results:
           path: Director/app/build/test-results
       - save_cache:
@@ -152,8 +193,7 @@ jobs:
             cd Director
             ./gradlew --no-daemon --no-parallel --stacktrace --max-workers=2 \
               -Dorg.gradle.jvmargs='-Xmx2560m -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8 -XX:+UseParallelGC' \
-              -Pkotlin.compiler.execution.strategy=in-process \
-              assembleDebug
+              -Pkotlin.compiler.execution.strategy=in-process assembleDebug
             mkdir -p /tmp/director-artifacts /tmp/director-diagnostics
             APK="$(find app/build/outputs/apk/debug -type f -name '*.apk' -print -quit)"
             test -n "$APK"
@@ -199,6 +239,10 @@ workflows:
               only:
                 - director-gemini-v1
       - director-compile-no-ui:
+          filters: *director_filter
+      - director-compile-no-runtime:
+          filters: *director_filter
+      - director-compile-no-backend:
           filters: *director_filter
       - director-compile:
           filters: *director_filter
