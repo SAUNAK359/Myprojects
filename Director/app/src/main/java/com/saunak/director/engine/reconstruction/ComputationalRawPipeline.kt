@@ -6,8 +6,8 @@ import com.saunak.director.camera.CameraEngine
 import com.saunak.director.camera.ManualRawFrameSpec
 import com.saunak.director.camera.RawJpegBurstCapture
 import com.saunak.director.engine.SierraEngine
-import com.saunak.director.engine.capture.CapturePath
 import com.saunak.director.engine.capture.CaptureProgram
+import com.saunak.director.engine.device.CapturePath
 import com.saunak.director.engine.device.CfaPattern
 import com.saunak.director.engine.isp.SierraIspBitmapSink
 import com.saunak.director.engine.isp.SierraIspPlan
