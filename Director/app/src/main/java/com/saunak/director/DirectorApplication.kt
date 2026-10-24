@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.ComponentCallbacks2
 import com.saunak.director.engine.SierraEngine
 import com.saunak.director.engine.experts.YuNetFaceExpert
+import com.saunak.director.engine.models.SierraModelProvisioning
 import com.saunak.director.platform.MemoryPressureBus
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -24,6 +25,10 @@ class DirectorApplication : Application() {
             runCatching { engine.deviceTwin() }
             runCatching { YuNetFaceExpert(engine).prepare() }
         }
+
+        // Large WARM/CAPTURE packs are persistent deferrable work: unmetered network, battery-not-low
+        // and storage-not-low. They can never introduce first-shutter network latency.
+        runCatching { SierraModelProvisioning.scheduleProductionPacks(this, engine.models) }
     }
 
     override fun onTrimMemory(level: Int) {
