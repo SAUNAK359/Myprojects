@@ -1,101 +1,106 @@
-# Director
+# Sierra Vision / Director — v3 Beta
 
-Director is an offline-first AI-native Android camera built around a **shutter-triggered** workflow. It behaves as a normal CameraX camera at all times. AI begins only after the user presses the white shutter.
+Sierra Vision is an Android computational-camera project. The current `director-sierra-v3` branch combines a CameraX camera, local technical analysis and on-device experts, an optional Sierra Server planning path, capability-gated camera tools, adaptive capture planning, smart burst selection, deterministic finishing, encrypted account state, and a growing Sierra engine for deeper computational photography.
 
-## Product contract
+This document describes the code that is actually live in the v3 Beta branch. Research architecture that is not yet connected to the shutter path is called out explicitly rather than presented as a finished feature.
 
-The normal flow is:
+## Current end-to-end workflow
 
-`white shutter → full-quality private reference JPEG → that exact captured photo is analyzed by the on-device VLM → capability-filtered typed tool plan → optional corrected recapture → same VLM evaluates → bounded correction → save accepted/best result`.
+The current Beta is a two-stage Director workflow:
 
-Key guarantees:
+`live CameraX preview → first shutter/prepare → analysis frame → local technical quality + YuNet face expert → local Sierra planner and optional Sierra Server plan → contract/tool validation → temporary camera controls → verification → PREPARED → second shutter → OEM single capture or Sierra smart JPEG burst → technical frame selection → deterministic crop/look finishing → MediaStore save`
 
-- Preview frames never autonomously start VLM planning or photography.
-- Every shutter first creates a protected reference image.
-- AI failure, timeout, memory/thermal pressure, malformed output or unsupported camera controls cannot discard that reference.
-- Camera mutations are temporary and user-selected state is restored.
-- Total physical captures default to three per shutter event, including the reference.
-- One VLM only: Qwen3-VL-2B-Instruct GGUF. Native camera APIs and deterministic quality metrics are not additional AI models.
-- Model output is constrained JSON data, then semantic/tool validation occurs before Android APIs are touched.
-- Unsupported capability is never fabricated.
+The camera remains usable when cloud AI or on-device experts fail. Sierra Server is optional; Private Photography and guest mode keep planning local.
 
-See `PRODUCT_CONTRACT.md`, `PRODUCTION_REMEDIATION.md`, and `RELEASE_VALIDATION.md`.
+### Capture safety
 
-## Model
+- Camera mutations are capability-gated and range-clamped before CameraX/Camera2 APIs are touched.
+- User camera state is restored after completion, cancellation, stale work, or recoverable failure.
+- An active OEM HDR/Night/Bokeh/Face Retouch extension is never multiplied into a Sierra multi-frame burst; the extension gets one final still.
+- The current universal multi-frame path is a **smart JPEG burst selector**, not RAW/HDR fusion. It captures independent full-quality CameraX JPEGs, rejects catastrophic frames, and chooses the strongest technical frame.
+- If finishing fails after a valid still was captured, Sierra attempts to save the untouched JPEG instead of discarding the photograph.
+- Burst size is bounded by thermal policy and working-storage checks.
 
-Director downloads official Qwen GGUF files on first AI enablement:
+## On-device models actually implemented
 
-- `Qwen3VL-2B-Instruct-Q4_K_M.gguf`
-- `mmproj-Qwen3VL-2B-Instruct-Q8_0.gguf`
+### YuNet face detection — live
 
-Files are stored app-private and SHA-256 verified. The APK contains no model weights. Interrupted downloads can resume; verification is invalidated if native model loading fails so corrupted files can be rechecked/repaired.
+A checksum-pinned YuNet 2026 ONNX checkpoint is downloaded into app-private storage, verified before installation, and used during shot preparation when available. NNAPI is attempted with XNNPACK as the portable correctness fallback. The model-specific MIT license is bundled in the APK assets.
 
-## Camera and image behavior
+### Depth Anything V2 Small — provisioned, not yet in the live shutter decision
 
-- Android 10 / API 29+.
-- arm64-v8a AI runtime.
-- Preview + ImageCapture only; no continuous VLM frame analysis.
-- Real CameraX zoom/EV/focus/flash capabilities drive both UI and AI tool contracts.
-- OEM HDR/Night/Bokeh/Face Retouch are capability-gated and transactionally isolated.
-- Manual-sensor/RAW characteristics may be reported, but manual ISO/shutter/WB are intentionally not executable AI tools until physical-device qualification proves them safe.
-- Natural/identity output copies the original full-resolution JPEG bytes.
-- Creative processing uses an EXIF-correct, memory-bounded 4096px long-edge path by default; the untouched reference remains protected until save succeeds.
-- Pending references live under no-backup private storage and are recovered after process death.
+A checksum-pinned Apache-2.0 ONNX checkpoint can be provisioned by constrained WorkManager jobs. The expert returns normalized **relative inverse depth**, never fabricated metric metres. The model is implemented and testable, but v3 Beta does not yet use its output to drive portrait rendering, capture policy, or final-image arbitration.
+
+## Sierra engine implemented as infrastructure
+
+The repository contains production-oriented primitives for:
+
+- immutable frame metadata contracts;
+- Camera2 device/calibration twins;
+- explicit coordinate-space transforms;
+- time-decaying probabilistic scene beliefs;
+- model manifests, SHA-256 verification and release licence gates;
+- ONNX Runtime session management with NNAPI/XNNPACK fallbacks;
+- value-of-information expert scheduling;
+- measured-backend/pressure-aware scheduling models;
+- capture-program compilation;
+- evidence ledgers and deterministic-vs-neural reconstruction arbitration;
+- multi-axis quality-council decisions;
+- thermal and memory-pressure handling.
+
+These primitives are not all connected to the current shutter path yet. In particular, the SceneBeliefGraph, CoordinateGraph, ExpertScheduler/ComputeHypervisor, EvidenceLedger, ReconstructionArbiter and QualityCouncil are currently engine infrastructure rather than mandatory final-capture gates.
+
+## Computational-photography work still required for the full Sierra architecture
+
+The following are **not** complete in the live Beta path and must not be represented as shipping features yet:
+
+- certified RAW+JPEG/manual burst execution;
+- YUV reprocessing path;
+- CFA-aware RAW alignment/reconstruction;
+- gyro/rolling-shutter/optical-flow fusion;
+- HDR radiance fusion and deghosting;
+- temporal denoise and true burst super-resolution;
+- face parsing, portrait matting and whole-body pose experts;
+- scene-semantic foundation model;
+- semantic/calibrated neural ISP and device-specific colour calibration;
+- multi-camera pixel fusion;
+- TOPIQ/Q-ReAlign-class final IQA;
+- live EvidenceLedger/ReconstructionArbiter/QualityCouncil integration;
+- measured backend profiling/interference tables for true CPU/GPU/NPU load balancing.
+
+The model catalog contains research candidates for these roles, but a catalog entry is not treated as an implemented model. Only checksum-pinned manifests with acceptable licence terms can become installable production assets.
+
+## Security and privacy
+
+- Android permissions: Camera and Internet only.
+- Cleartext network traffic is disabled.
+- Sierra Server URL must be blank or HTTPS at build time.
+- Provider API keys are forbidden in Android source and checked in CI.
+- Account access/refresh tokens are stored with Android Keystore AES/GCM encryption.
+- Model downloads are HTTPS-only, size-bounded, disk-space-gated, SHA-256 verified and atomically installed.
+- Current account/session, settlement and Sierra preference files are explicitly excluded from backup/device-transfer rules in addition to `allowBackup=false`.
+- Private Photography disables cloud planning; only local Beta logic is used.
+- Shipping model licences are bundled under `app/src/main/assets/third_party_licenses/`.
 
 ## Build stack
 
-- Android Gradle Plugin `8.13.2`
-- Gradle `8.13`
-- Kotlin / Compose plugin `2.3.10`
-- JDK `17`
-- compile/target SDK `36`
-- Build Tools `36.0.0`
-- NDK `28.2.13676358`
-- CMake `3.22.1`
-- CameraX `1.5.0`
+- Android compile/target SDK 36
+- JDK 17
+- Kotlin / Compose
+- CameraX 1.6.2
+- ONNX Runtime Android 1.31.0
+- WorkManager 2.12.0
+- OkHttp 4.12.0
+- minSdk 29
 
-## Build resilience
+## CI gates
 
-Director treats CI caches as untrusted input.
+GitHub Actions and CircleCI build the Android project. CircleCI contains independent compile-isolation jobs for UI, cloud runtime and backend boundaries, plus unit tests and APK verification. Android lint is a blocking gate. APK verification checks signing metadata, alignment, ZIP integrity and DEX presence.
 
-`scripts/bootstrap_android_sdk.sh` provisions Android packages one at a time, accepts valid NDK symlinks/wrappers, validates `source.properties`, `android.toolchain.cmake`, Clang/Clang++, aapt2 and CMake functionally, and performs bounded repair attempts. If Codemagic's shared SDK cannot be repaired, it automatically switches to a clean private SDK under `$HOME/.director/android-sdk`.
+The current CI validates a debug APK. A production release still requires a dedicated signed release pipeline, R8/shrinker validation, dependency/SBOM and licence compliance checks, and physical-device qualification.
 
-The custom `gradlew` verifies Gradle's official SHA-256 sidecar and ZIP integrity before extraction, rejects broken restored wrapper caches and cleanly redownloads them.
+## Release status
 
-`scripts/fetch_llama_cpp.sh` verifies the pinned archive SHA-256 and the required CMake/llama/ggml/mtmd source files before a restored cache can be reused.
+Sierra v3 Beta is an actively integrated deep-tech camera branch, not yet a justified claim of outperforming Pixel/Samsung/Xiaomi stock cameras. The current product path is substantially more conservative than the full research architecture: it protects camera availability and captured evidence first, while RAW reconstruction, semantic ISP, full expert fusion and measured heterogeneous scheduling are completed and benchmarked.
 
-`scripts/ci_preflight.sh` rejects unsupported JDKs, missing host commands, incomplete SDK/NDK/CMake installations and dangerously low disk space before compilation starts.
-
-`scripts/run_gradle_ci.sh` performs one recovery retry only for recognized dependency-cache/network corruption. Real Kotlin/Java/C++ compiler errors, lint errors and test failures are never hidden behind retries.
-
-## Local build
-
-```bash
-cd Director
-chmod +x gradlew scripts/*.sh scripts/*.py
-./scripts/bootstrap_android_sdk.sh
-./scripts/ci_preflight.sh
-./scripts/fetch_llama_cpp.sh
-./scripts/run_gradle_ci.sh /tmp/director-assemble.log assembleDebug
-```
-
-## Codemagic
-
-Use **Director Android Debug V7** from a **new build** on the latest `main` commit. Do not use Re-run on an older V6/V5/V4 failure because Codemagic re-runs that job's old revision/configuration.
-
-Debug V7:
-
-1. identifies the exact commit/workflow and reports free disk;
-2. self-heals or clean-room provisions the Android SDK/toolchain;
-3. runs the deterministic JDK/SDK/NDK/CMake/Gradle/disk/product-contract preflight;
-4. fetches and validates checksum-pinned llama.cpp source;
-5. compiles the debug APK with targeted recovery for cache/network corruption only;
-6. verifies the APK exists and is non-empty;
-7. runs unit tests with the same targeted infrastructure recovery;
-8. produces diagnostic lint reports while keeping the debug APK installable.
-
-Release **Director Android Release V7** remains strict: APK/AAB, tests and lint must pass, and release signing must be configured before distribution.
-
-## Production status
-
-The implementation contains production-oriented fallbacks and validation gates, but no source review or CI configuration can honestly guarantee that every external service, network transfer, or future dependency will never fail. V7 is designed to automatically recover from the infrastructure failure classes encountered so far and to fail early with precise diagnostics for non-recoverable conditions. Physical-device qualification in `RELEASE_VALIDATION.md` remains a release requirement, especially for OEM extensions, native VLM latency, memory, thermal behavior and quality-threshold calibration.
+No release should claim OEM superiority until controlled device tests demonstrate it across daylight, low light, motion, portrait, HDR, zoom, skin tone, colour error, detail, ghosting, thermal behaviour, shutter latency and blind human preference.
