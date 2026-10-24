@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - director-gemini-v1
+      - director-sierra-v3
     paths:
       - 'Director/**'
       - '.github/workflows/director-android.yml'
