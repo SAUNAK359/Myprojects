@@ -12,6 +12,8 @@ import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import com.saunak.director.engine.SierraEngine
 import com.saunak.director.engine.experts.DepthAnythingV2Expert
+import com.saunak.director.engine.experts.PersonSegmentationExpert
+import com.saunak.director.engine.experts.RTMPoseExpert
 import java.util.concurrent.TimeUnit
 
 /**
@@ -39,8 +41,13 @@ class SierraModelPackWorker(
 
         // Profiling failure does not invalidate verified model bytes. The runtime keeps a portable
         // correctness fallback and may retry profiling in a later maintenance cycle.
-        if (manifest.id == SierraShippingManifests.depthAnythingV2Small.id) {
-            runCatching { DepthAnythingV2Expert(engine).profileIfProvisioned().getOrThrow() }
+        when (manifest.id) {
+            SierraShippingManifests.depthAnythingV2Small.id ->
+                runCatching { DepthAnythingV2Expert(engine).profileIfProvisioned().getOrThrow() }
+            SierraShippingManifests.personSegmentation.id ->
+                runCatching { PersonSegmentationExpert(engine).profileIfProvisioned().getOrThrow() }
+            SierraShippingManifests.rtmposeSmall.id ->
+                runCatching { RTMPoseExpert(engine).profileIfProvisioned().getOrThrow() }
         }
 
         return Result.success(
