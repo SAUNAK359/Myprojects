@@ -6,6 +6,9 @@ import ai.onnxruntime.OrtSession
 import ai.onnxruntime.providers.NNAPIFlags
 import com.saunak.director.engine.device.ComputeBackend
 import com.saunak.director.engine.models.InstalledModelArtifact
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.nio.FloatBuffer
 import java.util.EnumSet
 import java.util.LinkedHashMap
 import java.util.concurrent.locks.ReentrantLock
@@ -59,7 +62,7 @@ class OnnxRuntimeEngine(
 ) : AutoCloseable {
     init { require(maxWarmSessions in 1..8); require(intraOpThreads in 1..16) }
 
-    private val environment: OrtEnvironment = OrtEnvironment.getEnvironment("sierra")
+    private val environment: OrtEnvironment = OrtEnvironment.getEnvironment()
     private val lock = ReentrantLock()
     private val sessions = object : LinkedHashMap<OnnxSessionKey, OnnxSessionHandle>(8, 0.75f, true) {}
 
@@ -79,6 +82,51 @@ class OnnxRuntimeEngine(
         } catch (t: Throwable) {
             options.close()
             throw t
+        }
+    }
+
+    /**
+     * Runs one dense float input and returns owned copies of requested float outputs. This boundary
+     * prevents ORT Result/OnnxTensor lifetimes from escaping into expert code and leaking native memory.
+     */
+    fun runFloatTensor(
+        artifact: InstalledModelArtifact,
+        backend: ComputeBackend,
+        inputName: String,
+        values: FloatArray,
+        shape: LongArray,
+        requestedOutputs: Set<String>
+    ): Map<String, FloatArray> {
+        require(values.isNotEmpty())
+        require(shape.isNotEmpty() && shape.all { it > 0L })
+        val expected = shape.fold(1L) { acc, dimension -> Math.multiplyExact(acc, dimension) }
+        require(expected == values.size.toLong()) { "Input contains ${values.size} values but shape requires $expected" }
+        require(requestedOutputs.isNotEmpty())
+
+        val direct = ByteBuffer.allocateDirect(values.size * Float.SIZE_BYTES)
+            .order(ByteOrder.nativeOrder())
+            .asFloatBuffer()
+        direct.put(values)
+        direct.rewind()
+
+        OnnxTensor.createTensor(environment, direct, shape).use { tensor ->
+            val handle = getOrCreate(artifact, backend)
+            require(inputName in handle.inputNames) { "Model ${artifact.manifest.id} has no input '$inputName'" }
+            require(requestedOutputs.all { it in handle.outputNames }) {
+                "Model ${artifact.manifest.id} is missing requested outputs: ${requestedOutputs - handle.outputNames}"
+            }
+            return handle.run(mapOf(inputName to tensor)) { result ->
+                requestedOutputs.associateWith { name ->
+                    val value = result.get(name).orElseThrow { IllegalStateException("Missing ORT output '$name'") }
+                    val output = value as? OnnxTensor
+                        ?: error("Output '$name' is ${value.javaClass.simpleName}, expected OnnxTensor")
+                    val buffer: FloatBuffer = output.floatBuffer
+                        ?: error("Output '$name' cannot be represented as float32")
+                    val copy = FloatArray(buffer.remaining())
+                    buffer.get(copy)
+                    copy
+                }
+            }
         }
     }
 
@@ -106,11 +154,9 @@ class OnnxRuntimeEngine(
             ComputeBackend.CPU_XNNPACK -> {
                 require(capabilities.xnnpack) { "XNNPACK is disabled for this runtime" }
                 options.addXnnpack(emptyMap())
-                // CPU remains ORT's final correctness fallback for operators XNNPACK does not claim.
             }
             ComputeBackend.NNAPI -> {
                 require(capabilities.nnapi) { "NNAPI is disabled for this runtime" }
-                // Disabling NNAPI's reference CPU avoids mistaking slow NNAPI-CPU execution for NPU/GPU acceleration.
                 options.addNnapi(EnumSet.of(NNAPIFlags.CPU_DISABLED))
             }
             ComputeBackend.NPU_QNN -> {
@@ -132,6 +178,5 @@ class OnnxRuntimeEngine(
     override fun close() = lock.withLock {
         sessions.values.toList().forEach { it.close() }
         sessions.clear()
-        // OrtEnvironment is process-global; do not close it here while other components may use it.
     }
 }
