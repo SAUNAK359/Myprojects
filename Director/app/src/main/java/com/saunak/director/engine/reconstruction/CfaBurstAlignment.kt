@@ -67,7 +67,7 @@ object CfaBurstAlignment {
 
         val separation = if (second.isFinite() && second > 0.0) ((second - best) / second).coerceIn(0.0, 1.0) else 0.0
         val absoluteQuality = exp(-best * 18.0).coerceIn(0.0, 1.0)
-        val confidence = (0.55 * absoluteQuality + 0.45 * separation).toFloat().coerceIn(0f, 1f)
+        val confidence = (0.55 * absoluteQuality + 0.45 * separation).toFloat().coerceIn(0f..1f)
         return CfaTranslation(bestDx, bestDy, confidence, best.toFloat().coerceAtLeast(0f))
     }
 
@@ -94,7 +94,6 @@ object CfaBurstAlignment {
             bottom = min(bottom, reference.height - t.dy)
         }
 
-        // Preserve the reference CFA phase after cropping.
         if ((left and 1) != 0) left++
         if ((top and 1) != 0) top++
         if (((right - left) and 1) != 0) right--
@@ -120,7 +119,8 @@ object CfaBurstAlignment {
                     values = values,
                     pattern = reference.pattern,
                     blackLevel = observation.raw.blackLevel,
-                    whiteLevel = observation.raw.whiteLevel
+                    whiteLevel = observation.raw.whiteLevel,
+                    blackLevelPattern = observation.raw.blackLevelPattern
                 ),
                 alignmentConfidence = observation.alignmentConfidence * t.confidence
             )
@@ -145,15 +145,13 @@ object CfaBurstAlignment {
 
         var error = 0.0
         var count = 0
-        // Sampling stride is a multiple of two so compared samples retain the same CFA color.
         val stride = 8
-        var y = y0 + ((y0 and 1))
+        var y = y0 + (y0 and 1)
         while (y < y1) {
-            var x = x0 + ((x0 and 1))
+            var x = x0 + (x0 and 1)
             while (x < x1) {
                 val a = ref[y * width + x]
                 val b = candidate[(y + dy) * width + x + dx]
-                // Truncated L1 makes moving subjects less able to dominate global camera alignment.
                 error += min(abs(a - b).toDouble(), 0.20)
                 count++
                 x += stride
