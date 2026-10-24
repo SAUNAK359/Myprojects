@@ -11,6 +11,7 @@ from app.db import get_db
 from app.models import Device, RefreshToken, User
 from app.schemas import LoginRequest, LogoutRequest, RefreshRequest, SignupRequest, TokenPair, UserView
 from app.security import (
+    DUMMY_PASSWORD_HASH,
     create_access_token,
     hash_password,
     hash_token,
@@ -139,19 +140,24 @@ async def login(
     email = normalize_email(str(payload.email))
     user = await db.scalar(select(User).where(User.email == email))
     now = datetime.now(timezone.utc)
-    if user and user.locked_until and user.locked_until > now:
-        raise HTTPException(status_code=429, detail="account temporarily locked; try again later")
-    valid = bool(user and user.is_active and verify_password(payload.password, user.password_hash))
+
+    locked = bool(user and user.locked_until and user.locked_until > now)
+    password_target = user.password_hash if user is not None else DUMMY_PASSWORD_HASH
+    password_ok = verify_password(payload.password, password_target)
+    valid = bool(user and user.is_active and not locked and password_ok)
+
     if not valid:
-        if user:
+        if user and not locked:
             user.failed_login_count += 1
             if user.failed_login_count >= 5:
                 user.locked_until = now + timedelta(minutes=15)
                 user.failed_login_count = 0
             await db.commit()
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid email or password"
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="invalid email or password",
         )
+
     user.failed_login_count = 0
     user.locked_until = None
     user.last_login_at = now
