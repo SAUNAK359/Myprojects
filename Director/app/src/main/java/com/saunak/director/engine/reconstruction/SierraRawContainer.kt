@@ -57,9 +57,21 @@ class SierraRawContainer private constructor(
         require(x0 >= 0 && y0 >= 0 && width > 0 && height > 0)
         require(x0 + width <= header.width && y0 + height <= header.height)
         val out = IntArray(width * height)
-        var index = 0
+        val rowBytes = width * header.pixelStrideBytes
+        val scratch = ByteArray(rowBytes)
+        var outIndex = 0
         for (y in y0 until y0 + height) {
-            for (x in x0 until x0 + width) out[index++] = sampleUnsigned16(x, y)
+            val rowOffset = header.payloadOffset + y.toLong() * header.rowStrideBytes + x0.toLong() * header.pixelStrideBytes
+            check(rowOffset + rowBytes <= header.payloadOffset + header.payloadBytes) { "RAW row exceeds payload" }
+            raf.seek(rowOffset)
+            raf.readFully(scratch)
+            var byteIndex = 0
+            repeat(width) {
+                val lo = scratch[byteIndex].toInt() and 0xff
+                val hi = scratch[byteIndex + 1].toInt() and 0xff
+                out[outIndex++] = lo or (hi shl 8)
+                byteIndex += header.pixelStrideBytes
+            }
         }
         return out
     }
@@ -88,8 +100,6 @@ class SierraRawContainer private constructor(
                 val iso = input.readInt()
                 val timestamp = input.readLong()
                 val payloadBytes = input.readInt()
-                // DataInputStream has consumed exactly this many bytes; use file pointer from an
-                // independent RandomAccessFile to avoid relying on buffering internals.
                 RandomAccessFile(file, "r").use { probe ->
                     probe.readUTF()
                     probe.readInt()
