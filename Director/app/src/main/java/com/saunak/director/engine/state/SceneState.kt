@@ -3,6 +3,9 @@ package com.saunak.director.engine.state
 import com.saunak.director.camera.CameraSensorTelemetry
 import com.saunak.director.director.SierraSceneSignals
 import com.saunak.director.engine.motion.MotionSnapshot
+import com.saunak.director.engine.subject.PredictiveSubjectDirective
+import com.saunak.director.engine.subject.PredictiveSubjectPolicy
+import com.saunak.director.engine.subject.SubjectTrack
 import com.saunak.director.processing.TechnicalQuality
 
 /**
@@ -16,6 +19,8 @@ data class SceneState(
     val motion: MotionSnapshot,
     val telemetry: CameraSensorTelemetry,
     val zoomRatio: Float,
+    val subject: SubjectTrack? = null,
+    val predictiveSubject: PredictiveSubjectDirective? = null,
     val confidence: Double,
     val uncertainty: Double
 ) {
@@ -24,6 +29,7 @@ data class SceneState(
         require(zoomRatio >= 1f)
         require(confidence in 0.0..1.0)
         require(uncertainty in 0.0..1.0)
+        require(predictiveSubject == null || subject != null)
     }
 }
 
@@ -34,20 +40,26 @@ object SceneStateAssembler {
         motion: MotionSnapshot,
         telemetry: CameraSensorTelemetry,
         zoomRatio: Float,
+        subject: SubjectTrack? = null,
         nowNs: Long = System.nanoTime()
     ): SceneState {
         val motionConfidence = motion.fusionConfidence
-        // Camera telemetry is captured immediately after the shutter-time motion probe. We avoid
-        // comparing clock domains unless the HAL has explicitly declared timestamp comparability.
         val telemetryConfidence = if (motion.timestampComparableToImu) 1.0 else 0.88
+        val predictive = subject?.let(PredictiveSubjectPolicy::evaluate)
+        val subjectConfidence = predictive?.confidence ?: if (scene.primaryHumanSubject) 0.35 else 0.70
+        val subjectUncertainty = if (scene.primaryHumanSubject) {
+            subject?.uncertainty ?: 0.85
+        } else 0.0
         val confidence = (
-            0.48 * scene.confidence +
-                0.22 * motionConfidence +
-                0.30 * telemetryConfidence
+            0.39 * scene.confidence +
+                0.20 * motionConfidence +
+                0.24 * telemetryConfidence +
+                0.17 * subjectConfidence
             ).coerceIn(0.0, 1.0)
         val uncertainty = (
-            0.56 * maxOf(motion.camera.uncertainty, motion.subject.uncertainty) +
-                0.44 * (1.0 - scene.confidence)
+            0.42 * maxOf(motion.camera.uncertainty, motion.subject.uncertainty) +
+                0.32 * (1.0 - scene.confidence) +
+                0.26 * subjectUncertainty
             ).coerceIn(0.0, 1.0)
         return SceneState(
             createdAtNs = nowNs,
@@ -56,6 +68,8 @@ object SceneStateAssembler {
             motion = motion,
             telemetry = telemetry,
             zoomRatio = zoomRatio,
+            subject = subject,
+            predictiveSubject = predictive,
             confidence = confidence,
             uncertainty = uncertainty
         )
