@@ -3,10 +3,23 @@ package com.saunak.director.engine.reconstruction
 import kotlin.math.abs
 import kotlin.math.exp
 import kotlin.math.max
-import kotlin.math.min
 import kotlin.math.sqrt
 
 enum class BayerPattern { RGGB, BGGR, GRBG, GBRG }
+
+/** 2x2 sensor black offsets in row-major CFA order: [y0x0, y0x1, y1x0, y1x1]. */
+data class CfaBlackLevel(val offsets: FloatArray) {
+    init {
+        require(offsets.size == 4)
+        require(offsets.all { it.isFinite() && it >= 0f })
+    }
+
+    operator fun get(x: Int, y: Int): Float = offsets[((y and 1) shl 1) or (x and 1)]
+
+    companion object {
+        fun uniform(value: Float): CfaBlackLevel = CfaBlackLevel(FloatArray(4) { value })
+    }
+}
 
 data class RawPlane(
     val width: Int,
@@ -14,12 +27,14 @@ data class RawPlane(
     val values: FloatArray,
     val pattern: BayerPattern,
     val blackLevel: Float,
-    val whiteLevel: Float
+    val whiteLevel: Float,
+    val blackLevelPattern: CfaBlackLevel = CfaBlackLevel.uniform(blackLevel)
 ) {
     init {
         require(width > 1 && height > 1)
         require(values.size == width * height)
-        require(whiteLevel > blackLevel)
+        require(blackLevel >= 0f)
+        require(whiteLevel > blackLevelPattern.offsets.max())
     }
 
     operator fun get(x: Int, y: Int): Float = values[y * width + x]
@@ -69,16 +84,14 @@ data class LinearRgbImage(
     }
 }
 
-/**
- * Deterministic RAW reconstruction baseline. Neural reconstruction is allowed to compete with this
- * path, never to replace it without evidence and quality validation.
- */
+/** Deterministic evidence-preserving RAW image formation baseline. */
 object RawImageFormation {
-    fun normalize(raw: RawPlane): FloatArray {
-        val scale = 1f / (raw.whiteLevel - raw.blackLevel)
-        return FloatArray(raw.values.size) { i ->
-            ((raw.values[i] - raw.blackLevel) * scale).coerceIn(0f, 1f)
-        }
+    fun normalize(raw: RawPlane): FloatArray = FloatArray(raw.values.size) { i ->
+        val x = i % raw.width
+        val y = i / raw.width
+        val black = raw.blackLevelPattern[x, y]
+        val scale = 1f / (raw.whiteLevel - black)
+        ((raw.values[i] - black) * scale).coerceIn(0f, 1f)
     }
 
     /**
@@ -108,7 +121,6 @@ object RawImageFormation {
                 val value = (normalized[j][i] * exposureScale).coerceAtLeast(0.0)
                 val noiseVariance = obs.noise.variance(normalized[j][i]).toDouble() * exposureScale * exposureScale
 
-                // Tukey-like robust residual gate suppresses moving/outlier samples without hard frame rejection.
                 val residual = abs(value - referenceValue.toDouble())
                 val sigma = sqrt(noiseVariance + obs.noise.variance(referenceValue).toDouble())
                 val robust = exp(-0.5 * (residual / max(3.0 * sigma, 1e-4)).let { it * it })
@@ -130,13 +142,15 @@ object RawImageFormation {
             values = out,
             pattern = reference.pattern,
             blackLevel = 0f,
-            whiteLevel = 1f
+            whiteLevel = 1f,
+            blackLevelPattern = CfaBlackLevel.uniform(0f)
         )
     }
 
-    /** Edge-aware deterministic Bayer demosaic. Portable baseline, intended to be replaced later by native/Vulkan kernels. */
+    /** Edge-aware deterministic Bayer demosaic portable baseline. */
     fun demosaic(raw: RawPlane): LinearRgbImage {
-        val src = if (raw.blackLevel == 0f && raw.whiteLevel == 1f) raw.values else normalize(raw)
+        val normalizedAlready = raw.whiteLevel == 1f && raw.blackLevelPattern.offsets.all { it == 0f }
+        val src = if (normalizedAlready) raw.values else normalize(raw)
         val out = FloatArray(raw.width * raw.height * 3)
 
         fun sample(x: Int, y: Int): Float {
@@ -189,12 +203,10 @@ object RawImageFormation {
         }
     }
 
-    private fun redIsHorizontal(pattern: BayerPattern, x: Int, y: Int): Boolean {
-        return when (pattern) {
-            BayerPattern.RGGB -> (y and 1) == 0
-            BayerPattern.BGGR -> (y and 1) == 1
-            BayerPattern.GRBG -> (y and 1) == 0
-            BayerPattern.GBRG -> (y and 1) == 1
-        }
+    private fun redIsHorizontal(pattern: BayerPattern, x: Int, y: Int): Boolean = when (pattern) {
+        BayerPattern.RGGB -> (y and 1) == 0
+        BayerPattern.BGGR -> (y and 1) == 1
+        BayerPattern.GRBG -> (y and 1) == 0
+        BayerPattern.GBRG -> (y and 1) == 1
     }
 }
