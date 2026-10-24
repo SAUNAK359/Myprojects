@@ -12,6 +12,8 @@ import java.nio.ByteOrder
 import java.nio.FloatBuffer
 import java.util.EnumSet
 import java.util.LinkedHashMap
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Semaphore
 import java.util.concurrent.locks.ReentrantLock
 import java.util.concurrent.locks.ReentrantReadWriteLock
 import kotlin.concurrent.withLock
@@ -82,18 +84,27 @@ class OnnxSessionHandle internal constructor(
 /**
  * Small LRU of warm ORT sessions. It intentionally supports only portable EPs in the stock AAR;
  * vendor runtimes are separate adapters so a missing Qualcomm/MediaTek/Samsung library cannot make
- * the application fail to load.
+ * the application fail to load. Runtime execution is additionally governed so concurrent experts do
+ * not stampede one execution provider: same-backend runs serialize while a small global permit pool
+ * still allows useful CPU/NNAPI overlap.
  */
 class OnnxRuntimeEngine(
     private val capabilities: OnnxRuntimeCapabilities = OnnxRuntimeCapabilities(),
     private val maxWarmSessions: Int = 3,
-    private val intraOpThreads: Int = Runtime.getRuntime().availableProcessors().coerceIn(1, 4)
+    private val intraOpThreads: Int = Runtime.getRuntime().availableProcessors().coerceIn(1, 4),
+    private val maxConcurrentRuns: Int = 2
 ) : AutoCloseable {
-    init { require(maxWarmSessions in 1..8); require(intraOpThreads in 1..16) }
+    init {
+        require(maxWarmSessions in 1..8)
+        require(intraOpThreads in 1..16)
+        require(maxConcurrentRuns in 1..4)
+    }
 
     private val environment: OrtEnvironment = OrtEnvironment.getEnvironment()
     private val lock = ReentrantLock()
     private val sessions = object : LinkedHashMap<OnnxSessionKey, OnnxSessionHandle>(8, 0.75f, true) {}
+    private val inferencePermits = Semaphore(maxConcurrentRuns, true)
+    private val backendRunLocks = ConcurrentHashMap<ComputeBackend, ReentrantLock>()
 
     fun getOrCreate(artifact: InstalledModelArtifact, backend: ComputeBackend): OnnxSessionHandle = lock.withLock {
         val manifest = artifact.manifest
@@ -114,10 +125,6 @@ class OnnxRuntimeEngine(
         }
     }
 
-    /**
-     * Runs one dense float input and returns owned copies of requested float outputs. This boundary
-     * prevents ORT Result/OnnxTensor lifetimes from escaping into expert code and leaking native memory.
-     */
     fun runFloatTensor(
         artifact: InstalledModelArtifact,
         backend: ComputeBackend,
@@ -138,10 +145,6 @@ class OnnxRuntimeEngine(
         }
     }
 
-    /**
-     * Runs a dense unsigned-byte tensor. Java ByteArray values retain their raw 8-bit representation;
-     * OnnxJavaType.UINT8 tells ORT to interpret those bytes as 0..255 rather than signed INT8.
-     */
     fun runUInt8Tensor(
         artifact: InstalledModelArtifact,
         backend: ComputeBackend,
@@ -172,17 +175,26 @@ class OnnxRuntimeEngine(
         require(requestedOutputs.all { it in handle.outputNames }) {
             "Model ${artifact.manifest.id} is missing requested outputs: ${requestedOutputs - handle.outputNames}"
         }
-        return handle.run(mapOf(inputName to tensor)) { result ->
-            requestedOutputs.associateWith { name ->
-                val value = result.get(name).orElseThrow { IllegalStateException("Missing ORT output '$name'") }
-                val output = value as? OnnxTensor
-                    ?: error("Output '$name' is ${value.javaClass.simpleName}, expected OnnxTensor")
-                val buffer: FloatBuffer = output.floatBuffer
-                    ?: error("Output '$name' cannot be represented as float32")
-                val copy = FloatArray(buffer.remaining())
-                buffer.get(copy)
-                copy
+
+        inferencePermits.acquire()
+        try {
+            val backendLock = backendRunLocks.computeIfAbsent(backend) { ReentrantLock(true) }
+            return backendLock.withLock {
+                handle.run(mapOf(inputName to tensor)) { result ->
+                    requestedOutputs.associateWith { name ->
+                        val value = result.get(name).orElseThrow { IllegalStateException("Missing ORT output '$name'") }
+                        val output = value as? OnnxTensor
+                            ?: error("Output '$name' is ${value.javaClass.simpleName}, expected OnnxTensor")
+                        val buffer: FloatBuffer = output.floatBuffer
+                            ?: error("Output '$name' cannot be represented as float32")
+                        val copy = FloatArray(buffer.remaining())
+                        buffer.get(copy)
+                        copy
+                    }
+                }
             }
+        } finally {
+            inferencePermits.release()
         }
     }
 
@@ -241,5 +253,6 @@ class OnnxRuntimeEngine(
     override fun close() = lock.withLock {
         sessions.values.toList().forEach { it.close() }
         sessions.clear()
+        backendRunLocks.clear()
     }
 }
