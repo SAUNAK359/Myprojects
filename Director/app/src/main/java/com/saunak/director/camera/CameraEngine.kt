@@ -11,6 +11,7 @@ import android.hardware.camera2.CaptureResult
 import android.hardware.camera2.TotalCaptureResult
 import android.util.Log
 import android.view.Surface
+import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.Camera
@@ -64,6 +65,14 @@ class CameraEngine(private val context: Context) : AutoCloseable {
     @Volatile private var lastAf: Int? = null
     @Volatile private var lastAe: Int? = null
     @Volatile private var lastAwb: Int? = null
+    @Volatile private var lastExposureTimeNs: Long? = null
+    @Volatile private var lastSensitivityIso: Int? = null
+    @Volatile private var lastFrameDurationNs: Long? = null
+    @Volatile private var lastSensorTimestampNs: Long? = null
+    @Volatile private var lastRollingShutterSkewNs: Long? = null
+    @Volatile private var lastFocalLengthMm: Float? = null
+    @Volatile private var lastAperture: Float? = null
+    @Volatile private var lastFocusDistanceDiopters: Float? = null
 
     private var userZoom = 1f
     private var userEvIndex = 0
@@ -76,6 +85,14 @@ class CameraEngine(private val context: Context) : AutoCloseable {
             lastAf = result.get(CaptureResult.CONTROL_AF_STATE)
             lastAe = result.get(CaptureResult.CONTROL_AE_STATE)
             lastAwb = result.get(CaptureResult.CONTROL_AWB_STATE)
+            lastExposureTimeNs = result.get(CaptureResult.SENSOR_EXPOSURE_TIME)
+            lastSensitivityIso = result.get(CaptureResult.SENSOR_SENSITIVITY)
+            lastFrameDurationNs = result.get(CaptureResult.SENSOR_FRAME_DURATION)
+            lastSensorTimestampNs = result.get(CaptureResult.SENSOR_TIMESTAMP)
+            lastRollingShutterSkewNs = result.get(CaptureResult.SENSOR_ROLLING_SHUTTER_SKEW)
+            lastFocalLengthMm = result.get(CaptureResult.LENS_FOCAL_LENGTH)
+            lastAperture = result.get(CaptureResult.LENS_APERTURE)
+            lastFocusDistanceDiopters = result.get(CaptureResult.LENS_FOCUS_DISTANCE)
         }
     }
 
@@ -167,15 +184,27 @@ class CameraEngine(private val context: Context) : AutoCloseable {
         }
     }
 
+    private fun resetCaptureTelemetry() {
+        lastAf = null
+        lastAe = null
+        lastAwb = null
+        lastExposureTimeNs = null
+        lastSensitivityIso = null
+        lastFrameDurationNs = null
+        lastSensorTimestampNs = null
+        lastRollingShutterSkewNs = null
+        lastFocalLengthMm = null
+        lastAperture = null
+        lastFocusDistanceDiopters = null
+    }
+
     private fun bindInternal(extension: DirectorExtension) {
         val p = checkNotNull(provider)
         val lifecycleOwner = checkNotNull(owner)
         val view = checkNotNull(boundView)
         clearAnalysisUseCase()
         p.unbindAll()
-        lastAf = null
-        lastAe = null
-        lastAwb = null
+        resetCaptureTelemetry()
 
         preview = buildPreview(view, interop = extension == DirectorExtension.NONE)
         imageCapture = buildImageCapture(view)
@@ -188,8 +217,6 @@ class CameraEngine(private val context: Context) : AutoCloseable {
                 camera = try {
                     p.bindToLifecycle(lifecycleOwner, selector, preview, imageCapture, analysis)
                 } catch (analysisBindFailure: Throwable) {
-                    // Older/limited devices can reject the three-use-case surface combination.
-                    // Director remains functional and falls back to a still for AI analysis.
                     Log.w("DirectorCamera", "Live analysis unavailable; using still fallback", analysisBindFailure)
                     analysis.clearAnalyzer()
                     imageAnalysis = null
@@ -199,7 +226,6 @@ class CameraEngine(private val context: Context) : AutoCloseable {
                     p.bindToLifecycle(lifecycleOwner, selector, preview, imageCapture)
                 }
             } else {
-                // CameraX only guarantees Preview + ImageCapture when an OEM extension is active.
                 camera = p.bindToLifecycle(lifecycleOwner, selector, preview, imageCapture)
             }
             currentExtension = extension
@@ -407,7 +433,7 @@ class CameraEngine(private val context: Context) : AutoCloseable {
         )
         val zoom = c.cameraInfo.zoomState.value
         val e = c.cameraInfo.exposureState
-        val characteristics = platformCharacteristicsForLens()
+        val characteristics = activeCameraCharacteristics()
         val hwCaps = characteristics?.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)?.toSet().orEmpty()
         val sensitivity = characteristics?.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
         val exposureTimes = characteristics?.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)
@@ -458,22 +484,37 @@ class CameraEngine(private val context: Context) : AutoCloseable {
         }.getOrDefault(false)
     }
 
-    private fun platformCharacteristicsForLens(): CameraCharacteristics? = runCatching {
-        val manager = context.getSystemService(CameraManager::class.java)
-        val desired = if (lensFacing == CameraSelector.LENS_FACING_FRONT) {
-            CameraCharacteristics.LENS_FACING_FRONT
-        } else {
-            CameraCharacteristics.LENS_FACING_BACK
-        }
-        val candidates = manager.cameraIdList.mapNotNull { id ->
-            runCatching { manager.getCameraCharacteristics(id) }.getOrNull()
-                ?.takeIf { it.get(CameraCharacteristics.LENS_FACING) == desired }
-        }
-        candidates.maxByOrNull { chars ->
-            val caps = chars.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)?.toSet().orEmpty()
-            (if (CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA in caps) 100 else 0) + caps.size
-        }
-    }.getOrNull()
+    fun activeCameraId(): String? = camera?.let { current ->
+        runCatching { Camera2CameraInfo.from(current.cameraInfo).cameraId }.getOrNull()
+    }
+
+    private fun activeCameraCharacteristics(): CameraCharacteristics? {
+        val id = activeCameraId() ?: return null
+        return runCatching {
+            context.getSystemService(CameraManager::class.java).getCameraCharacteristics(id)
+        }.getOrNull()
+    }
+
+    fun sensorTelemetry(): CameraSensorTelemetry? {
+        val exposure = lastExposureTimeNs ?: return null
+        val iso = lastSensitivityIso ?: return null
+        val timestamp = lastSensorTimestampNs ?: return null
+        val frameDuration = (lastFrameDurationNs ?: exposure).coerceAtLeast(exposure)
+        return CameraSensorTelemetry(
+            cameraId = activeCameraId(),
+            sensorTimestampNs = timestamp,
+            exposureTimeNs = exposure,
+            sensitivityIso = iso,
+            frameDurationNs = frameDuration,
+            rollingShutterSkewNs = lastRollingShutterSkewNs,
+            focalLengthMm = lastFocalLengthMm,
+            aperture = lastAperture,
+            focusDistanceDiopters = lastFocusDistanceDiopters,
+            afState = lastAf,
+            aeState = lastAe,
+            awbState = lastAwb
+        )
+    }
 
     private fun supportedExtensions(): Set<DirectorExtension> {
         val manager = extensionsManager ?: return emptySet()
@@ -498,7 +539,7 @@ class CameraEngine(private val context: Context) : AutoCloseable {
             c?.cameraInfo?.torchState?.value == 1,
             flash,
             currentExtension,
-            boundView?.display?.rotation ?: 0
+            surfaceRotationToDegrees(boundView?.display?.rotation ?: Surface.ROTATION_0)
         )
     }
 
@@ -544,6 +585,39 @@ class CameraEngine(private val context: Context) : AutoCloseable {
         clearAnalysisUseCase()
         analysisExecutor.shutdownNow()
         provider?.unbindAll()
+    }
+
+    companion object {
+        internal fun surfaceRotationToDegrees(rotation: Int): Int = when (rotation) {
+            Surface.ROTATION_0 -> 0
+            Surface.ROTATION_90 -> 90
+            Surface.ROTATION_180 -> 180
+            Surface.ROTATION_270 -> 270
+            else -> 0
+        }
+    }
+}
+
+data class CameraSensorTelemetry(
+    val cameraId: String?,
+    val sensorTimestampNs: Long,
+    val exposureTimeNs: Long,
+    val sensitivityIso: Int,
+    val frameDurationNs: Long,
+    val rollingShutterSkewNs: Long?,
+    val focalLengthMm: Float?,
+    val aperture: Float?,
+    val focusDistanceDiopters: Float?,
+    val afState: Int?,
+    val aeState: Int?,
+    val awbState: Int?
+) {
+    init {
+        require(sensorTimestampNs > 0)
+        require(exposureTimeNs > 0)
+        require(sensitivityIso > 0)
+        require(frameDurationNs >= exposureTimeNs)
+        require(rollingShutterSkewNs == null || rollingShutterSkewNs >= 0)
     }
 }
 
