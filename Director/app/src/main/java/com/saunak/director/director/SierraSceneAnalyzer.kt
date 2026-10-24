@@ -7,6 +7,7 @@ import android.graphics.Rect
 import android.media.FaceDetector
 import androidx.camera.core.CameraSelector
 import com.saunak.director.engine.experts.FaceDetection
+import com.saunak.director.engine.experts.SubjectDepthEvidence
 import com.saunak.director.processing.TechnicalQuality
 
 /** Lightweight semantic guard used before either Sierra AI or Sierra beta plans the shot. */
@@ -18,15 +19,25 @@ data class SierraSceneSignals(
     val primaryHumanSubject: Boolean = false,
     val brightSky: Boolean = false,
     val urbanStructure: Boolean = false,
-    val faceSource: String = "legacy"
-)
+    val faceSource: String = "legacy",
+    val relativeDepthConfidence: Double = 0.0,
+    val subjectSeparation: Double = 0.0,
+    val depthSource: String? = null
+) {
+    init {
+        require(confidence in 0.0..1.0)
+        require(relativeDepthConfidence in 0.0..1.0)
+        require(subjectSeparation in 0.0..1.0)
+    }
+}
 
 object SierraSceneAnalyzer {
     fun analyze(
         source: Bitmap,
         quality: TechnicalQuality,
         lensFacing: Int,
-        expertFaces: List<FaceDetection>? = null
+        expertFaces: List<FaceDetection>? = null,
+        depthEvidence: SubjectDepthEvidence? = null
     ): SierraSceneSignals {
         val faces = if (expertFaces != null) {
             FaceSummary(
@@ -69,9 +80,16 @@ object SierraSceneAnalyzer {
             "landscape" -> if (brightSky) 0.78 else 0.66
             else -> 0.48
         }
-        val confidence = if (faces.source == "yunet" && branch in HUMAN_BRANCHES) {
+        var confidence = if (faces.source == "yunet" && branch in HUMAN_BRANCHES) {
             (baseConfidence + 0.035).coerceAtMost(0.97)
         } else baseConfidence
+
+        // Relative depth is allowed to strengthen a human/portrait hypothesis only when it agrees
+        // with independently detected faces. It can never manufacture a person scene by itself.
+        if (branch in HUMAN_BRANCHES && depthEvidence != null) {
+            confidence = (confidence + 0.025 * depthEvidence.confidence + 0.015 * depthEvidence.separation)
+                .coerceAtMost(0.985)
+        }
 
         return SierraSceneSignals(
             branch = branch,
@@ -81,7 +99,10 @@ object SierraSceneAnalyzer {
             primaryHumanSubject = primaryHuman,
             brightSky = brightSky,
             urbanStructure = structured,
-            faceSource = faces.source
+            faceSource = faces.source,
+            relativeDepthConfidence = depthEvidence?.confidence ?: 0.0,
+            subjectSeparation = depthEvidence?.separation ?: 0.0,
+            depthSource = depthEvidence?.source
         )
     }
 
