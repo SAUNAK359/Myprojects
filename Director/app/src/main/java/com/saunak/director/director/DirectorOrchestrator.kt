@@ -4,6 +4,9 @@ import android.graphics.Bitmap
 import android.net.Uri
 import com.saunak.director.ai.VlmRuntime
 import com.saunak.director.camera.CameraEngine
+import com.saunak.director.camera.SierraCaptureBridge
+import com.saunak.director.engine.capture.CaptureProgram
+import com.saunak.director.engine.experts.YuNetFaceExpert
 import com.saunak.director.platform.ThermalMonitor
 import com.saunak.director.processing.InstantFinishEngine
 import com.saunak.director.processing.LookProcessor
@@ -31,7 +34,17 @@ class DirectorOrchestrator(
     private val onState: (DirectorUiState) -> Unit
 ) {
     private val generation = AtomicLong(0L)
-    private data class ApprovedState(val look: LookSpec, val plan: PlanOutput, val score: Double, val mode: SierraMode)
+    private val faceExpert = YuNetFaceExpert()
+    private val captureBridge = SierraCaptureBridge(camera)
+
+    private data class ApprovedState(
+        val look: LookSpec,
+        val plan: PlanOutput,
+        val score: Double,
+        val mode: SierraMode,
+        val captureProgram: CaptureProgram?
+    )
+
     @Volatile private var approved: ApprovedState? = null
     @Volatile private var cloudEnabled: Boolean = true
     @Volatile private var aspectRatioOverride: String? = null
@@ -89,7 +102,14 @@ class DirectorOrchestrator(
             }
 
             val planningCaps = camera.capabilities()
-            val sceneSignals = SierraSceneAnalyzer.analyze(frame, referenceQuality, planningCaps.lensFacing)
+            val expertFaces = withTimeoutOrNull(LOCAL_FACE_BUDGET_MS) {
+                faceExpert.detect(frame).getOrNull()
+            }
+            val sceneSignals = SierraSceneAnalyzer.analyze(frame, referenceQuality, planningCaps.lensFacing, expertFaces)
+            val captureProgram = withTimeoutOrNull(CAPTURE_PLAN_BUDGET_MS) {
+                captureBridge.plan(referenceQuality, sceneSignals, thermalPolicy).getOrNull()
+            }
+
             var mode = SierraMode.BETA
             val localPlan by lazy { SierraLocalPlanner.plan(referenceQuality, frame.width, frame.height, sceneSignals, planningCaps) }
             val basePlan = if (cloudAllowed) {
@@ -144,7 +164,7 @@ class DirectorOrchestrator(
                 } finally { if (!verification.isRecycled) verification.recycle() }
             } else CapturePolicy.combinedFallbackScore(plan.referenceScore, referenceQuality.heuristicScore)
 
-            approve(session, appliedPlan, look, score, mode)
+            approve(session, appliedPlan, look, score, mode, captureProgram)
             return null
         } catch (_: StaleSession) {
             return null
@@ -175,9 +195,10 @@ class DirectorOrchestrator(
 
     private fun combinedReadyScore(ai: Double, camera: Double, finish: Double): Double = (0.48 * ai.coerceIn(0.0, 1.0) + 0.34 * camera.coerceIn(0.0, 1.0) + 0.18 * finish.coerceIn(0.0, 1.0)).coerceIn(0.0, 1.0)
 
-    private fun approve(session: Long, plan: PlanOutput, look: LookSpec, score: Double, mode: SierraMode) {
-        approved = ApprovedState(look, plan, score, mode)
-        emit(session, DirectorUiState(DirectorStage.PREPARED, mode == SierraMode.AI, if (mode == SierraMode.AI) "Ready • Sierra AI + beta" else "Ready • Sierra beta", lastScore = score, camera = camera.uiState(), recipeCount = recipeMemory.count(), sierraMode = mode, aspectRatio = plan.aspectRatio, aspectRatioOverride = aspectRatioOverride, sceneLabel = plan.scene, objective = plan.objective, keepOriginal = keepOriginal))
+    private fun approve(session: Long, plan: PlanOutput, look: LookSpec, score: Double, mode: SierraMode, captureProgram: CaptureProgram?) {
+        approved = ApprovedState(look, plan, score, mode, captureProgram)
+        val captureSuffix = captureProgram?.let { " • ${it.frames.size}f ${it.path.name.lowercase()}" }.orEmpty()
+        emit(session, DirectorUiState(DirectorStage.PREPARED, mode == SierraMode.AI, if (mode == SierraMode.AI) "Ready • Sierra AI + beta$captureSuffix" else "Ready • Sierra beta$captureSuffix", lastScore = score, camera = camera.uiState(), recipeCount = recipeMemory.count(), sierraMode = mode, aspectRatio = plan.aspectRatio, aspectRatioOverride = aspectRatioOverride, sceneLabel = plan.scene, objective = plan.objective, keepOriginal = keepOriginal))
     }
 
     private suspend fun captureFinal(): Uri? {
@@ -188,6 +209,8 @@ class DirectorOrchestrator(
             emit(session, DirectorUiState(DirectorStage.FINAL_CAPTURING, state.mode == SierraMode.AI, "Capturing full quality…", lastScore = state.score, camera = camera.uiState(), sierraMode = state.mode, aspectRatio = state.plan.aspectRatio, aspectRatioOverride = aspectRatioOverride, sceneLabel = state.plan.scene, objective = state.plan.objective, keepOriginal = keepOriginal))
             camera.awaitSettledState(550)
             file = storage.newAttempt(session, 99)
+            // Until RAW/YUV executors pass device certification, the existing CameraX still path remains
+            // the fail-safe capture. The approved physics program is retained in state for the executor.
             camera.capturePrivate(file)
             emit(session, DirectorUiState(DirectorStage.SAVING, state.mode == SierraMode.AI, "Sierra beta finishing…", lastScore = state.score, camera = camera.uiState(), sierraMode = state.mode, aspectRatio = state.plan.aspectRatio, aspectRatioOverride = aspectRatioOverride, sceneLabel = state.plan.scene, objective = state.plan.objective, keepOriginal = keepOriginal))
             if (keepOriginal) runCatching { storage.saveOriginal(file) }
@@ -216,5 +239,7 @@ class DirectorOrchestrator(
         private const val FAST_FRAME_TIMEOUT_MS = 650L
         private const val FAST_VERIFY_TIMEOUT_MS = 500L
         private const val LOCAL_SETTLE_TIMEOUT_MS = 650L
+        private const val LOCAL_FACE_BUDGET_MS = 220L
+        private const val CAPTURE_PLAN_BUDGET_MS = 120L
     }
 }
