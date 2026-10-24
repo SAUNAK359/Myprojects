@@ -28,4 +28,14 @@ class QualityCouncilTest {
         assertEquals(QualityDisposition.LOCAL_REPAIR, verdict.disposition)
         assertEquals(RepairStage.DENOISE, verdict.repairs.first().stage)
     }
+
+    @Test fun missingEvidenceCanNeverReceivePass() {
+        val verdict = QualityCouncil().evaluate(listOf(
+            QualitySignal(QualityAxis.TECHNICAL, 0.92, 0.95, "technical"),
+            QualitySignal(QualityAxis.PERCEPTUAL, 0.91, 0.9, "iqa")
+        ))
+        assertTrue(QualityAxis.EVIDENCE in verdict.unknownAxes)
+        assertEquals(QualityDisposition.LOCAL_REPAIR, verdict.disposition)
+        assertTrue(verdict.repairs.any { it.stage == RepairStage.RECONSTRUCTION })
+    }
 }
