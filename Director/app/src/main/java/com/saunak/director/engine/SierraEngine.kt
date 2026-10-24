@@ -11,6 +11,8 @@ import com.saunak.director.engine.geometry.CoordinateGraph
 import com.saunak.director.engine.models.ModelArtifactStore
 import com.saunak.director.engine.models.ModelRegistry
 import com.saunak.director.engine.models.SierraShippingManifests
+import com.saunak.director.engine.motion.MotionFusionEngine
+import com.saunak.director.engine.motion.ShutterMotionProbe
 import com.saunak.director.engine.quality.QualityCouncil
 import com.saunak.director.engine.reconstruction.DeterministicBurstPipeline
 import com.saunak.director.engine.reconstruction.EvidenceLedger
@@ -36,6 +38,10 @@ class SierraEngine private constructor(context: Context) : AutoCloseable {
     val deterministicBurst = DeterministicBurstPipeline(evidence)
     val runtimeProfiles = RuntimeProfileStore(appContext)
     val backendProfiler = BackendProfiler(appContext, runtimeProfiles, RUNTIME_VERSION)
+
+    // Temporal motion is application-scoped so IMU history survives individual shutter requests.
+    val motion = MotionFusionEngine(appContext, beliefs)
+    val motionProbe = ShutterMotionProbe(appContext, motion)
 
     private val onnxLazy = lazy(LazyThreadSafetyMode.SYNCHRONIZED) { OnnxRuntimeEngine() }
     val onnx: OnnxRuntimeEngine get() = onnxLazy.value
@@ -84,6 +90,7 @@ class SierraEngine private constructor(context: Context) : AutoCloseable {
     }
 
     override fun close() {
+        motion.close()
         if (onnxLazy.isInitialized()) onnx.close()
         evidence.clear()
         coordinates.clear()
@@ -91,7 +98,7 @@ class SierraEngine private constructor(context: Context) : AutoCloseable {
     }
 
     companion object {
-        private const val RUNTIME_VERSION = "onnxruntime-1.31.0+sierra-v4"
+        private const val RUNTIME_VERSION = "onnxruntime-1.31.0+sierra-v5-temporal"
         @Volatile private var instance: SierraEngine? = null
 
         fun initialize(context: Context): SierraEngine = instance ?: synchronized(this) {
