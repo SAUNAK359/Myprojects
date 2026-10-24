@@ -1,22 +1,24 @@
 package com.saunak.director.engine.prif
 
 import android.graphics.Bitmap
+import android.graphics.Matrix
 import com.saunak.director.camera.RawJpegCaptureFrame
 import com.saunak.director.engine.capture.CaptureProgram
 import com.saunak.director.engine.motion.MotionSnapshot
 import com.saunak.director.engine.reconstruction.CfaAlignedBurst
 import com.saunak.director.engine.reconstruction.CfaBurstAlignment
 import com.saunak.director.engine.reconstruction.DeterministicIsp
+import com.saunak.director.engine.reconstruction.DisplayRgbImage
 import com.saunak.director.engine.reconstruction.Matrix3x3
 import com.saunak.director.engine.reconstruction.RawImageFormation
 import com.saunak.director.engine.reconstruction.RawObservation
+import com.saunak.director.engine.reconstruction.RawPlane
 import com.saunak.director.engine.reconstruction.SierraColorCalibration
 import com.saunak.director.engine.reconstruction.WhiteBalanceGains
 import com.saunak.director.engine.subject.NormalizedRect
 import com.saunak.director.engine.subject.SubjectTrack
 import kotlin.math.max
 
-/** Final output of the physical P-RIF core. No neural pixels are introduced in this stage. */
 data class PrifReconstructionResult(
     val bitmap: Bitmap,
     val posterior: RadiancePosterior,
@@ -33,11 +35,7 @@ data class PrifReconstructionResult(
     }
 }
 
-/**
- * P-RIF physical reconstruction: select evidence -> CFA-safe alignment -> robust posterior fusion ->
- * sensor-consistency verification -> calibrated deterministic ISP. Neural restoration is deliberately
- * downstream of this trusted core and must never overwrite its provenance.
- */
+/** Trusted P-RIF physical core. Neural restoration is deliberately downstream of this stage. */
 class PrifReconstructionPipeline {
     fun reconstruct(
         captured: List<RawJpegCaptureFrame>,
@@ -48,19 +46,12 @@ class PrifReconstructionPipeline {
         memoryPressure: Double
     ): PrifReconstructionResult {
         require(captured.isNotEmpty())
-        require(captured.size == captureProgram.frames.size) {
-            "Captured ${captured.size} RAW frames for ${captureProgram.frames.size}-frame program"
-        }
-        val reconstructionProgram = PrifReconstructionCompiler.compile(
-            captureProgram = captureProgram,
-            motion = motion,
-            subject = subject,
-            thermalPressure = thermalPressure,
-            memoryPressure = memoryPressure
+        require(captured.size == captureProgram.frames.size)
+        val program = PrifReconstructionCompiler.compile(
+            captureProgram, motion, subject, thermalPressure, memoryPressure
         )
-        val selectedIndices = selectFrames(captureProgram, reconstructionProgram)
-        val orderedIndices = listOf(reconstructionProgram.referenceFrameIndex) +
-            selectedIndices.filter { it != reconstructionProgram.referenceFrameIndex }
+        val selectedIndices = PrifReconstructionCompiler.selectCaptureIndices(program)
+        val orderedIndices = listOf(program.referenceFrameIndex) + selectedIndices.filter { it != program.referenceFrameIndex }
         val selected = orderedIndices.map(captured::get)
         val motionConfidence = (1.0 - (motion?.conservativeRisk ?: 0.75) * 0.55).coerceIn(0.18, 0.98)
 
@@ -76,65 +67,45 @@ class PrifReconstructionPipeline {
             )
         }
 
-        val aligned = CfaBurstAlignment.align(observations, reconstructionProgram.alignmentSearchRadiusPx)
+        val aligned = CfaBurstAlignment.align(observations, program.alignmentSearchRadiusPx)
         val referenceCapture = selected.first()
-        val subjectSensorBounds = subject?.takeIf {
-            reconstructionProgram.alignmentMode == PrifAlignmentMode.SEMANTIC_LAYERED
-        }?.let { orientedToSensorBounds(it.bounds, referenceCapture.raw.rotationDegrees) }
-
+        val subjectSensorBounds = subject?.takeIf { program.alignmentMode == PrifAlignmentMode.SEMANTIC_LAYERED }
+            ?.let { orientedToSensorBounds(it.bounds, referenceCapture.raw.rotationDegrees) }
         val spatialSupport = subjectSensorBounds?.let { bounds ->
             buildSubjectSupport(
-                bounds = bounds,
-                aligned = aligned,
-                originalWidth = referenceCapture.raw.raw.width,
-                originalHeight = referenceCapture.raw.raw.height,
-                protection = reconstructionProgram.subjectProtection
+                bounds, aligned, referenceCapture.raw.raw.width, referenceCapture.raw.raw.height,
+                program.subjectProtection
             )
         }
 
         val posterior = PrifBayesianFusion.fuse(
             observations = aligned.observations,
-            degreesOfFreedom = reconstructionProgram.robustDegreesOfFreedom,
-            maxNormalizedResidual = reconstructionProgram.maxNormalizedResidual,
-            conservativeAnchor = reconstructionProgram.fusionMode == PrifFusionMode.CONSERVATIVE_ANCHOR,
+            degreesOfFreedom = program.robustDegreesOfFreedom,
+            maxNormalizedResidual = program.maxNormalizedResidual,
+            conservativeAnchor = program.fusionMode == PrifFusionMode.CONSERVATIVE_ANCHOR,
             spatialSupport = spatialSupport
         )
-        val consistency = if (reconstructionProgram.verifySensorConsistency) {
+        val consistency = if (program.verifySensorConsistency) {
             SensorConsistencyVerifier.verify(posterior, aligned.observations)
         } else {
-            SensorConsistencyReport(
-                frames = listOf(FrameConsistency(0, 0.0, 1.0, 0.0, 1.0)),
-                aggregateScore = 1.0,
-                accepted = true
-            )
+            SensorConsistencyReport(listOf(FrameConsistency(0, 0.0, 1.0, 0.0, 1.0)), 1.0, true)
         }
         val integrity = PhotoIntegrityEvaluator.evaluate(posterior, consistency)
-        val calibration = colorCalibration(referenceCapture)
         val linear = RawImageFormation.demosaic(posterior.asNormalizedRaw())
-        val display = DeterministicIsp.render(linear, calibration)
-        val bitmap = display.toBitmap()
+        val display = DeterministicIsp.render(linear, colorCalibration(referenceCapture))
+        val sensorBitmap = display.toBitmap()
+        val orientedBitmap = orient(sensorBitmap, referenceCapture.raw.rotationDegrees)
 
         return PrifReconstructionResult(
-            bitmap = bitmap,
+            bitmap = orientedBitmap,
             posterior = posterior,
             sensorTwin = sensorTwin(referenceCapture),
             consistency = consistency,
             integrity = integrity,
-            program = reconstructionProgram,
+            program = program,
             usedCaptureIndices = orderedIndices,
             rotationDegrees = referenceCapture.raw.rotationDegrees
         )
-    }
-
-    private fun selectFrames(captureProgram: CaptureProgram, program: ReconstructionProgram): List<Int> {
-        if (program.maxFrames >= captureProgram.frames.size) return captureProgram.frames.indices.toList()
-        val reference = program.referenceFrameIndex
-        return captureProgram.frames.indices
-            .sortedWith(compareBy<Int> { if (it == reference) 0 else 1 }
-                .thenBy { kotlin.math.abs(captureProgram.frames[it].evOffset) }
-                .thenBy { kotlin.math.abs(it - reference) })
-            .take(program.maxFrames)
-            .sorted()
     }
 
     private fun buildSubjectSupport(
@@ -167,15 +138,15 @@ class PrifReconstructionPipeline {
         else -> bounds
     }
 
-    private fun colorCalibration(frame: RawJpegCaptureFrame): SierraColorCalibration = SierraColorCalibration(
+    private fun colorCalibration(frame: RawJpegCaptureFrame) = SierraColorCalibration(
         whiteBalance = frame.metadata.whiteBalance ?: WhiteBalanceGains(1f, 1f, 1f),
         cameraToWorking = frame.metadata.cameraToLinearSrgb ?: Matrix3x3.IDENTITY,
         exposureGain = 1f,
         highlightShoulder = 0.84f,
-        contrast = 1.0f
+        contrast = 1f
     )
 
-    private fun sensorTwin(frame: RawJpegCaptureFrame): SensorDigitalTwin = SensorDigitalTwin(
+    private fun sensorTwin(frame: RawJpegCaptureFrame) = SensorDigitalTwin(
         cameraId = frame.metadata.telemetry.cameraId,
         bayerPattern = frame.raw.raw.pattern,
         blackLevel = frame.raw.raw.blackLevelPattern,
@@ -197,7 +168,7 @@ class PrifReconstructionPipeline {
         return score.coerceIn(0.0, 1.0)
     }
 
-    private fun saturationConfidence(raw: com.saunak.director.engine.reconstruction.RawPlane): Float {
+    private fun saturationConfidence(raw: RawPlane): Float {
         val normalized = RawImageFormation.normalize(raw)
         var saturated = 0
         var samples = 0
@@ -210,9 +181,7 @@ class PrifReconstructionPipeline {
         return (1f - saturated.toFloat() / max(1, samples).toFloat()).coerceIn(0.05f, 1f)
     }
 
-    private fun com.saunak.director.processing.DisplayRgbImage?.unused() = Unit
-
-    private fun com.saunak.director.engine.reconstruction.DisplayRgbImage.toBitmap(): Bitmap {
+    private fun DisplayRgbImage.toBitmap(): Bitmap {
         val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         val pixels = IntArray(width * height)
         for (i in pixels.indices) {
@@ -224,6 +193,13 @@ class PrifReconstructionPipeline {
         }
         bitmap.setPixels(pixels, 0, width, 0, 0, width, height)
         return bitmap
+    }
+
+    private fun orient(source: Bitmap, rotation: Int): Bitmap {
+        if (rotation == 0) return source
+        val rotated = Bitmap.createBitmap(source, 0, 0, source.width, source.height, Matrix().apply { postRotate(rotation.toFloat()) }, true)
+        if (rotated !== source && !source.isRecycled) source.recycle()
+        return rotated
     }
 
     private fun NormalizedRect.contains(x: Double, y: Double): Boolean =
