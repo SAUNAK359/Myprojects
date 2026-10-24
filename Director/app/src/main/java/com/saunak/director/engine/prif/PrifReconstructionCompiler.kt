@@ -83,7 +83,7 @@ object PrifReconstructionCompiler {
 
         return ReconstructionProgram(
             captureProgram = captureProgram,
-            referenceFrameIndex = referenceFrame.coerceAtMost(maxFrames - 1),
+            referenceFrameIndex = referenceFrame,
             maxFrames = maxFrames,
             alignmentMode = if (layered) PrifAlignmentMode.SEMANTIC_LAYERED else PrifAlignmentMode.CFA_TRANSLATION,
             fusionMode = fusionMode,
@@ -94,6 +94,24 @@ object PrifReconstructionCompiler {
             verifySensorConsistency = true,
             tileSize = tileSize
         )
+    }
+
+    /**
+     * Chooses the RAW measurements to acquire before memory is committed. Reference exposure is
+     * always retained; remaining frames are ranked by EV proximity and temporal distance.
+     */
+    fun selectCaptureIndices(program: ReconstructionProgram): List<Int> {
+        val capture = program.captureProgram
+        val reference = program.referenceFrameIndex
+        if (program.maxFrames >= capture.frames.size) return capture.frames.indices.toList()
+        return capture.frames.indices
+            .sortedWith(
+                compareBy<Int> { if (it == reference) 0 else 1 }
+                    .thenBy { kotlin.math.abs(capture.frames[it].evOffset) }
+                    .thenBy { kotlin.math.abs(it - reference) }
+            )
+            .take(program.maxFrames)
+            .sorted()
     }
 
     fun motionClassForDiagnostics(motion: MotionSnapshot?): MotionClass =
