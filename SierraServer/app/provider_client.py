@@ -2,6 +2,7 @@ import base64
 import io
 import json
 import time
+import warnings
 from typing import Any
 
 import httpx
@@ -9,6 +10,7 @@ from PIL import Image, ImageOps
 
 from app.config import settings
 from app.models import Provider
+from app.network_security import validate_public_https_endpoint
 from app.provider_crypto import decrypt_secret
 from app.schemas import SierraPlan
 
@@ -29,16 +31,25 @@ Each calls item has exactly id,v,x,y,s. Use at most 8 calls. Scores and crop cen
 If uncertain, prefer fewer safe calls and a natural finish. planner must be sierra_ai_server.
 """.strip()
 
+MAX_SOURCE_PIXELS = 50_000_000
+Image.MAX_IMAGE_PIXELS = MAX_SOURCE_PIXELS
+
 
 def prepare_image(raw: bytes) -> str:
-    with Image.open(io.BytesIO(raw)) as image:
-        image = ImageOps.exif_transpose(image).convert("RGB")
-        image.thumbnail(
-            (settings.max_image_dimension, settings.max_image_dimension),
-            Image.Resampling.LANCZOS,
-        )
-        out = io.BytesIO()
-        image.save(out, format="JPEG", quality=74, optimize=True)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", Image.DecompressionBombWarning)
+        with Image.open(io.BytesIO(raw)) as image:
+            if image.width <= 0 or image.height <= 0:
+                raise ValueError("analysis image has invalid dimensions")
+            if image.width * image.height > MAX_SOURCE_PIXELS:
+                raise ValueError("analysis image dimensions are too large")
+            image = ImageOps.exif_transpose(image).convert("RGB")
+            image.thumbnail(
+                (settings.max_image_dimension, settings.max_image_dimension),
+                Image.Resampling.LANCZOS,
+            )
+            out = io.BytesIO()
+            image.save(out, format="JPEG", quality=74, optimize=True)
     return "data:image/jpeg;base64," + base64.b64encode(out.getvalue()).decode()
 
 
@@ -154,6 +165,7 @@ async def call_provider(
         local_quality_json=local_quality_json,
         skill_context=skill_context,
     )
+    endpoint = validate_public_https_endpoint(provider.endpoint)
     body: dict[str, Any] = {
         "model": provider.model,
         "messages": [
@@ -170,9 +182,6 @@ async def call_provider(
         "max_tokens": provider.max_tokens,
         "stream": False,
     }
-    # Generic OpenAI-compatible providers are not required to implement response_format.
-    # Only routes explicitly marked by the administrator receive JSON Schema; every other
-    # route is constrained by the photography prompt and normalized by parse_plan().
     if provider.supports_json_schema:
         body["response_format"] = {
             "type": "json_schema",
@@ -185,9 +194,9 @@ async def call_provider(
 
     started = time.monotonic()
     timeout = httpx.Timeout(provider.timeout_ms / 1000.0)
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, trust_env=False) as client:
         response = await client.post(
-            provider.endpoint,
+            endpoint,
             headers={
                 "Authorization": f"Bearer {decrypt_secret(provider.secret_ciphertext)}",
                 "Content-Type": "application/json",
