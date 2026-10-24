@@ -37,6 +37,9 @@ data class SierraLoginPayload(val email: String, val password: String)
 data class SierraRefreshPayload(val refresh_token: String)
 
 @Serializable
+data class SierraLogoutPayload(val refresh_token: String)
+
+@Serializable
 data class SierraUserDto(
     val id: String,
     val display_name: String,
@@ -52,6 +55,9 @@ data class SierraTokenPairDto(
 
 @Serializable
 data class SierraCreditDto(val balance: Int, val reserved: Int, val available: Int)
+
+@Serializable
+data class SierraDeviceSyncDto(val id: String)
 
 @Serializable
 data class SierraPlanDto(
@@ -102,6 +108,7 @@ class SierraServerClient(context: Context) {
 
     val configured: Boolean get() = baseUrl.startsWith("https://")
     val authenticated: Boolean get() = sessions.read() != null
+
     fun session(): SierraSessionStore.Session? = sessions.read()
 
     suspend fun signup(
@@ -129,8 +136,22 @@ class SierraServerClient(context: Context) {
         persist(response)
     }
 
+    suspend fun logout(): Result<Unit> = runCatching {
+        val session = sessions.read()
+        if (session != null && configured) {
+            runCatching {
+                postPublic<Unit>(
+                    "/v1/auth/logout",
+                    json.encodeToString(SierraLogoutPayload(session.refreshToken)),
+                    allowEmptyBody = true
+                )
+            }
+        }
+        sessions.clear()
+    }
+
     suspend fun syncDevice(profile: SierraDeviceProfile): Result<Unit> = runCatching {
-        authenticatedJson<UnitResponse>("PUT", "/v1/me/devices/current", json.encodeToString(profile))
+        authenticatedJson<SierraDeviceSyncDto>("PUT", "/v1/me/devices/current", json.encodeToString(profile))
         Unit
     }
 
@@ -180,8 +201,6 @@ class SierraServerClient(context: Context) {
         Unit
     }
 
-    fun logoutLocal() = sessions.clear()
-
     private fun persist(dto: SierraTokenPairDto): SierraSessionStore.Session {
         val session = SierraSessionStore.Session(
             accessToken = dto.access_token,
@@ -194,13 +213,17 @@ class SierraServerClient(context: Context) {
         return session
     }
 
-    private suspend inline fun <reified T> postPublic(path: String, body: String): T = withContext(Dispatchers.IO) {
+    private suspend inline fun <reified T> postPublic(
+        path: String,
+        body: String,
+        allowEmptyBody: Boolean = false
+    ): T = withContext(Dispatchers.IO) {
         val request = Request.Builder()
             .url(baseUrl + path)
             .header("User-Agent", userAgent())
             .post(body.toRequestBody(JSON_MEDIA))
             .build()
-        execute<T>(request)
+        execute<T>(request, allowEmptyBody)
     }
 
     private suspend inline fun <reified T> authenticatedJson(method: String, path: String, body: String?): T {
@@ -216,20 +239,24 @@ class SierraServerClient(context: Context) {
 
     private suspend inline fun <reified T> authenticatedRequest(builder: Request.Builder): T = withContext(Dispatchers.IO) {
         var session = sessions.read() ?: throw IOException("Sign in to use Sierra AI")
-        var request = builder.header("Authorization", "Bearer ${session.accessToken}")
-            .header("User-Agent", userAgent()).build()
+        var request = builder
+            .header("Authorization", "Bearer ${session.accessToken}")
+            .header("User-Agent", userAgent())
+            .build()
         var response = client.newCall(request).execute()
         if (response.code == 401) {
             response.close()
             session = refreshMutex.withLock { refreshSession(session.refreshToken) }
-            request = builder.header("Authorization", "Bearer ${session.accessToken}")
-                .header("User-Agent", userAgent()).build()
+            request = builder
+                .header("Authorization", "Bearer ${session.accessToken}")
+                .header("User-Agent", userAgent())
+                .build()
             response = client.newCall(request).execute()
         }
         response.use {
             val text = it.body?.string().orEmpty()
             if (!it.isSuccessful) throw IOException(serverError(it.code, text))
-            return@withContext json.decodeFromString<T>(text)
+            json.decodeFromString<T>(text)
         }
     }
 
@@ -249,11 +276,16 @@ class SierraServerClient(context: Context) {
         }
     }
 
-    private inline fun <reified T> execute(request: Request): T = client.newCall(request).execute().use {
-        val text = it.body?.string().orEmpty()
-        if (!it.isSuccessful) throw IOException(serverError(it.code, text))
-        json.decodeFromString<T>(text)
-    }
+    private inline fun <reified T> execute(request: Request, allowEmptyBody: Boolean = false): T =
+        client.newCall(request).execute().use {
+            val text = it.body?.string().orEmpty()
+            if (!it.isSuccessful) throw IOException(serverError(it.code, text))
+            if (allowEmptyBody && text.isBlank() && T::class == Unit::class) {
+                @Suppress("UNCHECKED_CAST")
+                return Unit as T
+            }
+            json.decodeFromString<T>(text)
+        }
 
     private fun serverError(code: Int, body: String): String {
         val detail = runCatching {
@@ -264,9 +296,6 @@ class SierraServerClient(context: Context) {
     }
 
     private fun userAgent(): String = "SierraVision/${BuildConfig.VERSION_NAME} Android/${Build.VERSION.SDK_INT}"
-
-    @Serializable
-    private data class UnitResponse(val id: String? = null)
 
     companion object {
         private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
