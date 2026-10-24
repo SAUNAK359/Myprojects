@@ -38,12 +38,14 @@ commands:
               -Pkotlin.compiler.execution.strategy=in-process lintDebug >/tmp/lint-gradle.log 2>&1
             set -e
             REPORT="$(find app/build/reports -type f -name 'lint-results-debug.xml' -print -quit)"
-            test -n "$REPORT" && test -s "$REPORT"
+            test -n "$REPORT"
+            test -s "$REPORT"
             cp "$REPORT" /tmp/lint.xml
 
 jobs:
   lint-manifest-res:
-    docker: [{image: cimg/android:2026.08}]
+    docker:
+      - image: cimg/android:2026.08
     resource_class: medium+
     working_directory: ~/project
     steps:
@@ -53,16 +55,20 @@ jobs:
           name: Detect manifest or resource errors
           command: |
             python3 - <<'PY'
-            import sys,xml.etree.ElementTree as ET
+            import sys, xml.etree.ElementTree as ET
             bad=[]
-            for i in ET.parse('/tmp/lint.xml').getroot().findall('issue'):
-              if i.get('severity')!='Error': continue
-              fs=[x.get('file','') for x in i.findall('location')]
-              if any('AndroidManifest.xml' in f or '/res/' in f for f in fs): bad.append(i.get('id'))
-            sys.exit(bool(bad))
+            for issue in ET.parse('/tmp/lint.xml').getroot().findall('issue'):
+                if issue.get('severity') != 'Error':
+                    continue
+                files=[loc.get('file','') for loc in issue.findall('location')]
+                if any('AndroidManifest.xml' in f or '/res/' in f for f in files):
+                    bad.append(issue.get('id'))
+            sys.exit(1 if bad else 0)
             PY
+
   lint-camera:
-    docker: [{image: cimg/android:2026.08}]
+    docker:
+      - image: cimg/android:2026.08
     resource_class: medium+
     working_directory: ~/project
     steps:
@@ -72,16 +78,20 @@ jobs:
           name: Detect camera errors
           command: |
             python3 - <<'PY'
-            import sys,xml.etree.ElementTree as ET
+            import sys, xml.etree.ElementTree as ET
             bad=[]
-            for i in ET.parse('/tmp/lint.xml').getroot().findall('issue'):
-              if i.get('severity')!='Error': continue
-              fs=[x.get('file','') for x in i.findall('location')]
-              if any('/camera/' in f for f in fs): bad.append(i.get('id'))
-            sys.exit(bool(bad))
+            for issue in ET.parse('/tmp/lint.xml').getroot().findall('issue'):
+                if issue.get('severity') != 'Error':
+                    continue
+                files=[loc.get('file','') for loc in issue.findall('location')]
+                if any('/camera/' in f for f in files):
+                    bad.append(issue.get('id'))
+            sys.exit(1 if bad else 0)
             PY
+
   lint-engine:
-    docker: [{image: cimg/android:2026.08}]
+    docker:
+      - image: cimg/android:2026.08
     resource_class: medium+
     working_directory: ~/project
     steps:
@@ -91,16 +101,20 @@ jobs:
           name: Detect engine errors
           command: |
             python3 - <<'PY'
-            import sys,xml.etree.ElementTree as ET
+            import sys, xml.etree.ElementTree as ET
             bad=[]
-            for i in ET.parse('/tmp/lint.xml').getroot().findall('issue'):
-              if i.get('severity')!='Error': continue
-              fs=[x.get('file','') for x in i.findall('location')]
-              if any('/engine/' in f for f in fs): bad.append(i.get('id'))
-            sys.exit(bool(bad))
+            for issue in ET.parse('/tmp/lint.xml').getroot().findall('issue'):
+                if issue.get('severity') != 'Error':
+                    continue
+                files=[loc.get('file','') for loc in issue.findall('location')]
+                if any('/engine/' in f for f in files):
+                    bad.append(issue.get('id'))
+            sys.exit(1 if bad else 0)
             PY
+
   lint-ui-director:
-    docker: [{image: cimg/android:2026.08}]
+    docker:
+      - image: cimg/android:2026.08
     resource_class: medium+
     working_directory: ~/project
     steps:
@@ -110,16 +124,20 @@ jobs:
           name: Detect UI or director errors
           command: |
             python3 - <<'PY'
-            import sys,xml.etree.ElementTree as ET
+            import sys, xml.etree.ElementTree as ET
             bad=[]
-            for i in ET.parse('/tmp/lint.xml').getroot().findall('issue'):
-              if i.get('severity')!='Error': continue
-              fs=[x.get('file','') for x in i.findall('location')]
-              if any('/ui/' in f or '/director/' in f for f in fs): bad.append(i.get('id'))
-            sys.exit(bool(bad))
+            for issue in ET.parse('/tmp/lint.xml').getroot().findall('issue'):
+                if issue.get('severity') != 'Error':
+                    continue
+                files=[loc.get('file','') for loc in issue.findall('location')]
+                if any('/ui/' in f or '/director/' in f for f in files):
+                    bad.append(issue.get('id'))
+            sys.exit(1 if bad else 0)
             PY
+
   lint-backend-ai:
-    docker: [{image: cimg/android:2026.08}]
+    docker:
+      - image: cimg/android:2026.08
     resource_class: medium+
     working_directory: ~/project
     steps:
@@ -129,16 +147,20 @@ jobs:
           name: Detect backend or AI errors
           command: |
             python3 - <<'PY'
-            import sys,xml.etree.ElementTree as ET
+            import sys, xml.etree.ElementTree as ET
             bad=[]
-            for i in ET.parse('/tmp/lint.xml').getroot().findall('issue'):
-              if i.get('severity')!='Error': continue
-              fs=[x.get('file','') for x in i.findall('location')]
-              if any('/backend/' in f or '/ai/' in f for f in fs): bad.append(i.get('id'))
-            sys.exit(bool(bad))
+            for issue in ET.parse('/tmp/lint.xml').getroot().findall('issue'):
+                if issue.get('severity') != 'Error':
+                    continue
+                files=[loc.get('file','') for loc in issue.findall('location')]
+                if any('/backend/' in f or '/ai/' in f for f in files):
+                    bad.append(issue.get('id'))
+            sys.exit(1 if bad else 0)
             PY
+
   lint-other:
-    docker: [{image: cimg/android:2026.08}]
+    docker:
+      - image: cimg/android:2026.08
     resource_class: medium+
     working_directory: ~/project
     steps:
@@ -148,14 +170,16 @@ jobs:
           name: Detect other source errors
           command: |
             python3 - <<'PY'
-            import sys,xml.etree.ElementTree as ET
+            import sys, xml.etree.ElementTree as ET
             known=('AndroidManifest.xml','/res/','/camera/','/engine/','/ui/','/director/','/backend/','/ai/')
             bad=[]
-            for i in ET.parse('/tmp/lint.xml').getroot().findall('issue'):
-              if i.get('severity')!='Error': continue
-              fs=[x.get('file','') for x in i.findall('location')]
-              if not fs or any(not any(k in f for k in known) for f in fs): bad.append(i.get('id'))
-            sys.exit(bool(bad))
+            for issue in ET.parse('/tmp/lint.xml').getroot().findall('issue'):
+                if issue.get('severity') != 'Error':
+                    continue
+                files=[loc.get('file','') for loc in issue.findall('location')]
+                if not files or any(not any(k in f for k in known) for f in files):
+                    bad.append(issue.get('id'))
+            sys.exit(1 if bad else 0)
             PY
 
 workflows:
@@ -164,7 +188,8 @@ workflows:
       - lint-manifest-res:
           filters: &diag_filter
             branches:
-              only: director-sierra-v4-apk-diagnose
+              only:
+                - director-sierra-v4-apk-diagnose
       - lint-camera:
           filters: *diag_filter
       - lint-engine:
