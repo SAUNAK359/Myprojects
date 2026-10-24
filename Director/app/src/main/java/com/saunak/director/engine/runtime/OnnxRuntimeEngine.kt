@@ -12,6 +12,7 @@ import java.nio.FloatBuffer
 import java.util.EnumSet
 import java.util.LinkedHashMap
 import java.util.concurrent.locks.ReentrantLock
+import java.util.concurrent.locks.ReentrantReadWriteLock
 import kotlin.concurrent.withLock
 
 /** Backends actually compiled into this application runtime. Candidate hardware in DeviceTwin is
@@ -28,25 +29,52 @@ data class OnnxSessionKey(
     val backend: ComputeBackend
 )
 
+/**
+ * A session owns native resources. Runs acquire a read lease; close acquires the exclusive write
+ * lease. This prevents Android memory-pressure trimming or backend invalidation from closing ORT
+ * native state while inference is executing.
+ */
 class OnnxSessionHandle internal constructor(
     val key: OnnxSessionKey,
     private val options: OrtSession.SessionOptions,
     private val session: OrtSession
 ) : AutoCloseable {
-    val inputNames: Set<String> get() = session.inputNames
-    val outputNames: Set<String> get() = session.outputNames
-    val inputInfo get() = session.inputInfo
-    val outputInfo get() = session.outputInfo
+    private val lifecycle = ReentrantReadWriteLock(true)
+    @Volatile private var closed = false
+
+    val inputNames: Set<String> get() = withReadLease { session.inputNames }
+    val outputNames: Set<String> get() = withReadLease { session.outputNames }
+    val inputInfo get() = withReadLease { session.inputInfo }
+    val outputInfo get() = withReadLease { session.outputInfo }
 
     /** Result values are valid only inside [block]; ORT resources are always released afterward. */
-    fun <T> run(inputs: Map<String, OnnxTensor>, block: (OrtSession.Result) -> T): T {
+    fun <T> run(inputs: Map<String, OnnxTensor>, block: (OrtSession.Result) -> T): T = withReadLease {
         require(inputs.isNotEmpty()) { "At least one input tensor is required" }
-        session.run(inputs).use { result -> return block(result) }
+        session.run(inputs).use { result -> block(result) }
+    }
+
+    private inline fun <T> withReadLease(block: () -> T): T {
+        val lock = lifecycle.readLock()
+        lock.lock()
+        try {
+            check(!closed) { "ONNX session ${key.modelId}/${key.backend} is closed" }
+            return block()
+        } finally {
+            lock.unlock()
+        }
     }
 
     override fun close() {
-        session.close()
-        options.close()
+        val lock = lifecycle.writeLock()
+        lock.lock()
+        try {
+            if (closed) return
+            closed = true
+            session.close()
+            options.close()
+        } finally {
+            lock.unlock()
+        }
     }
 }
 
