@@ -208,15 +208,13 @@ jobs:
             sha256sum /tmp/director-artifacts/Sierra-Vision-debug.apk > /tmp/director-artifacts/Sierra-Vision-debug.apk.sha256
       - run:
           name: Android lint audit
-          when: always
           command: |
-            set +e
+            set -euo pipefail
             source "$BASH_ENV"
             cd Director
-            ./gradlew --no-daemon --no-parallel --max-workers=1 \
+            ./gradlew --no-daemon --no-parallel --stacktrace --max-workers=1 \
               -Dorg.gradle.jvmargs='-Xmx2048m -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8' \
               -Pkotlin.compiler.execution.strategy=in-process lintDebug
-            exit 0
       - store_artifacts:
           path: /tmp/director-artifacts
           destination: sierra-vision-apk
