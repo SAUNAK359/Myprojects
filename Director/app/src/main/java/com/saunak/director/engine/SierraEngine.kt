@@ -20,6 +20,7 @@ import com.saunak.director.engine.runtime.BackendProfiler
 import com.saunak.director.engine.runtime.ComputeHypervisor
 import com.saunak.director.engine.runtime.OnnxRuntimeEngine
 import com.saunak.director.engine.runtime.RuntimeProfileStore
+import com.saunak.director.engine.subject.SubjectTracker
 import java.util.concurrent.atomic.AtomicReference
 
 /** Application-scoped ownership boundary for Sierra camera intelligence and image formation. */
@@ -39,9 +40,10 @@ class SierraEngine private constructor(context: Context) : AutoCloseable {
     val runtimeProfiles = RuntimeProfileStore(appContext)
     val backendProfiler = BackendProfiler(appContext, runtimeProfiles, RUNTIME_VERSION)
 
-    // Temporal motion is application-scoped so IMU history survives individual shutter requests.
+    // Temporal state is application-scoped so history survives individual shutter requests.
     val motion = MotionFusionEngine(appContext, beliefs)
     val motionProbe = ShutterMotionProbe(appContext, motion)
+    val subjects = SubjectTracker()
 
     private val onnxLazy = lazy(LazyThreadSafetyMode.SYNCHRONIZED) { OnnxRuntimeEngine() }
     val onnx: OnnxRuntimeEngine get() = onnxLazy.value
@@ -74,7 +76,8 @@ class SierraEngine private constructor(context: Context) : AutoCloseable {
             beliefCount = beliefs.snapshot(System.nanoTime()).size,
             evidenceRegions = evidence.snapshot().size,
             measuredBackendProfiles = runtimeProfiles.snapshot().count { it.valid },
-            onnxInitialized = onnxLazy.isInitialized()
+            onnxInitialized = onnxLazy.isInitialized(),
+            subjectTrackReady = subjects.latest() != null
         )
     }
 
@@ -91,6 +94,7 @@ class SierraEngine private constructor(context: Context) : AutoCloseable {
 
     override fun close() {
         motion.close()
+        subjects.clear()
         if (onnxLazy.isInitialized()) onnx.close()
         evidence.clear()
         coordinates.clear()
@@ -98,7 +102,7 @@ class SierraEngine private constructor(context: Context) : AutoCloseable {
     }
 
     companion object {
-        private const val RUNTIME_VERSION = "onnxruntime-1.31.0+sierra-v5-temporal"
+        private const val RUNTIME_VERSION = "onnxruntime-1.31.0+sierra-v6-subject"
         @Volatile private var instance: SierraEngine? = null
 
         fun initialize(context: Context): SierraEngine = instance ?: synchronized(this) {
@@ -118,5 +122,6 @@ data class SierraEngineHealth(
     val beliefCount: Int,
     val evidenceRegions: Int,
     val measuredBackendProfiles: Int,
-    val onnxInitialized: Boolean
+    val onnxInitialized: Boolean,
+    val subjectTrackReady: Boolean
 )
