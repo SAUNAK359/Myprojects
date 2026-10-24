@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.SystemClock
 import com.saunak.director.engine.belief.Belief
 import com.saunak.director.engine.belief.SceneBeliefGraph
+import com.saunak.director.engine.subject.SubjectTrack
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.abs
 import kotlin.math.max
@@ -25,7 +26,8 @@ class MotionFusionEngine(
         timestampComparableToImu: Boolean,
         exposureTimeNs: Long?
     ): MotionSnapshot {
-        val visualObservation = visual.push(frame)
+        val trackedSubject = beliefs.get<SubjectTrack>(SceneBeliefGraph.PRIMARY_SUBJECT)?.value
+        val visualObservation = visual.push(frame, trackedSubject?.bounds)
         val imu = sensors.observation(
             frameSensorTimestampNs = frame.sensorTimestampNs,
             frameCallbackElapsedRealtimeNs = frame.callbackElapsedRealtimeNs,
@@ -79,7 +81,7 @@ class MotionFusionEngine(
         val cameraUncertainty = (1.0 - cameraEvidence + disagreement * 0.45).coerceIn(0.0, 1.0)
 
         val subjectRisk = vision?.subjectRisk ?: 0.0
-        val subjectEvidence = visualConfidence
+        val subjectEvidence = vision?.subjectConfidence ?: 0.0
         val subjectUncertainty = (1.0 - subjectEvidence).coerceIn(0.0, 1.0)
         val exposureSeconds = (exposureTimeNs ?: DEFAULT_EXPOSURE_NS).coerceAtLeast(1L) / 1_000_000_000.0
 
@@ -99,7 +101,11 @@ class MotionFusionEngine(
             vector = vision?.residualSubjectVector ?: MotionVector(),
             predictedBlurPx = (vision?.residualSubjectVector?.speedPxPerSecond ?: 0.0) * exposureSeconds,
             observedAtNs = frame.sensorTimestampNs,
-            source = if (vision != null) "visual_residual" else "subject_unobserved"
+            source = when {
+                vision == null -> "subject_unobserved"
+                subjectEvidence >= 0.55 -> "tracked_subject_residual"
+                else -> "global_residual_fallback"
+            }
         )
 
         val camera = smooth(previous?.camera, cameraRaw)
@@ -139,8 +145,7 @@ class MotionFusionEngine(
     }
 
     private fun publish(snapshot: MotionSnapshot) {
-        // SceneBeliefGraph is already aged using System.nanoTime() elsewhere in Sierra. Keep that
-        // graph clock independent from the sensor/IMU clock used above.
+        // SceneBeliefGraph is aged using System.nanoTime(); sensor/IMU fusion keeps its own clock.
         val graphNowNs = System.nanoTime()
         beliefs.put(
             SceneBeliefGraph.CAMERA_MOTION,
