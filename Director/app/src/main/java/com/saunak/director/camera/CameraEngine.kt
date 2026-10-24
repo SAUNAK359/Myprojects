@@ -19,7 +19,6 @@ import androidx.camera.camera2.interop.CaptureRequestOptions
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
-import androidx.camera.core.ExperimentalImageCaptureOutputFormat
 import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
@@ -50,7 +49,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
 
-@OptIn(ExperimentalCamera2Interop::class, ExperimentalImageCaptureOutputFormat::class)
+@OptIn(ExperimentalCamera2Interop::class)
 class CameraEngine(private val context: Context) : AutoCloseable {
     private var provider: ProcessCameraProvider? = null
     private var camera: Camera? = null
@@ -149,7 +148,13 @@ class CameraEngine(private val context: Context) : AutoCloseable {
         .setOutputFormat(outputFormat)
         .setTargetRotation(view.display?.rotation ?: Surface.ROTATION_0)
         .build()
-        .also { it.flashMode = if (outputFormat == ImageCapture.OUTPUT_FORMAT_RAW_JPEG) ImageCapture.FLASH_MODE_OFF else flashModeToCameraX(userFlash) }
+        .also {
+            it.flashMode = if (outputFormat == ImageCapture.OUTPUT_FORMAT_RAW_JPEG) {
+                ImageCapture.FLASH_MODE_OFF
+            } else {
+                flashModeToCameraX(userFlash)
+            }
+        }
 
     private fun buildImageAnalysis(view: PreviewView): ImageAnalysis {
         val analysis = ImageAnalysis.Builder()
@@ -507,7 +512,9 @@ class CameraEngine(private val context: Context) : AutoCloseable {
     }
 
     fun supportedImageCaptureFormats(): Set<Int> = camera?.let { c ->
-        runCatching { ImageCapture.getImageCaptureCapabilities(c.cameraInfo).supportedOutputFormats.toSet() }.getOrDefault(emptySet())
+        runCatching {
+            ImageCapture.getImageCaptureCapabilities(c.cameraInfo).supportedOutputFormats.toSet()
+        }.getOrDefault(emptySet())
     } ?: emptySet()
 
     fun supportsComputationalRawBurst(): Boolean {
@@ -691,7 +698,7 @@ class CameraEngine(private val context: Context) : AutoCloseable {
                                     persistRawSensor(image, rawFile, spec)
                                     synchronized(gate) { rawSaved = true }
                                 }
-                                ImageFormat.JPEG, ImageFormat.JPEG_R -> {
+                                ImageFormat.JPEG -> {
                                     persistCompressedImage(image, jpegFile)
                                     synchronized(gate) { jpegSaved = true }
                                 }
