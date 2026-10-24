@@ -22,6 +22,7 @@ import kotlinx.coroutines.withContext
 /** Fully owned computational result; caller must close it after saving/fallback. */
 class ComputationalRawResult internal constructor(
     val bitmap: Bitmap,
+    /** Protected no-backup JPEG that survives process death until the caller marks finalization. */
     val safetyJpeg: File,
     val capture: RawJpegBurstCapture,
     val reconstruction: RawReconstructionSummary,
@@ -34,6 +35,7 @@ class ComputationalRawResult internal constructor(
     override fun close() {
         if (!bitmap.isRecycled) bitmap.recycle()
         capture.cleanup()
+        // safetyJpeg intentionally remains until MediaStore commit succeeds or startup recovery runs.
     }
 }
 
@@ -50,7 +52,7 @@ class ComputationalRawPipeline(
     private val engine: SierraEngine = SierraEngine.get(),
     private val reconstructor: RawBurstReconstructor = RawBurstReconstructor()
 ) {
-    suspend fun execute(program: CaptureProgram): Result<ComputationalRawResult> = runCatching {
+    suspend fun execute(sessionId: Long, program: CaptureProgram): Result<ComputationalRawResult> = runCatching {
         require(program.path == CapturePath.RAW_CUSTOM) { "Computational RAW requires RAW_CUSTOM program" }
         require(program.frames.isNotEmpty())
         check(camera.supportsComputationalRawBurst()) { "Camera session does not support certified RAW+JPEG manual burst" }
@@ -64,7 +66,12 @@ class ComputationalRawPipeline(
             )
         }
         val capture = camera.captureRawJpegBurst(specs)
+        val protectedSafety = storage.newPendingReference(sessionId)
         try {
+            // Protect real captured evidence before any expensive reconstruction work begins.
+            capture.frames.first().jpegFile.copyTo(protectedSafety, overwrite = true)
+            check(protectedSafety.isFile && protectedSafety.length() > 0) { "Could not protect RAW safety JPEG" }
+
             val cameraId = capture.frames.firstNotNullOfOrNull { it.observed?.cameraId } ?: camera.activeCameraId()
                 ?: error("Active Camera2 id unavailable after RAW capture")
             val twin = (engine.currentDeviceTwin() ?: engine.deviceTwin().getOrThrow()).camera(cameraId)
@@ -91,15 +98,15 @@ class ComputationalRawPipeline(
                 rendered = rotated
             }
 
-            val safetyJpeg = capture.frames[summary.referenceFrameIndex].jpegFile
+            val comparisonJpeg = capture.frames[summary.referenceFrameIndex].jpegFile
             val computationalQuality = analyzeBounded(rendered)
-            val safetyBitmap = storage.decodeOriented(safetyJpeg, QUALITY_LONG_SIDE)
+            val safetyBitmap = storage.decodeOriented(comparisonJpeg, QUALITY_LONG_SIDE)
             val safetyQuality = try { PhotoQuality.analyze(safetyBitmap) } finally { if (!safetyBitmap.isRecycled) safetyBitmap.recycle() }
 
             val rejection = qualityRejection(summary, computationalQuality, safetyQuality)
             ComputationalRawResult(
                 bitmap = rendered,
-                safetyJpeg = safetyJpeg,
+                safetyJpeg = protectedSafety,
                 capture = capture,
                 reconstruction = summary,
                 ispPlan = ispPlan,
@@ -110,6 +117,7 @@ class ComputationalRawPipeline(
             )
         } catch (t: Throwable) {
             capture.cleanup()
+            // protectedSafety deliberately survives if the camera already produced a JPEG.
             throw t
         }
     }
