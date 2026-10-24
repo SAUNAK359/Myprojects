@@ -254,6 +254,7 @@ workflows:
                 - director-sierra-v4-camera-os
                 - director-sierra-v5-temporal-scene
                 - director-sierra-v6-subject-intelligence
+                - director-sierra-v7-prif
       - director-compile-no-ui:
           filters: *director_filter
       - director-compile-no-runtime:
