@@ -99,16 +99,13 @@ class StoredRawReader internal constructor(
         val rowBuffer = ByteBuffer.allocateDirect(rowBytes).order(ByteOrder.LITTLE_ENDIAN)
         for (row in 0 until height) {
             rowBuffer.clear()
-            var fileOffset = ((y + row).toLong() * frame.width.toLong() + x.toLong()) * 2L
-            var read = 0
-            while (read < rowBytes) {
-                val count = channel.read(rowBuffer, fileOffset + read)
-                check(count > 0) { "Unexpected EOF in stored RAW frame" }
-                read += count
-            }
+            val fileOffset = ((y + row).toLong() * frame.width.toLong() + x.toLong()) * 2L
+            readFully(rowBuffer, fileOffset, rowBytes)
             rowBuffer.flip()
             val base = row * width
-            for (col in 0 until width) values[base + col] = (rowBuffer.short.toInt() and 0xffff).toFloat()
+            for (col in 0 until width) {
+                values[base + col] = (rowBuffer.getShort().toInt() and 0xffff).toFloat()
+            }
         }
         return RawPlane(
             width = width,
@@ -135,14 +132,23 @@ class StoredRawReader internal constructor(
                 val px = (gx * step).coerceAtMost(frame.width - 1) and -2
                 sample.clear()
                 val offset = (py.toLong() * frame.width + px.toLong()) * 2L
-                check(channel.read(sample, offset) == 2)
+                readFully(sample, offset, 2)
                 sample.flip()
-                val raw = (sample.short.toInt() and 0xffff).toFloat()
+                val raw = (sample.getShort().toInt() and 0xffff).toFloat()
                 val black = frame.blackLevelPattern[px, py]
                 values[index++] = ((raw - black) / (frame.whiteLevel - black)).coerceIn(0f, 1f)
             }
         }
         return SparseCfaGrid(xs, ys, step, values)
+    }
+
+    private fun readFully(buffer: ByteBuffer, startOffset: Long, byteCount: Int) {
+        var read = 0
+        while (read < byteCount) {
+            val count = channel.read(buffer, startOffset + read)
+            check(count > 0) { "Unexpected EOF in stored RAW frame" }
+            read += count
+        }
     }
 
     override fun close() {
