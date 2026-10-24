@@ -45,6 +45,14 @@ data class StoredRawJpegCaptureFrame(
     }
 }
 
+class StoredRawBurstCaptureException(
+    val completed: List<StoredRawJpegCaptureFrame>,
+    cause: Throwable
+) : IllegalStateException(
+    "RAW burst stopped after ${completed.size} completed frame(s): ${cause.message ?: cause::class.java.simpleName}",
+    cause
+)
+
 /**
  * Copies camera callback payloads directly to disk. No full-resolution RAW FloatArray or JPEG byte
  * array survives the callback. This is the production capture sink used before tiled reconstruction.
