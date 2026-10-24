@@ -6,6 +6,7 @@ import com.saunak.director.ai.VlmRuntime
 import com.saunak.director.camera.CameraEngine
 import com.saunak.director.camera.SierraCaptureBridge
 import com.saunak.director.engine.capture.CaptureProgram
+import com.saunak.director.engine.capture.SafeBurstExecutor
 import com.saunak.director.engine.experts.YuNetFaceExpert
 import com.saunak.director.platform.ThermalMonitor
 import com.saunak.director.processing.InstantFinishEngine
@@ -36,6 +37,7 @@ class DirectorOrchestrator(
     private val generation = AtomicLong(0L)
     private val faceExpert = YuNetFaceExpert()
     private val captureBridge = SierraCaptureBridge(camera)
+    private val safeBurstExecutor = SafeBurstExecutor(camera, storage)
 
     private data class ApprovedState(
         val look: LookSpec,
@@ -204,28 +206,43 @@ class DirectorOrchestrator(
     private suspend fun captureFinal(): Uri? {
         val state = approved ?: return null
         val session = generation.get()
-        var file: File? = null
+        var burst: SafeBurstExecutor.Result? = null
         return try {
-            emit(session, DirectorUiState(DirectorStage.FINAL_CAPTURING, state.mode == SierraMode.AI, "Capturing full quality…", lastScore = state.score, camera = camera.uiState(), sierraMode = state.mode, aspectRatio = state.plan.aspectRatio, aspectRatioOverride = aspectRatioOverride, sceneLabel = state.plan.scene, objective = state.plan.objective, keepOriginal = keepOriginal))
+            val plannedFrames = state.captureProgram?.frames?.size ?: 1
+            emit(session, DirectorUiState(DirectorStage.FINAL_CAPTURING, state.mode == SierraMode.AI, if (plannedFrames > 1) "Capturing computational burst…" else "Capturing full quality…", lastScore = state.score, camera = camera.uiState(), sierraMode = state.mode, aspectRatio = state.plan.aspectRatio, aspectRatioOverride = aspectRatioOverride, sceneLabel = state.plan.scene, objective = state.plan.objective, keepOriginal = keepOriginal))
             camera.awaitSettledState(550)
-            file = storage.newAttempt(session, 99)
-            // Until RAW/YUV executors pass device certification, the existing CameraX still path remains
-            // the fail-safe capture. The approved physics program is retained in state for the executor.
-            camera.capturePrivate(file)
-            emit(session, DirectorUiState(DirectorStage.SAVING, state.mode == SierraMode.AI, "Sierra beta finishing…", lastScore = state.score, camera = camera.uiState(), sierraMode = state.mode, aspectRatio = state.plan.aspectRatio, aspectRatioOverride = aspectRatioOverride, sceneLabel = state.plan.scene, objective = state.plan.objective, keepOriginal = keepOriginal))
-            if (keepOriginal) runCatching { storage.saveOriginal(file) }
-            val uri = storage.saveFinal(file, state.look, state.plan.aspectRatio, state.plan.cropCenterX, state.plan.cropCenterY)
-            recipeMemory.remember(state.plan, state.score)
+            burst = safeBurstExecutor.execute(
+                sessionId = session,
+                program = state.captureProgram,
+                maxFrames = thermal.policy().maxBurstFrames
+            )
+            val selected = burst.selected.file
+            val captureScore = combinedReadyScore(
+                state.score,
+                burst.selected.quality.heuristicScore,
+                burst.selected.score
+            )
+            emit(session, DirectorUiState(DirectorStage.SAVING, state.mode == SierraMode.AI, if (burst.executedCount > 1) "Sierra selected best evidence • finishing…" else "Sierra beta finishing…", lastScore = captureScore, camera = camera.uiState(), sierraMode = state.mode, aspectRatio = state.plan.aspectRatio, aspectRatioOverride = aspectRatioOverride, sceneLabel = state.plan.scene, objective = state.plan.objective, keepOriginal = keepOriginal))
+            if (keepOriginal) runCatching { storage.saveOriginal(selected) }
+            val uri = storage.saveFinal(selected, state.look, state.plan.aspectRatio, state.plan.cropCenterX, state.plan.cropCenterY)
+            recipeMemory.remember(state.plan, captureScore)
             approved = null
             tools.restoreUserState()
-            emit(session, DirectorUiState(DirectorStage.READY, cloudEnabled && vlm.isReady(), "Sierra photo saved", lastScore = state.score, camera = camera.uiState(), lastSavedUri = uri.toString(), recipeCount = recipeMemory.count(), sierraMode = state.mode, aspectRatio = state.plan.aspectRatio, aspectRatioOverride = aspectRatioOverride, sceneLabel = state.plan.scene, objective = state.plan.objective, keepOriginal = keepOriginal))
+            val savedStatus = if (burst.executedCount > 1) {
+                "Sierra photo saved • best of ${burst.executedCount} frames"
+            } else {
+                "Sierra photo saved"
+            }
+            emit(session, DirectorUiState(DirectorStage.READY, cloudEnabled && vlm.isReady(), savedStatus, lastScore = captureScore, camera = camera.uiState(), lastSavedUri = uri.toString(), recipeCount = recipeMemory.count(), sierraMode = state.mode, aspectRatio = state.plan.aspectRatio, aspectRatioOverride = aspectRatioOverride, sceneLabel = state.plan.scene, objective = state.plan.objective, keepOriginal = keepOriginal))
             uri
         } catch (t: Throwable) {
             approved = null
             runCatching { tools.restoreUserState() }
             emit(session, DirectorUiState(DirectorStage.ERROR, cloudEnabled && vlm.isReady(), "Final capture failed", error = t.message, camera = camera.uiState(), sierraMode = state.mode, aspectRatioOverride = aspectRatioOverride, keepOriginal = keepOriginal))
             null
-        } finally { file?.let { storage.cleanup(listOf(it)) } }
+        } finally {
+            burst?.let { result -> storage.cleanup(result.frames.map { it.file }) }
+        }
     }
 
     private fun emit(session: Long, state: DirectorUiState) { if (isCurrent(session)) onState(state) }
