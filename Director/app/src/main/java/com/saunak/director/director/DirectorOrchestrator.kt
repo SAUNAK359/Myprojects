@@ -8,7 +8,12 @@ import com.saunak.director.camera.DirectorExtension
 import com.saunak.director.camera.SierraCaptureBridge
 import com.saunak.director.engine.capture.CaptureProgram
 import com.saunak.director.engine.capture.SafeBurstExecutor
+import com.saunak.director.engine.device.CapturePath
 import com.saunak.director.engine.experts.YuNetFaceExpert
+import com.saunak.director.engine.reconstruction.ComputationalRawOutcome
+import com.saunak.director.engine.reconstruction.ComputationalRawPipeline
+import com.saunak.director.engine.reconstruction.ComputationalRawResult
+import com.saunak.director.engine.reconstruction.ComputationalRawSafetyOnly
 import com.saunak.director.platform.ThermalMonitor
 import com.saunak.director.processing.InstantFinishEngine
 import com.saunak.director.processing.LookProcessor
@@ -21,10 +26,10 @@ import com.saunak.director.storage.RecipeMemory
 import com.saunak.director.storage.SierraCropPolicy
 import com.saunak.director.tools.ToolExecutor
 import com.saunak.director.tools.ToolIds
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.util.concurrent.atomic.AtomicLong
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.withTimeoutOrNull
 
 class DirectorOrchestrator(
     private val camera: CameraEngine,
@@ -40,6 +45,7 @@ class DirectorOrchestrator(
     private val faceExpert = YuNetFaceExpert()
     private val captureBridge = SierraCaptureBridge(camera)
     private val safeBurstExecutor = SafeBurstExecutor(camera, storage)
+    private val computationalRaw = ComputationalRawPipeline(camera, storage)
 
     private data class ApprovedState(
         val look: LookSpec,
@@ -167,9 +173,6 @@ class DirectorOrchestrator(
                 } finally { if (!verification.isRecycled) verification.recycle() }
             } else CapturePolicy.combinedFallbackScore(plan.referenceScore, referenceQuality.heuristicScore)
 
-            // Capture planning is deliberately refreshed after camera mutations have settled. An OEM
-            // extension owns its private pipeline, so the universal JPEG fallback performs one final
-            // still instead of multiplying an HDR/Night/Bokeh capture into another burst.
             val captureProgram = if (camera.snapshot().extension == DirectorExtension.NONE) {
                 withTimeoutOrNull(CAPTURE_PLAN_BUDGET_MS) {
                     captureBridge.plan(finalObservedQuality, sceneSignals, thermalPolicy).getOrNull()
@@ -211,7 +214,13 @@ class DirectorOrchestrator(
 
     private fun approve(session: Long, plan: PlanOutput, look: LookSpec, score: Double, mode: SierraMode, captureProgram: CaptureProgram?) {
         approved = ApprovedState(look, plan, score, mode, captureProgram)
-        val captureSuffix = captureProgram?.takeIf { it.frames.size > 1 }?.let { " • ${it.frames.size}f smart burst" }.orEmpty()
+        val captureSuffix = captureProgram?.let {
+            when {
+                it.path == CapturePath.RAW_CUSTOM && camera.supportsComputationalRawBurst() -> " • ${it.frames.size}f computational RAW"
+                it.frames.size > 1 -> " • ${it.frames.size}f smart burst"
+                else -> ""
+            }
+        }.orEmpty()
         emit(session, DirectorUiState(DirectorStage.PREPARED, mode == SierraMode.AI, if (mode == SierraMode.AI) "Ready • Sierra AI + beta$captureSuffix" else "Ready • Sierra beta$captureSuffix", lastScore = score, camera = camera.uiState(), recipeCount = recipeMemory.count(), sierraMode = mode, aspectRatio = plan.aspectRatio, aspectRatioOverride = aspectRatioOverride, sceneLabel = plan.scene, objective = plan.objective, keepOriginal = keepOriginal))
     }
 
@@ -219,27 +228,30 @@ class DirectorOrchestrator(
         val state = approved ?: return null
         val session = generation.get()
         var burst: SafeBurstExecutor.Result? = null
+        var rawOutcome: ComputationalRawOutcome? = null
         return try {
             val activeExtension = camera.snapshot().extension
             val executableProgram = state.captureProgram.takeIf { activeExtension == DirectorExtension.NONE }
+            val rawEligible = executableProgram?.path == CapturePath.RAW_CUSTOM && camera.supportsComputationalRawBurst()
             val plannedFrames = executableProgram?.frames?.size ?: 1
-            emit(
-                session,
-                DirectorUiState(
-                    DirectorStage.FINAL_CAPTURING,
-                    state.mode == SierraMode.AI,
-                    if (plannedFrames > 1) "Capturing smart burst…" else "Capturing full quality…",
-                    lastScore = state.score,
-                    camera = camera.uiState(),
-                    sierraMode = state.mode,
-                    aspectRatio = state.plan.aspectRatio,
-                    aspectRatioOverride = aspectRatioOverride,
-                    sceneLabel = state.plan.scene,
-                    objective = state.plan.objective,
-                    keepOriginal = keepOriginal
-                )
-            )
+            val captureStatus = when {
+                activeExtension != DirectorExtension.NONE -> "Capturing OEM computational frame…"
+                rawEligible -> "Capturing Sierra RAW burst…"
+                plannedFrames > 1 -> "Capturing smart burst…"
+                else -> "Capturing full quality…"
+            }
+            emit(session, DirectorUiState(DirectorStage.FINAL_CAPTURING, state.mode == SierraMode.AI, captureStatus, lastScore = state.score, camera = camera.uiState(), sierraMode = state.mode, aspectRatio = state.plan.aspectRatio, aspectRatioOverride = aspectRatioOverride, sceneLabel = state.plan.scene, objective = state.plan.objective, keepOriginal = keepOriginal))
             camera.awaitSettledState(550)
+
+            if (rawEligible && executableProgram != null) {
+                val attempt = computationalRaw.execute(session, executableProgram).getOrNull()
+                if (attempt != null) {
+                    rawOutcome = attempt
+                    assertCurrent(session)
+                    return finalizeRawOutcome(session, state, attempt)
+                }
+            }
+
             val burstResult = safeBurstExecutor.execute(
                 sessionId = session,
                 program = executableProgram,
@@ -249,11 +261,7 @@ class DirectorOrchestrator(
             assertCurrent(session)
 
             val selected = burstResult.selected.file
-            val captureScore = combinedReadyScore(
-                state.score,
-                burstResult.selected.quality.heuristicScore,
-                burstResult.selected.score
-            )
+            val captureScore = combinedReadyScore(state.score, burstResult.selected.quality.heuristicScore, burstResult.selected.score)
             val finishingStatus = when {
                 burstResult.allCatastrophic -> "Technical gate failed • preserving untouched capture…"
                 burstResult.truncatedByFailure -> "Burst shortened safely • finishing best frame…"
@@ -263,11 +271,9 @@ class DirectorOrchestrator(
             emit(session, DirectorUiState(DirectorStage.SAVING, state.mode == SierraMode.AI, finishingStatus, lastScore = captureScore, camera = camera.uiState(), sierraMode = state.mode, aspectRatio = state.plan.aspectRatio, aspectRatioOverride = aspectRatioOverride, sceneLabel = state.plan.scene, objective = state.plan.objective, keepOriginal = keepOriginal))
 
             if (keepOriginal) runCatching { storage.saveOriginal(selected) }
-            val uri = if (burstResult.allCatastrophic) {
-                storage.saveRawJpeg(selected)
-            } else {
-                storage.saveFinal(selected, state.look, state.plan.aspectRatio, state.plan.cropCenterX, state.plan.cropCenterY)
-            }
+            val uri = if (burstResult.allCatastrophic) storage.saveRawJpeg(selected)
+            else storage.saveFinal(selected, state.look, state.plan.aspectRatio, state.plan.cropCenterX, state.plan.cropCenterY)
+            storage.markFinalized(burstResult.protectedReference.file)
             recipeMemory.remember(state.plan, captureScore)
             approved = null
             tools.restoreUserState()
@@ -281,19 +287,69 @@ class DirectorOrchestrator(
             uri
         } catch (t: Throwable) {
             approved = null
-            val fallbackUri = burst?.selected?.file?.takeIf { it.isFile && it.length() > 0L }?.let { file ->
+            val fallbackFile = rawOutcome?.safetyJpeg ?: burst?.selected?.file
+            val fallbackUri = fallbackFile?.takeIf { it.isFile && it.length() > 0L }?.let { file ->
                 runCatching { storage.saveRawJpeg(file) }.getOrNull()
             }
+            if (fallbackUri != null && fallbackFile != null) storage.markFinalized(fallbackFile)
             runCatching { tools.restoreUserState() }
             if (fallbackUri != null) {
-                emit(session, DirectorUiState(DirectorStage.READY, cloudEnabled && vlm.isReady(), "Sierra finishing failed • untouched capture saved", error = t.message, camera = camera.uiState(), lastSavedUri = fallbackUri.toString(), sierraMode = state.mode, aspectRatioOverride = aspectRatioOverride, keepOriginal = keepOriginal))
+                emit(session, DirectorUiState(DirectorStage.READY, cloudEnabled && vlm.isReady(), "Sierra processing failed • untouched capture saved", error = t.message, camera = camera.uiState(), lastSavedUri = fallbackUri.toString(), sierraMode = state.mode, aspectRatioOverride = aspectRatioOverride, keepOriginal = keepOriginal))
                 fallbackUri
             } else {
                 emit(session, DirectorUiState(DirectorStage.ERROR, cloudEnabled && vlm.isReady(), "Final capture failed", error = t.message, camera = camera.uiState(), sierraMode = state.mode, aspectRatioOverride = aspectRatioOverride, keepOriginal = keepOriginal))
                 null
             }
         } finally {
+            rawOutcome?.close()
             burst?.let { result -> storage.cleanup(result.frames.map { it.file }) }
+        }
+    }
+
+    private suspend fun finalizeRawOutcome(
+        session: Long,
+        state: ApprovedState,
+        outcome: ComputationalRawOutcome
+    ): Uri {
+        return when (outcome) {
+            is ComputationalRawResult -> {
+                val useComputational = outcome.acceptedOverSafetyJpeg
+                val captureScore = combinedReadyScore(
+                    state.score,
+                    if (useComputational) outcome.computationalQuality.heuristicScore else outcome.safetyQuality.heuristicScore,
+                    if (useComputational) outcome.reconstruction.meanConfidence else outcome.safetyQuality.heuristicScore
+                )
+                val status = if (useComputational) {
+                    "RAW fusion passed evidence gate • rendering…"
+                } else {
+                    "RAW fusion rejected (${outcome.rejectionReason}) • preserving same-capture JPEG…"
+                }
+                emit(session, DirectorUiState(DirectorStage.SAVING, state.mode == SierraMode.AI, status, lastScore = captureScore, camera = camera.uiState(), sierraMode = state.mode, aspectRatio = state.plan.aspectRatio, aspectRatioOverride = aspectRatioOverride, sceneLabel = state.plan.scene, objective = state.plan.objective, keepOriginal = keepOriginal))
+                if (keepOriginal) runCatching { storage.saveOriginal(outcome.safetyJpeg) }
+                val uri = if (useComputational) {
+                    storage.saveComputational(outcome.bitmap, outcome.safetyJpeg, state.look, state.plan.aspectRatio, state.plan.cropCenterX, state.plan.cropCenterY)
+                } else {
+                    storage.saveFinal(outcome.safetyJpeg, state.look, state.plan.aspectRatio, state.plan.cropCenterX, state.plan.cropCenterY)
+                }
+                storage.markFinalized(outcome.safetyJpeg)
+                recipeMemory.remember(state.plan, captureScore)
+                approved = null
+                tools.restoreUserState()
+                emit(session, DirectorUiState(DirectorStage.READY, cloudEnabled && vlm.isReady(), if (useComputational) "Sierra computational RAW photo saved" else "Sierra safety JPEG saved", lastScore = captureScore, camera = camera.uiState(), lastSavedUri = uri.toString(), recipeCount = recipeMemory.count(), sierraMode = state.mode, aspectRatio = state.plan.aspectRatio, aspectRatioOverride = aspectRatioOverride, sceneLabel = state.plan.scene, objective = state.plan.objective, keepOriginal = keepOriginal))
+                uri
+            }
+            is ComputationalRawSafetyOnly -> {
+                val captureScore = combinedReadyScore(state.score, outcome.safetyQuality?.heuristicScore ?: state.score, outcome.safetyQuality?.heuristicScore ?: state.score)
+                emit(session, DirectorUiState(DirectorStage.SAVING, state.mode == SierraMode.AI, "RAW reconstruction unavailable • preserving same-capture JPEG…", lastScore = captureScore, camera = camera.uiState(), sierraMode = state.mode, aspectRatio = state.plan.aspectRatio, aspectRatioOverride = aspectRatioOverride, sceneLabel = state.plan.scene, objective = state.plan.objective, keepOriginal = keepOriginal))
+                if (keepOriginal) runCatching { storage.saveOriginal(outcome.safetyJpeg) }
+                val uri = storage.saveFinal(outcome.safetyJpeg, state.look, state.plan.aspectRatio, state.plan.cropCenterX, state.plan.cropCenterY)
+                storage.markFinalized(outcome.safetyJpeg)
+                recipeMemory.remember(state.plan, captureScore)
+                approved = null
+                tools.restoreUserState()
+                emit(session, DirectorUiState(DirectorStage.READY, cloudEnabled && vlm.isReady(), "Sierra photo saved • RAW fallback ${outcome.reason.take(80)}", lastScore = captureScore, camera = camera.uiState(), lastSavedUri = uri.toString(), recipeCount = recipeMemory.count(), sierraMode = state.mode, aspectRatio = state.plan.aspectRatio, aspectRatioOverride = aspectRatioOverride, sceneLabel = state.plan.scene, objective = state.plan.objective, keepOriginal = keepOriginal))
+                uri
+            }
         }
     }
 
