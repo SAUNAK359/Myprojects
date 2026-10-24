@@ -1,0 +1,44 @@
+name: P-RIF Compile Diagnostic
+
+on:
+  push:
+    branches:
+      - director-sierra-v7-prif
+    paths:
+      - 'Director/**'
+      - '.github/workflows/prif-compile-diagnostic.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compile-diagnostic:
+    runs-on: ubuntu-latest
+    container:
+      image: cimg/android:2026.08
+    timeout-minutes: 20
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Compile and preserve diagnostics
+        shell: bash
+        run: |
+          set -o pipefail
+          cd Director
+          printf 'sdk.dir=%s\n' "$ANDROID_HOME" > local.properties
+          chmod +x gradlew
+          ./gradlew --no-daemon --no-parallel --stacktrace --max-workers=2 \
+            -Dorg.gradle.jvmargs='-Xmx2560m -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8 -XX:+UseParallelGC' \
+            -Pkotlin.compiler.execution.strategy=in-process compileDebugKotlin \
+            2>&1 | tee ../prif-compile.log
+
+      - name: Upload compile log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prif-compile-log
+          path: prif-compile.log
+          if-no-files-found: warn
+          retention-days: 3
