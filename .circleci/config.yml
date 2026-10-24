@@ -25,7 +25,7 @@ commands:
             chmod +x gradlew
 
 jobs:
-  assemble-probe:
+  lint-report:
     docker:
       - image: cimg/android:2026.08
     resource_class: medium+
@@ -36,73 +36,166 @@ jobs:
     steps:
       - prepare-android
       - run:
-          name: Assemble debug APK
+          name: Generate lint XML without masking the report
           command: |
             set -euo pipefail
             source "$BASH_ENV"
             cd Director
-            ./gradlew --no-daemon --no-parallel --stacktrace --max-workers=2 \
-              -Dorg.gradle.jvmargs='-Xmx2560m -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8 -XX:+UseParallelGC' \
-              -Pkotlin.compiler.execution.strategy=in-process assembleDebug
-            APK="$(find app/build/outputs/apk/debug -type f -name '*.apk' -print -quit)"
-            test -n "$APK" && test -s "$APK"
-
-  lint-probe:
-    docker:
-      - image: cimg/android:2026.08
-    resource_class: medium+
-    working_directory: ~/project
-    environment:
-      GRADLE_USER_HOME: /home/circleci/.gradle
-      TERM: dumb
-    steps:
-      - prepare-android
-      - run:
-          name: Lint debug
-          command: |
-            set -euo pipefail
-            source "$BASH_ENV"
-            cd Director
+            set +e
             ./gradlew --no-daemon --no-parallel --stacktrace --max-workers=1 \
               -Dorg.gradle.jvmargs='-Xmx2048m -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8' \
               -Pkotlin.compiler.execution.strategy=in-process lintDebug
+            LINT_EXIT=$?
+            set -e
+            REPORT="$(find app/build/reports -type f -name 'lint-results-debug.xml' -print -quit)"
+            test -n "$REPORT" && test -s "$REPORT"
+            mkdir -p /tmp/lint-work
+            cp "$REPORT" /tmp/lint-work/lint.xml
+            printf '%s\n' "$LINT_EXIT" > /tmp/lint-work/gradle-exit.txt
+      - persist_to_workspace:
+          root: /tmp/lint-work
+          paths:
+            - lint.xml
+            - gradle-exit.txt
 
-  apk-verify-probe:
+  classify-manifest-res:
     docker:
-      - image: cimg/android:2026.08
-    resource_class: medium+
-    working_directory: ~/project
-    environment:
-      GRADLE_USER_HOME: /home/circleci/.gradle
-      TERM: dumb
+      - image: cimg/base:stable
     steps:
-      - prepare-android
+      - attach_workspace:
+          at: /tmp/lint-work
       - run:
-          name: Assemble and verify APK container
+          name: Check manifest and resources lint errors
           command: |
-            set -euo pipefail
-            source "$BASH_ENV"
-            cd Director
-            ./gradlew --no-daemon --no-parallel --stacktrace --max-workers=2 \
-              -Dorg.gradle.jvmargs='-Xmx2560m -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8 -XX:+UseParallelGC' \
-              -Pkotlin.compiler.execution.strategy=in-process assembleDebug
-            APK="$(find app/build/outputs/apk/debug -type f -name '*.apk' -print -quit)"
-            test -n "$APK" && test -s "$APK"
-            BUILD_TOOLS="$ANDROID_HOME/build-tools/36.0.0"
-            "$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$APK" >/dev/null
-            "$BUILD_TOOLS/zipalign" -c -P 16 -v 4 "$APK" >/dev/null
-            unzip -t "$APK" >/dev/null
-            unzip -l "$APK" > /tmp/apk-files.txt
-            grep -qE '(^|[[:space:]])classes\.dex$' /tmp/apk-files.txt
+            python3 - <<'PY'
+            import sys, xml.etree.ElementTree as ET
+            root=ET.parse('/tmp/lint-work/lint.xml').getroot()
+            bad=[]
+            for issue in root.findall('issue'):
+              if issue.get('severity') != 'Error': continue
+              files=[loc.get('file','') for loc in issue.findall('location')]
+              if any('AndroidManifest.xml' in f or '/res/' in f for f in files): bad.append((issue.get('id'),files))
+            sys.exit(1 if bad else 0)
+            PY
+
+  classify-camera:
+    docker:
+      - image: cimg/base:stable
+    steps:
+      - attach_workspace:
+          at: /tmp/lint-work
+      - run:
+          name: Check camera lint errors
+          command: |
+            python3 - <<'PY'
+            import sys, xml.etree.ElementTree as ET
+            root=ET.parse('/tmp/lint-work/lint.xml').getroot(); bad=[]
+            for issue in root.findall('issue'):
+              if issue.get('severity')!='Error': continue
+              files=[loc.get('file','') for loc in issue.findall('location')]
+              if any('/camera/' in f for f in files): bad.append((issue.get('id'),files))
+            sys.exit(1 if bad else 0)
+            PY
+
+  classify-engine:
+    docker:
+      - image: cimg/base:stable
+    steps:
+      - attach_workspace:
+          at: /tmp/lint-work
+      - run:
+          name: Check engine lint errors
+          command: |
+            python3 - <<'PY'
+            import sys, xml.etree.ElementTree as ET
+            root=ET.parse('/tmp/lint-work/lint.xml').getroot(); bad=[]
+            for issue in root.findall('issue'):
+              if issue.get('severity')!='Error': continue
+              files=[loc.get('file','') for loc in issue.findall('location')]
+              if any('/engine/' in f for f in files): bad.append((issue.get('id'),files))
+            sys.exit(1 if bad else 0)
+            PY
+
+  classify-ui-director:
+    docker:
+      - image: cimg/base:stable
+    steps:
+      - attach_workspace:
+          at: /tmp/lint-work
+      - run:
+          name: Check UI and orchestrator lint errors
+          command: |
+            python3 - <<'PY'
+            import sys, xml.etree.ElementTree as ET
+            root=ET.parse('/tmp/lint-work/lint.xml').getroot(); bad=[]
+            for issue in root.findall('issue'):
+              if issue.get('severity')!='Error': continue
+              files=[loc.get('file','') for loc in issue.findall('location')]
+              if any('/ui/' in f or '/director/' in f for f in files): bad.append((issue.get('id'),files))
+            sys.exit(1 if bad else 0)
+            PY
+
+  classify-backend-ai:
+    docker:
+      - image: cimg/base:stable
+    steps:
+      - attach_workspace:
+          at: /tmp/lint-work
+      - run:
+          name: Check backend and AI lint errors
+          command: |
+            python3 - <<'PY'
+            import sys, xml.etree.ElementTree as ET
+            root=ET.parse('/tmp/lint-work/lint.xml').getroot(); bad=[]
+            for issue in root.findall('issue'):
+              if issue.get('severity')!='Error': continue
+              files=[loc.get('file','') for loc in issue.findall('location')]
+              if any('/backend/' in f or '/ai/' in f for f in files): bad.append((issue.get('id'),files))
+            sys.exit(1 if bad else 0)
+            PY
+
+  classify-other:
+    docker:
+      - image: cimg/base:stable
+    steps:
+      - attach_workspace:
+          at: /tmp/lint-work
+      - run:
+          name: Check all other lint errors
+          command: |
+            python3 - <<'PY'
+            import sys, xml.etree.ElementTree as ET
+            root=ET.parse('/tmp/lint-work/lint.xml').getroot(); bad=[]
+            known=('AndroidManifest.xml','/res/','/camera/','/engine/','/ui/','/director/','/backend/','/ai/')
+            for issue in root.findall('issue'):
+              if issue.get('severity')!='Error': continue
+              files=[loc.get('file','') for loc in issue.findall('location')]
+              if not files or any(not any(k in f for k in known) for f in files): bad.append((issue.get('id'),files))
+            sys.exit(1 if bad else 0)
+            PY
 
 workflows:
-  apk-diagnose:
+  lint-classify:
     jobs:
-      - assemble-probe:
+      - lint-report:
           filters: &only_diag
             branches:
               only: director-sierra-v4-apk-diagnose
-      - lint-probe:
+      - classify-manifest-res:
+          requires: [lint-report]
           filters: *only_diag
-      - apk-verify-probe:
+      - classify-camera:
+          requires: [lint-report]
+          filters: *only_diag
+      - classify-engine:
+          requires: [lint-report]
+          filters: *only_diag
+      - classify-ui-director:
+          requires: [lint-report]
+          filters: *only_diag
+      - classify-backend-ai:
+          requires: [lint-report]
+          filters: *only_diag
+      - classify-other:
+          requires: [lint-report]
           filters: *only_diag
