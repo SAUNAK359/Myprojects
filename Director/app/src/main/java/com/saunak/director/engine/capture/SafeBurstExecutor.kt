@@ -9,8 +9,8 @@ import kotlin.math.max
 
 /**
  * Production-safe multi-frame executor built entirely on the already-certified CameraX JPEG path.
- * This is intentionally a smart burst selector, not RAW/HDR fusion: each frame remains an independent
- * evidence image and capture failures never invalidate earlier successfully captured frames.
+ * The first successfully captured still is written to the recoverable no-backup pending directory;
+ * later burst frames are disposable cache. This path is smart frame selection, not RAW/HDR fusion.
  */
 class SafeBurstExecutor(
     private val camera: CameraEngine,
@@ -20,7 +20,8 @@ class SafeBurstExecutor(
         val file: File,
         val quality: TechnicalQuality,
         val score: Double,
-        val index: Int
+        val index: Int,
+        val protectedReference: Boolean = false
     )
 
     data class Result(
@@ -35,6 +36,7 @@ class SafeBurstExecutor(
     ) {
         init {
             require(frames.isNotEmpty())
+            require(frames.first().protectedReference) { "First burst frame must be the recoverable reference" }
             require(selected in frames)
             require(requestedCount >= 1)
             require(executedCount == frames.size)
@@ -42,6 +44,8 @@ class SafeBurstExecutor(
             require(rejectedCount in 0..executedCount)
             require(allCatastrophic == frames.all { it.quality.catastrophic })
         }
+
+        val protectedReference: CapturedFrame get() = frames.first()
     }
 
     suspend fun execute(
@@ -60,32 +64,39 @@ class SafeBurstExecutor(
         var truncated = false
 
         for (index in 0 until count) {
-            val file = storage.newAttempt(sessionId, 100 + index)
-            val frame = runCatching {
-                // CameraX serializes ImageCapture requests. We deliberately do not pretend that the
-                // CaptureProgram's RAW/manual exposure values are applied on this safe JPEG path.
-                camera.capturePrivate(file)
+            val protectedReference = index == 0
+            val file = if (protectedReference) {
+                storage.newPendingReference(sessionId)
+            } else {
+                storage.newAttempt(sessionId, 100 + index)
+            }
+
+            val capture = runCatching { camera.capturePrivate(file) }
+            if (capture.isFailure) {
+                runCatching { file.delete() }
+                if (captured.isEmpty()) throw capture.exceptionOrNull() ?: IllegalStateException("First burst frame failed")
+                truncated = true
+                break
+            }
+
+            // A successful camera file is evidence even if our thumbnail decoder/quality analyser fails.
+            // Mark that frame as technically rejected rather than deleting a recoverable photograph.
+            val quality = runCatching {
                 val preview = storage.decodeOriented(file, QUALITY_DECODE_MAX_DIMENSION)
-                val quality = try {
+                try {
                     PhotoQuality.analyze(preview)
                 } finally {
                     if (!preview.isRecycled) preview.recycle()
                 }
-                CapturedFrame(
-                    file = file,
-                    quality = quality,
-                    score = frameScore(quality, index, count),
-                    index = index
-                )
-            }
+            }.getOrElse { rejectedAnalysisQuality() }
 
-            if (frame.isFailure) {
-                runCatching { file.delete() }
-                if (captured.isEmpty()) throw frame.exceptionOrNull() ?: IllegalStateException("First burst frame failed")
-                truncated = true
-                break
-            }
-            captured += frame.getOrThrow()
+            captured += CapturedFrame(
+                file = file,
+                quality = quality,
+                score = frameScore(quality, index, count),
+                index = index,
+                protectedReference = protectedReference
+            )
         }
 
         val valid = captured.filterNot { it.quality.catastrophic }
@@ -112,6 +123,16 @@ class SafeBurstExecutor(
             }
         )
     }
+
+    private fun rejectedAnalysisQuality(): TechnicalQuality = TechnicalQuality(
+        meanLuma = 0.0,
+        lumaStdDev = 0.0,
+        darkClipFraction = 0.0,
+        brightClipFraction = 0.0,
+        edgeEnergy = 0.0,
+        catastrophic = true,
+        heuristicScore = 0.0
+    )
 
     private fun frameScore(quality: TechnicalQuality, index: Int, total: Int): Double {
         if (quality.catastrophic) return 0.0
