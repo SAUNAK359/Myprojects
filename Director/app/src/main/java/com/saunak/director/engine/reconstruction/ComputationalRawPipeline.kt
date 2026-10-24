@@ -19,32 +19,45 @@ import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-/** Fully owned computational result; caller must close it after saving/fallback. */
+sealed interface ComputationalRawOutcome : AutoCloseable {
+    val safetyJpeg: File
+    val capture: RawJpegBurstCapture
+}
+
+/** Successful deterministic RAW reconstruction plus same-capture JPEG reference. */
 class ComputationalRawResult internal constructor(
     val bitmap: Bitmap,
-    /** Protected no-backup JPEG that survives process death until the caller marks finalization. */
-    val safetyJpeg: File,
-    val capture: RawJpegBurstCapture,
+    override val safetyJpeg: File,
+    override val capture: RawJpegBurstCapture,
     val reconstruction: RawReconstructionSummary,
     val ispPlan: SierraIspPlan,
     val computationalQuality: TechnicalQuality,
     val safetyQuality: TechnicalQuality,
     val acceptedOverSafetyJpeg: Boolean,
     val rejectionReason: String?
-) : AutoCloseable {
+) : ComputationalRawOutcome {
     override fun close() {
         if (!bitmap.isRecycled) bitmap.recycle()
         capture.cleanup()
-        // safetyJpeg intentionally remains until MediaStore commit succeeds or startup recovery runs.
     }
+}
+
+/** Sensor capture succeeded but reconstruction/ISP could not be trusted. Use this JPEG; do not recapture. */
+class ComputationalRawSafetyOnly internal constructor(
+    override val safetyJpeg: File,
+    override val capture: RawJpegBurstCapture,
+    val reason: String,
+    val safetyQuality: TechnicalQuality?
+) : ComputationalRawOutcome {
+    override fun close() = capture.cleanup()
 }
 
 /**
  * High-level Sierra computational-photography transaction.
  *
- * A RAW result is never trusted merely because reconstruction completed. It must have sufficient
- * physical-evidence confidence and must not materially regress technical quality against the JPEG
- * produced from the same sensor capture. The JPEG remains an independently decodable safety path.
+ * Once a RAW+JPEG burst has physically succeeded, this API never asks the caller to capture again.
+ * Reconstruction failure is represented as [ComputationalRawSafetyOnly] so the simultaneous JPEG
+ * becomes the final truth-preserving fallback from that same shutter event.
  */
 class ComputationalRawPipeline(
     private val camera: CameraEngine,
@@ -52,7 +65,7 @@ class ComputationalRawPipeline(
     private val engine: SierraEngine = SierraEngine.get(),
     private val reconstructor: RawBurstReconstructor = RawBurstReconstructor()
 ) {
-    suspend fun execute(sessionId: Long, program: CaptureProgram): Result<ComputationalRawResult> = runCatching {
+    suspend fun execute(sessionId: Long, program: CaptureProgram): Result<ComputationalRawOutcome> = runCatching {
         require(program.path == CapturePath.RAW_CUSTOM) { "Computational RAW requires RAW_CUSTOM program" }
         require(program.frames.isNotEmpty())
         check(camera.supportsComputationalRawBurst()) { "Camera session does not support certified RAW+JPEG manual burst" }
@@ -67,59 +80,72 @@ class ComputationalRawPipeline(
         }
         val capture = camera.captureRawJpegBurst(specs)
         val protectedSafety = storage.newPendingReference(sessionId)
+        capture.frames.first().jpegFile.copyTo(protectedSafety, overwrite = true)
+        check(protectedSafety.isFile && protectedSafety.length() > 0) { "Could not protect RAW safety JPEG" }
+
         try {
-            // Protect real captured evidence before any expensive reconstruction work begins.
-            capture.frames.first().jpegFile.copyTo(protectedSafety, overwrite = true)
-            check(protectedSafety.isFile && protectedSafety.length() > 0) { "Could not protect RAW safety JPEG" }
-
-            val cameraId = capture.frames.firstNotNullOfOrNull { it.observed?.cameraId } ?: camera.activeCameraId()
-                ?: error("Active Camera2 id unavailable after RAW capture")
-            val twin = (engine.currentDeviceTwin() ?: engine.deviceTwin().getOrThrow()).camera(cameraId)
-                ?: error("DeviceTwin does not contain active camera $cameraId")
-            require(twin.cfaPattern in SUPPORTED_CFA) { "Unsupported RAW CFA ${twin.cfaPattern}" }
-            require(twin.whiteLevel != null && twin.whiteLevel > 0) { "Sensor white level unavailable" }
-
-            val ispPlan = withContext(Dispatchers.Default) { SierraRawIspPlanner.plan(capture, twin) }
-            val sink = SierraIspBitmapSink(ispPlan)
-            val summary = withContext(Dispatchers.Default) { reconstructor.reconstruct(capture, twin, sink) }
-            var rendered = sink.bitmap()
-            val rotation = SierraRawContainer.open(capture.frames[summary.referenceFrameIndex].rawFile).use { it.header.rotationDegrees }
-            if (rotation != 0) {
-                val rotated = Bitmap.createBitmap(
-                    rendered,
-                    0,
-                    0,
-                    rendered.width,
-                    rendered.height,
-                    Matrix().apply { postRotate(rotation.toFloat()) },
-                    true
-                )
-                if (rotated !== rendered && !rendered.isRecycled) rendered.recycle()
-                rendered = rotated
-            }
-
-            val comparisonJpeg = capture.frames[summary.referenceFrameIndex].jpegFile
-            val computationalQuality = analyzeBounded(rendered)
-            val safetyBitmap = storage.decodeOriented(comparisonJpeg, QUALITY_LONG_SIDE)
-            val safetyQuality = try { PhotoQuality.analyze(safetyBitmap) } finally { if (!safetyBitmap.isRecycled) safetyBitmap.recycle() }
-
-            val rejection = qualityRejection(summary, computationalQuality, safetyQuality)
-            ComputationalRawResult(
-                bitmap = rendered,
+            reconstructAndJudge(capture, protectedSafety)
+        } catch (t: Throwable) {
+            val safetyQuality = runCatching {
+                val safetyBitmap = storage.decodeOriented(protectedSafety, QUALITY_LONG_SIDE)
+                try { PhotoQuality.analyze(safetyBitmap) } finally { if (!safetyBitmap.isRecycled) safetyBitmap.recycle() }
+            }.getOrNull()
+            ComputationalRawSafetyOnly(
                 safetyJpeg = protectedSafety,
                 capture = capture,
-                reconstruction = summary,
-                ispPlan = ispPlan,
-                computationalQuality = computationalQuality,
-                safetyQuality = safetyQuality,
-                acceptedOverSafetyJpeg = rejection == null,
-                rejectionReason = rejection
+                reason = t.message ?: t::class.java.simpleName,
+                safetyQuality = safetyQuality
             )
-        } catch (t: Throwable) {
-            capture.cleanup()
-            // protectedSafety deliberately survives if the camera already produced a JPEG.
-            throw t
         }
+    }
+
+    private suspend fun reconstructAndJudge(
+        capture: RawJpegBurstCapture,
+        protectedSafety: File
+    ): ComputationalRawResult {
+        val cameraId = capture.frames.firstNotNullOfOrNull { it.observed?.cameraId } ?: camera.activeCameraId()
+            ?: error("Active Camera2 id unavailable after RAW capture")
+        val twin = (engine.currentDeviceTwin() ?: engine.deviceTwin().getOrThrow()).camera(cameraId)
+            ?: error("DeviceTwin does not contain active camera $cameraId")
+        require(twin.cfaPattern in SUPPORTED_CFA) { "Unsupported RAW CFA ${twin.cfaPattern}" }
+        require(twin.whiteLevel != null && twin.whiteLevel > 0) { "Sensor white level unavailable" }
+
+        val ispPlan = withContext(Dispatchers.Default) { SierraRawIspPlanner.plan(capture, twin) }
+        val sink = SierraIspBitmapSink(ispPlan)
+        val summary = withContext(Dispatchers.Default) { reconstructor.reconstruct(capture, twin, sink) }
+        var rendered = sink.bitmap()
+        val rotation = SierraRawContainer.open(capture.frames[summary.referenceFrameIndex].rawFile).use { it.header.rotationDegrees }
+        if (rotation != 0) {
+            val rotated = Bitmap.createBitmap(
+                rendered,
+                0,
+                0,
+                rendered.width,
+                rendered.height,
+                Matrix().apply { postRotate(rotation.toFloat()) },
+                true
+            )
+            if (rotated !== rendered && !rendered.isRecycled) rendered.recycle()
+            rendered = rotated
+        }
+
+        val comparisonJpeg = capture.frames[summary.referenceFrameIndex].jpegFile
+        val computationalQuality = analyzeBounded(rendered)
+        val safetyBitmap = storage.decodeOriented(comparisonJpeg, QUALITY_LONG_SIDE)
+        val safetyQuality = try { PhotoQuality.analyze(safetyBitmap) } finally { if (!safetyBitmap.isRecycled) safetyBitmap.recycle() }
+        val rejection = qualityRejection(summary, computationalQuality, safetyQuality)
+
+        return ComputationalRawResult(
+            bitmap = rendered,
+            safetyJpeg = protectedSafety,
+            capture = capture,
+            reconstruction = summary,
+            ispPlan = ispPlan,
+            computationalQuality = computationalQuality,
+            safetyQuality = safetyQuality,
+            acceptedOverSafetyJpeg = rejection == null,
+            rejectionReason = rejection
+        )
     }
 
     private fun analyzeBounded(bitmap: Bitmap): TechnicalQuality {
