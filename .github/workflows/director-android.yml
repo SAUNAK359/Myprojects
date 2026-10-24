@@ -5,6 +5,7 @@ on:
     branches:
       - director-gemini-v1
       - director-sierra-v3
+      - director-sierra-v4-camera-os
     paths:
       - 'Director/**'
       - '.github/workflows/director-android.yml'
@@ -68,6 +69,12 @@ jobs:
           ./gradlew --version
           test -d "$ANDROID_SDK_ROOT/platforms/android-36"
           test -x "$ANDROID_SDK_ROOT/build-tools/36.0.0/aapt2"
+
+      - name: Compile Kotlin first
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew --no-daemon --stacktrace --max-workers=3 compileDebugKotlin
 
       - name: Unit tests, lint and APK build
         shell: bash
