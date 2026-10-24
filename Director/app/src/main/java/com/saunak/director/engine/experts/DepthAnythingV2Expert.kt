@@ -5,6 +5,10 @@ import com.saunak.director.engine.SierraEngine
 import com.saunak.director.engine.device.ComputeBackend
 import com.saunak.director.engine.models.InstalledModelArtifact
 import com.saunak.director.engine.models.SierraShippingManifests
+import com.saunak.director.engine.runtime.InferenceRequest
+import com.saunak.director.engine.runtime.ProfileKey
+import com.saunak.director.engine.runtime.RuntimePressure
+import com.saunak.director.engine.runtime.WorkPriority
 import java.util.Arrays
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -23,14 +27,10 @@ class DepthAnythingV2Expert(
 ) {
     init { require(longSide >= PATCH && longSide % PATCH == 0) }
 
-    @Volatile private var selectedBackend: ComputeBackend? = null
-
     data class RelativeDepthMap(
         val width: Int,
         val height: Int,
-        /** Robustly normalized inverse depth in 0..1; 1 is closer. */
         val inverseDepth: FloatArray,
-        /** Fraction of finite raw predictions and usable dynamic range, 0..1. */
         val confidence: Double,
         val sourceWidth: Int,
         val sourceHeight: Int,
@@ -46,6 +46,17 @@ class DepthAnythingV2Expert(
         }
     }
 
+    fun isProvisioned(): Boolean =
+        engine.modelArtifacts.findVerified(SierraShippingManifests.depthAnythingV2Small) != null
+
+    suspend fun profileIfProvisioned(): Result<Unit> = withContext(Dispatchers.Default) {
+        runCatching {
+            val artifact = engine.modelArtifacts.findVerified(SierraShippingManifests.depthAnythingV2Small)
+                ?: error("Depth Anything V2 Small pack is not provisioned")
+            ensureMeasuredProfiles(artifact)
+        }
+    }
+
     suspend fun estimate(source: Bitmap): Result<RelativeDepthMap> = withContext(Dispatchers.Default) {
         runCatching {
             require(!source.isRecycled && source.width > 0 && source.height > 0)
@@ -53,7 +64,7 @@ class DepthAnythingV2Expert(
                 ?: error("Depth Anything V2 Small pack is not provisioned")
             val (width, height) = chooseInputSize(source.width, source.height, longSide)
             val tensor = preprocess(source, width, height)
-            val raw = runWithCertifiedFallback(artifact, tensor, width, height)
+            val raw = runWithMeasuredRouting(artifact, tensor, width, height)
             require(raw.size == width * height) {
                 "Depth output has ${raw.size} values; expected ${width * height} for ${width}x$height"
             }
@@ -87,27 +98,68 @@ class DepthAnythingV2Expert(
         }
     }
 
-    private fun runWithCertifiedFallback(
+    private fun runWithMeasuredRouting(
         artifact: InstalledModelArtifact,
         input: FloatArray,
         width: Int,
         height: Int
     ): FloatArray {
         val shape = longArrayOf(1, 3, height.toLong(), width.toLong())
-        selectedBackend?.let { backend ->
-            val warm = runCatching { run(artifact, backend, input, shape) }
-            if (warm.isSuccess) return warm.getOrThrow()
-            selectedBackend = null
+        val signature = inputSignature(width, height)
+        val candidates = engine.measuredProfiles(artifact.manifest.id, signature)
+        val decision = engine.hypervisor.choose(
+            request = InferenceRequest(
+                requestId = "depth-${System.nanoTime()}",
+                modelId = artifact.manifest.id,
+                inputSignature = signature,
+                valueOfInformation = 0.78,
+                priority = WorkPriority.PERCEPTION,
+                deadlineMs = DEPTH_DEADLINE_MS,
+                minimumGraphCoverage = artifact.manifest.minimumGraphCoverage,
+                maximumTransferBoundaries = artifact.manifest.maxTransferBoundaries
+            ),
+            candidates = candidates,
+            pressure = RuntimePressure()
+        )
+
+        decision?.let {
+            val attempt = runCatching { run(artifact, it.profile.backend, input, shape) }
+            if (attempt.isSuccess) return attempt.getOrThrow()
+            engine.runtimeProfiles.invalidate(
+                ProfileKey(engine.profileFingerprint(), artifact.manifest.id, signature, it.profile.backend)
+            )
             engine.onnx.unload(artifact.manifest.id)
         }
+
         for (backend in BACKEND_PROBE_ORDER) {
             val attempt = runCatching { run(artifact, backend, input, shape) }
-            if (attempt.isSuccess) {
-                selectedBackend = backend
-                return attempt.getOrThrow()
-            }
+            if (attempt.isSuccess) return attempt.getOrThrow()
         }
         error("Depth Anything V2 Small has no usable Sierra ONNX backend on this device")
+    }
+
+    private suspend fun ensureMeasuredProfiles(artifact: InstalledModelArtifact) {
+        val width = longSide
+        val height = longSide
+        val signature = inputSignature(width, height)
+        val existing = engine.measuredProfiles(artifact.manifest.id, signature).map { it.backend }.toSet()
+        val input = FloatArray(width * height * 3)
+        val shape = longArrayOf(1, 3, height.toLong(), width.toLong())
+        for (backend in BACKEND_PROBE_ORDER) {
+            if (backend in existing || backend !in artifact.manifest.supportedBackends) continue
+            runCatching {
+                engine.backendProfiler.profile(
+                    deviceFingerprint = engine.profileFingerprint(),
+                    modelId = artifact.manifest.id,
+                    inputSignature = signature,
+                    backend = backend,
+                    graphCoverage = 1.0,
+                    transferBoundaries = 0,
+                    warmups = 1,
+                    repeats = 3
+                ) { run(artifact, backend, input, shape) }
+            }
+        }
     }
 
     private fun run(
@@ -131,13 +183,9 @@ class DepthAnythingV2Expert(
         sourceWidth: Int,
         sourceHeight: Int
     ): RelativeDepthMap {
-        // Keep percentile calculation primitive-only. FloatArray.filter()/sorted() boxes hundreds of
-        // thousands of values on a 518px depth map and creates avoidable camera-process GC pressure.
         val finite = FloatArray(raw.size)
         var finiteCount = 0
-        for (value in raw) {
-            if (value.isFinite()) finite[finiteCount++] = value
-        }
+        for (value in raw) if (value.isFinite()) finite[finiteCount++] = value
         require(finiteCount > 0) { "Depth model produced no finite values" }
         Arrays.sort(finite, 0, finiteCount)
 
@@ -149,8 +197,8 @@ class DepthAnythingV2Expert(
             val value = raw[index]
             if (!value.isFinite()) 0.5f else ((value - lo) / range).coerceIn(0f, 1f)
         }
-        val dynamicConfidence = ((hi - lo).toDouble() / (max(kotlin.math.abs(hi.toDouble()), kotlin.math.abs(lo.toDouble())) + 1e-6))
-            .coerceIn(0.0, 1.0)
+        val dynamicConfidence = ((hi - lo).toDouble() /
+            (max(kotlin.math.abs(hi.toDouble()), kotlin.math.abs(lo.toDouble())) + 1e-6)).coerceIn(0.0, 1.0)
         return RelativeDepthMap(
             width = width,
             height = height,
@@ -167,10 +215,13 @@ class DepthAnythingV2Expert(
         return sorted[index]
     }
 
+    private fun inputSignature(width: Int, height: Int): String = "rgb-f32-nchw:1x3x${height}x$width"
+
     companion object {
         private const val PATCH = 14
         private const val INPUT = "pixel_values"
         private const val OUTPUT = "predicted_depth"
+        private const val DEPTH_DEADLINE_MS = 260.0
         private const val MEAN_R = 0.485f
         private const val MEAN_G = 0.456f
         private const val MEAN_B = 0.406f
