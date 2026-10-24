@@ -237,6 +237,7 @@ workflows:
               only:
                 - director-gemini-v1
                 - director-sierra-v3
+                - director-sierra-v4-camera-os
       - director-compile-no-ui:
           filters: *director_filter
       - director-compile-no-runtime:
