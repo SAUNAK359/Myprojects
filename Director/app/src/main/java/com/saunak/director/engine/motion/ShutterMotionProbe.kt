@@ -20,27 +20,26 @@ class ShutterMotionProbe(
     suspend fun measure(camera: CameraEngine, samples: Int = DEFAULT_SAMPLES): MotionSnapshot {
         val count = samples.coerceIn(2, MAX_SAMPLES)
         val comparable = timestampComparable(camera)
-        var measured = 0
         repeat(count) {
             val bitmap = camera.captureAnalysisFrame(FRAME_TIMEOUT_MS) ?: return@repeat
             try {
                 val telemetry = camera.sensorTelemetry()
                 val callbackNs = SystemClock.elapsedRealtimeNanos()
-                val sensorNs = telemetry?.sensorTimestampNs ?: callbackNs
-                val luma = bitmap.toMotionLuma(sensorNs, callbackNs)
+                // If the HAL does not declare REALTIME timestamps, do not compare its sensor clock
+                // against IMU time. Use callback elapsed realtime for temporal visual tracking instead.
+                val frameTimeNs = if (comparable) telemetry?.sensorTimestampNs ?: callbackNs else callbackNs
+                val luma = bitmap.toMotionLuma(frameTimeNs, callbackNs)
                 fusion.onFrame(
                     frame = luma,
                     timestampComparableToImu = comparable && telemetry != null,
                     exposureTimeNs = telemetry?.exposureTimeNs
                 )
-                measured++
             } finally {
                 if (!bitmap.isRecycled) bitmap.recycle()
             }
         }
-        // No categorical fallback: if evidence is absent, latest() increases uncertainty toward the
-        // upper risk bound and the capture planner behaves conservatively from that uncertainty.
-        return fusion.latest(System.nanoTime())
+        // No categorical fallback: absent evidence raises uncertainty toward the upper risk bound.
+        return fusion.latest(SystemClock.elapsedRealtimeNanos())
     }
 
     private fun timestampComparable(camera: CameraEngine): Boolean {
@@ -67,7 +66,6 @@ class ShutterMotionProbe(
                 val r = (p shr 16) and 0xff
                 val g = (p shr 8) and 0xff
                 val b = p and 0xff
-                // Integer BT.601 approximation; sufficient for motion correspondence.
                 luma[i] = ((77 * r + 150 * g + 29 * b) shr 8).toByte()
             }
             return LumaMotionFrame(
