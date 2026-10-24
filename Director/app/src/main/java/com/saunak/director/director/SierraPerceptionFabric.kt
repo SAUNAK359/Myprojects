@@ -7,13 +7,19 @@ import com.saunak.director.engine.belief.SceneBeliefGraph
 import com.saunak.director.engine.experts.DepthAnythingV2Expert
 import com.saunak.director.engine.experts.DepthSceneInterpreter
 import com.saunak.director.engine.experts.FaceDetection
+import com.saunak.director.engine.experts.SubjectDepthEvidence
 import com.saunak.director.engine.experts.YuNetFaceExpert
+import com.saunak.director.engine.subject.NormalizedRect
+import com.saunak.director.engine.subject.SubjectDepthState
+import com.saunak.director.engine.subject.SubjectObservation
+import com.saunak.director.engine.subject.SubjectTrack
 import com.saunak.director.processing.TechnicalQuality
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Shutter-time perception coordinator. Cheap human semantics run first; expensive depth is invoked
  * only when its expected photographic value is high enough and a verified model already exists.
+ * Every human observation feeds the application-scoped SubjectTracker before capture planning.
  */
 class SierraPerceptionFabric(
     private val engine: SierraEngine = SierraEngine.get(),
@@ -23,6 +29,7 @@ class SierraPerceptionFabric(
     data class Snapshot(
         val signals: SierraSceneSignals,
         val faces: List<FaceDetection>?,
+        val subject: SubjectTrack?,
         val depthUsed: Boolean,
         val capturedAtNs: Long
     )
@@ -32,7 +39,8 @@ class SierraPerceptionFabric(
         quality: TechnicalQuality,
         lensFacing: Int,
         zoomRatio: Float,
-        thermalPressure: Double
+        thermalPressure: Double,
+        cameraId: String? = null
     ): Snapshot {
         val now = System.nanoTime()
         val faces = withTimeoutOrNull(FACE_BUDGET_MS) { faceExpert.detect(frame).getOrNull() }
@@ -51,7 +59,24 @@ class SierraPerceptionFabric(
             SierraSceneAnalyzer.analyze(frame, quality, lensFacing, faces, depthEvidence)
         } else preliminary
 
-        publishBeliefs(signals, faces, quality, now)
+        val primaryFace = faces?.maxByOrNull { it.area * it.score }
+        val subject = if (primaryFace != null) {
+            engine.subjects.update(
+                SubjectObservation(
+                    observedAtNs = now,
+                    cameraId = cameraId,
+                    bounds = subjectBoundsFromFace(primaryFace, frame.width, frame.height),
+                    confidence = primaryFace.score.toDouble(),
+                    faceConfidence = primaryFace.score.toDouble(),
+                    depth = depthEvidence?.toSubjectDepth(),
+                    source = "yunet_temporal_subject"
+                )
+            )
+        } else {
+            engine.subjects.miss(now)
+        }
+
+        publishBeliefs(signals, faces, subject, quality, now)
         depthEvidence?.let {
             engine.beliefs.put(
                 SceneBeliefGraph.DEPTH,
@@ -67,12 +92,13 @@ class SierraPerceptionFabric(
         }
         engine.beliefs.prune(now)
 
-        return Snapshot(signals, faces, depthEvidence != null, now)
+        return Snapshot(signals, faces, subject, depthEvidence != null, now)
     }
 
     private fun publishBeliefs(
         signals: SierraSceneSignals,
         faces: List<FaceDetection>?,
+        subject: SubjectTrack?,
         quality: TechnicalQuality,
         now: Long
     ) {
@@ -90,11 +116,50 @@ class SierraPerceptionFabric(
                 Belief(face, face.score.toDouble(), 1.0 - face.score, now, "yunet", HUMAN_HALF_LIFE_NS)
             )
         }
+        subject?.let { track ->
+            engine.beliefs.put(
+                SceneBeliefGraph.PRIMARY_SUBJECT,
+                Belief(track, track.confidence, track.uncertainty, now, track.source, SUBJECT_HALF_LIFE_NS)
+            )
+            engine.beliefs.put(
+                SceneBeliefGraph.SUBJECT_TRAJECTORY,
+                Belief(track.kinematics, track.confidence, track.uncertainty, now, "subject_tracker", TRAJECTORY_HALF_LIFE_NS)
+            )
+            track.depth?.let { depth ->
+                engine.beliefs.put(
+                    SceneBeliefGraph.SUBJECT_DEPTH,
+                    Belief(depth, depth.confidence, 1.0 - depth.confidence, now, depth.source, DEPTH_HALF_LIFE_NS)
+                )
+            }
+        }
         engine.beliefs.put(
             SceneBeliefGraph.HIGHLIGHT_RISK,
             Belief(quality.brightClipFraction, 0.9, 0.1, now, "technical_quality", QUALITY_HALF_LIFE_NS)
         )
     }
+
+    private fun subjectBoundsFromFace(face: FaceDetection, frameWidth: Int, frameHeight: Int): NormalizedRect {
+        val cx = face.x + face.width * 0.5f
+        val left = cx - face.width * 1.20f
+        val right = cx + face.width * 1.20f
+        val top = face.y - face.height * 0.30f
+        val bottom = face.y + face.height * 4.10f
+        return NormalizedRect.fromPixels(
+            x = left.toDouble(),
+            y = top.toDouble(),
+            width = (right - left).toDouble().coerceAtLeast(1.0),
+            height = (bottom - top).toDouble().coerceAtLeast(1.0),
+            frameWidth = frameWidth,
+            frameHeight = frameHeight
+        )
+    }
+
+    private fun SubjectDepthEvidence.toSubjectDepth() = SubjectDepthState(
+        relativeInverseDepth = subjectInverseDepth,
+        foregroundSeparation = separation,
+        confidence = confidence,
+        source = source
+    )
 
     private fun depthValueOfInformation(
         signals: SierraSceneSignals,
@@ -119,6 +184,8 @@ class SierraPerceptionFabric(
         private const val DEPTH_VOI_THRESHOLD = 0.56
         private const val SCENE_HALF_LIFE_NS = 650_000_000L
         private const val HUMAN_HALF_LIFE_NS = 350_000_000L
+        private const val SUBJECT_HALF_LIFE_NS = 520_000_000L
+        private const val TRAJECTORY_HALF_LIFE_NS = 240_000_000L
         private const val DEPTH_HALF_LIFE_NS = 500_000_000L
         private const val QUALITY_HALF_LIFE_NS = 250_000_000L
     }
