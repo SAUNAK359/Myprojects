@@ -28,7 +28,7 @@ object PrifBayesianFusion {
             it.raw.width == reference.width && it.raw.height == reference.height && it.raw.pattern == reference.pattern
         })
 
-        val normalized = observations.map(RawImageFormation::normalize)
+        val normalized = observations.map { observation -> RawImageFormation.normalize(observation.raw) }
         val referenceEnergy = observations.first().exposureTimeNs.toDouble() * observations.first().sensitivityIso.toDouble()
         val n = reference.values.size
         val mean = FloatArray(n)
