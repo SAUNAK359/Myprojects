@@ -27,6 +27,11 @@ data class NormalizedRect(
     val area: Double get() = width * height
     val center: NormalizedPoint get() = NormalizedPoint((left + right) * 0.5, (top + bottom) * 0.5)
 
+    fun contains(x: Double, y: Double): Boolean =
+        x.isFinite() && y.isFinite() && x >= left && x <= right && y >= top && y <= bottom
+
+    fun contains(point: NormalizedPoint): Boolean = contains(point.x, point.y)
+
     fun clamped(): NormalizedRect {
         val l = left.coerceIn(0.0, 1.0)
         val t = top.coerceIn(0.0, 1.0)
