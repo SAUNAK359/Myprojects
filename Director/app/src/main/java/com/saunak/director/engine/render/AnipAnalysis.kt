@@ -5,7 +5,6 @@ import com.saunak.director.engine.subject.NormalizedRect
 import com.saunak.director.processing.Look
 import kotlin.math.abs
 import kotlin.math.exp
-import kotlin.math.ln
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
@@ -61,7 +60,6 @@ object AnipImageAnalyzer {
                 edgeSum += grad
                 val localMean = (luma[i - 1] + luma[i + 1] + luma[i - w] + luma[i + w]) * 0.25f
                 val residual = abs(luma[i] - localMean).toDouble()
-                // Only count high-frequency residuals in smooth-ish neighborhoods as noise evidence.
                 if (grad < 0.08) noiseSum += residual
             }
             val total = pixels.size.toDouble()
@@ -122,6 +120,7 @@ object AnipRecipePlanner {
         val backgroundSuppression = if (portrait) (-0.10 - subjectUnder * 0.45).coerceIn(-0.36, -0.06) else 0.0
 
         val baseSat = when {
+            request.look == Look.MONOCHROME -> 0.0
             food -> 1.12
             landscape -> 1.10
             night -> 1.08
@@ -129,6 +128,7 @@ object AnipRecipePlanner {
             else -> 1.06
         }
         val warmth = when {
+            request.look == Look.MONOCHROME -> 0.0
             request.look == Look.COOL || request.look == Look.CINEMATIC_COOL -> -0.10
             request.look == Look.WARM || request.look == Look.GOLDEN_HOUR || request.look == Look.CINEMATIC_WARM -> 0.11
             portrait -> 0.035
@@ -141,14 +141,14 @@ object AnipRecipePlanner {
             shadowRecovery = (0.28 + shadowNeed * 0.60).coerceIn(0.18, 0.92),
             highlightCompression = (0.30 + highlightNeed * 0.62 + dynamicRange * 0.15).coerceIn(0.22, 0.96),
             localContrast = (0.28 + detailNeed * 0.30 + if (landscape || cinematic) 0.12 else 0.0).coerceIn(0.18, 0.78),
-            saturation = (1.0 + (baseSat - 1.0) * lookBoost).coerceIn(0.88, 1.24),
+            saturation = if (request.look == Look.MONOCHROME) 0.0 else (1.0 + (baseSat - 1.0) * lookBoost).coerceIn(0.88, 1.24),
             warmth = warmth.coerceIn(-0.18, 0.18),
             coolShadowBias = if (cinematic || night) 0.08 else 0.02,
             subjectRelightEv = subjectRelight,
             backgroundSuppressionEv = backgroundSuppression,
             dehaze = (if (landscape) 0.20 else 0.08 + dynamicRange * 0.07).coerceIn(0.04, 0.30),
             vignette = (if (portrait || cinematic) 0.10 else 0.035).coerceIn(0.0, 0.22),
-            grain = if (cinematic) 0.035 else 0.0,
+            grain = if (cinematic || request.look == Look.MONOCHROME) 0.035 else 0.0,
             routing = RestorationRouting(
                 denoise = (0.18 + noiseNeed * 0.70 + if (night) 0.12 else 0.0).coerceIn(0.12, 0.90),
                 microDeblur = ((detailNeed * 0.48) * (1.0 - motionPenalty * 0.45) * integrity).coerceIn(0.05, 0.55),
@@ -184,7 +184,7 @@ object AnipRenderFieldBuilder {
             subjectWeight[i] = sw.toFloat()
             exposure[i] = (recipe.globalExposureEv + sw * recipe.subjectRelightEv + (1.0 - sw) * recipe.backgroundSuppressionEv).toFloat()
             contrast[i] = (recipe.localContrast * (0.72 + 0.28 * (1.0 - sw))).toFloat()
-            saturation[i] = (1.0 + (recipe.saturation - 1.0) * (0.88 + 0.12 * sw)).toFloat()
+            saturation[i] = if (recipe.saturation < 0.20) recipe.saturation.toFloat() else (1.0 + (recipe.saturation - 1.0) * (0.88 + 0.12 * sw)).toFloat()
             warmth[i] = (recipe.warmth + sw * 0.018 - (1.0 - sw) * recipe.coolShadowBias * 0.32).toFloat()
             denoise[i] = (recipe.routing.denoise * (0.86 + 0.18 * (1.0 - sw))).coerceIn(0.0, 1.0).toFloat()
             detail[i] = (recipe.routing.detailRecovery * (0.78 + 0.30 * sw)).coerceIn(0.0, 1.0).toFloat()
