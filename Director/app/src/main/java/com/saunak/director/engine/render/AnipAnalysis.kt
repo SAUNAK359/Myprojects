@@ -169,27 +169,50 @@ object AnipRecipePlanner {
 }
 
 object AnipRenderFieldBuilder {
-    fun build(recipe: RenderRecipe, subject: NormalizedRect?, width: Int = 48, height: Int = 48): RenderField {
+    fun build(recipe: RenderRecipe, subject: NormalizedRect?, width: Int = 48, height: Int = 48): RenderField =
+        build(recipe, subject?.let { AnipSubjectContext(it) }, width, height)
+
+    fun build(recipe: RenderRecipe, subject: AnipSubjectContext?, width: Int = 48, height: Int = 48): RenderField {
         val size = width * height
         val exposure = FloatArray(size); val contrast = FloatArray(size); val saturation = FloatArray(size)
         val warmth = FloatArray(size); val denoise = FloatArray(size); val detail = FloatArray(size)
         val dehaze = FloatArray(size); val subjectWeight = FloatArray(size)
-        val cx = subject?.center?.x ?: 0.5; val cy = subject?.center?.y ?: 0.5
-        val sx = max(0.10, (subject?.width ?: 0.34) * 0.72); val sy = max(0.14, (subject?.height ?: 0.52) * 0.70)
+        val bounds = subject?.bounds
+        val cx = bounds?.center?.x ?: 0.5; val cy = bounds?.center?.y ?: 0.5
+        val sx = max(0.10, (bounds?.width ?: 0.34) * 0.72); val sy = max(0.14, (bounds?.height ?: 0.52) * 0.70)
+        val depthBoost = (1.0 + max(0.0, subject?.depthSeparation ?: 0.0) * 0.30).coerceIn(1.0, 1.30)
         for (y in 0 until height) for (x in 0 until width) {
             val nx = (x + 0.5) / width; val ny = (y + 0.5) / height
             val dx = (nx - cx) / sx; val dy = (ny - cy) / sy
-            val sw = if (subject == null) 0.0 else exp(-0.5 * (dx * dx + dy * dy)).coerceIn(0.0, 1.0)
+            val gaussian = if (subject == null) 0.0 else exp(-0.5 * (dx * dx + dy * dy)).coerceIn(0.0, 1.0)
+            val maskValue = subject?.let { sampleSubjectMask(it, nx, ny) }
+            val semantic = if (maskValue == null) gaussian else {
+                val mc = subject.maskConfidence
+                (maskValue * mc + gaussian * (1.0 - mc)).coerceIn(0.0, 1.0)
+            }
+            val sw = (semantic * (0.55 + 0.45 * (subject?.trackConfidence ?: 1.0))).coerceIn(0.0, 1.0)
             val i = y * width + x
             subjectWeight[i] = sw.toFloat()
-            exposure[i] = (recipe.globalExposureEv + sw * recipe.subjectRelightEv + (1.0 - sw) * recipe.backgroundSuppressionEv).toFloat()
-            contrast[i] = (recipe.localContrast * (0.72 + 0.28 * (1.0 - sw))).toFloat()
-            saturation[i] = if (recipe.saturation < 0.20) recipe.saturation.toFloat() else (1.0 + (recipe.saturation - 1.0) * (0.88 + 0.12 * sw)).toFloat()
-            warmth[i] = (recipe.warmth + sw * 0.018 - (1.0 - sw) * recipe.coolShadowBias * 0.32).toFloat()
-            denoise[i] = (recipe.routing.denoise * (0.86 + 0.18 * (1.0 - sw))).coerceIn(0.0, 1.0).toFloat()
-            detail[i] = (recipe.routing.detailRecovery * (0.78 + 0.30 * sw)).coerceIn(0.0, 1.0).toFloat()
-            dehaze[i] = (recipe.dehaze * (0.72 + 0.28 * (1.0 - sw))).toFloat()
+            exposure[i] = (recipe.globalExposureEv + sw * recipe.subjectRelightEv * depthBoost + (1.0 - sw) * recipe.backgroundSuppressionEv).toFloat()
+            contrast[i] = (recipe.localContrast * (0.70 + 0.30 * (1.0 - sw) + sw * 0.08 * depthBoost)).coerceIn(0.0, 1.0).toFloat()
+            saturation[i] = if (recipe.saturation < 0.20) recipe.saturation.toFloat() else (1.0 + (recipe.saturation - 1.0) * (0.87 + 0.13 * sw)).toFloat()
+            warmth[i] = (recipe.warmth + sw * 0.020 - (1.0 - sw) * recipe.coolShadowBias * 0.34).toFloat()
+            denoise[i] = (recipe.routing.denoise * (0.90 + 0.14 * (1.0 - sw))).coerceIn(0.0, 1.0).toFloat()
+            detail[i] = (recipe.routing.detailRecovery * (0.76 + 0.34 * sw * depthBoost)).coerceIn(0.0, 1.0).toFloat()
+            dehaze[i] = (recipe.dehaze * (0.70 + 0.30 * (1.0 - sw))).toFloat()
         }
         return RenderField(width, height, exposure, contrast, saturation, warmth, denoise, detail, dehaze, subjectWeight)
+    }
+
+    private fun sampleSubjectMask(subject: AnipSubjectContext, nx: Double, ny: Double): Double? {
+        val mask = subject.mask ?: return null
+        if (subject.maskWidth <= 0 || subject.maskHeight <= 0) return null
+        val fx = (nx.coerceIn(0.0, 1.0) * (subject.maskWidth - 1)).coerceIn(0.0, (subject.maskWidth - 1).toDouble())
+        val fy = (ny.coerceIn(0.0, 1.0) * (subject.maskHeight - 1)).coerceIn(0.0, (subject.maskHeight - 1).toDouble())
+        val x0 = fx.toInt(); val y0 = fy.toInt(); val x1 = min(subject.maskWidth - 1, x0 + 1); val y1 = min(subject.maskHeight - 1, y0 + 1)
+        val tx = fx - x0; val ty = fy - y0
+        val p00 = mask[y0 * subject.maskWidth + x0].toDouble(); val p10 = mask[y0 * subject.maskWidth + x1].toDouble()
+        val p01 = mask[y1 * subject.maskWidth + x0].toDouble(); val p11 = mask[y1 * subject.maskWidth + x1].toDouble()
+        return ((p00 * (1.0 - tx) + p10 * tx) * (1.0 - ty) + (p01 * (1.0 - tx) + p11 * tx) * ty).coerceIn(0.0, 1.0)
     }
 }
