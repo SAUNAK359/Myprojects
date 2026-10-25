@@ -57,7 +57,6 @@ data class RestorationRouting(
     }
 }
 
-/** All values are continuous controls; there are no scene-specific slider rules in the renderer. */
 data class RenderRecipe(
     val style: AnipStyle,
     val globalExposureEv: Double,
@@ -80,7 +79,7 @@ data class RenderRecipe(
         require(shadowRecovery in 0.0..1.0)
         require(highlightCompression in 0.0..1.0)
         require(localContrast in 0.0..1.0)
-        require(saturation in 0.65..1.45)
+        require(saturation in 0.0..1.45)
         require(warmth in -0.25..0.25)
         require(coolShadowBias in 0.0..0.30)
         require(subjectRelightEv in 0.0..0.85)
@@ -93,13 +92,14 @@ data class RenderRecipe(
 
     fun scaled(factor: Double, styleOverride: AnipStyle = style): RenderRecipe {
         val f = factor.coerceIn(0.70, 1.45)
+        val scaledSaturation = if (saturation < 0.20) saturation else 1.0 + (saturation - 1.0) * f
         return copy(
             style = styleOverride,
             globalExposureEv = (globalExposureEv * f).coerceIn(-1.0, 1.0),
             shadowRecovery = (shadowRecovery * f).coerceIn(0.0, 1.0),
             highlightCompression = (highlightCompression * f).coerceIn(0.0, 1.0),
             localContrast = (localContrast * f).coerceIn(0.0, 1.0),
-            saturation = (1.0 + (saturation - 1.0) * f).coerceIn(0.65, 1.45),
+            saturation = scaledSaturation.coerceIn(0.0, 1.45),
             warmth = (warmth * f).coerceIn(-0.25, 0.25),
             coolShadowBias = (coolShadowBias * f).coerceIn(0.0, 0.30),
             subjectRelightEv = (subjectRelightEv * f).coerceIn(0.0, 0.85),
@@ -119,7 +119,6 @@ data class RenderRecipe(
     }
 }
 
-/** Low-resolution spatial controls predicted once, then bilinearly sampled by the full-res renderer. */
 data class RenderField(
     val width: Int,
     val height: Int,
@@ -136,7 +135,7 @@ data class RenderField(
         require(width > 1 && height > 1)
         val size = width * height
         require(listOf(exposureEv, contrast, saturation, warmth, denoise, detail, dehaze, subjectWeight)
-            .all { it.size == size && it.all(Float::isFinite) })
+            .all { values -> values.size == size && values.all { it.isFinite() } })
     }
 }
 
