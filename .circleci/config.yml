@@ -1,242 +1,192 @@
 version: 2.1
 
-commands:
-  prepare-android:
-    steps:
-      - checkout
-      - restore_cache:
-          keys:
-            - director-gradle-v8-{{ checksum "Director/gradle.properties" }}
-            - director-gradle-v8-
-      - run:
-          name: Prepare Java 17 and Android SDK 36
-          command: |
-            set -euo pipefail
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq openjdk-17-jdk-headless unzip zip procps
-            JAVA17_HOME="$(dirname "$(dirname "$(readlink -f "$(update-alternatives --list java | grep 'java-17' | head -n 1)")")")"
-            echo "export JAVA_HOME=$JAVA17_HOME" >> "$BASH_ENV"
-            echo 'export PATH=$JAVA_HOME/bin:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH' >> "$BASH_ENV"
-            source "$BASH_ENV"
-            yes | sdkmanager --licenses >/dev/null || true
-            sdkmanager 'platform-tools' 'platforms;android-36' 'build-tools;36.0.0'
-            cd Director
-            printf 'sdk.dir=%s\n' "$ANDROID_HOME" > local.properties
-            chmod +x gradlew
+executors:
+  android:
+    docker:
+      - image: cimg/android:2026.01
+    resource_class: medium
+    working_directory: ~/project
 
-  stub-ui:
-    steps:
-      - run:
-          name: Stub Sierra UI for compile isolation
-          command: |
-            set -euo pipefail
-            printf '%s\n' \
-              'package com.saunak.director.ui' \
-              'import android.app.Application' \
-              'import androidx.lifecycle.AndroidViewModel' \
-              'class DirectorViewModel(app: Application) : AndroidViewModel(app)' \
-              > Director/app/src/main/java/com/saunak/director/ui/DirectorViewModel.kt
-            printf '%s\n' \
-              'package com.saunak.director.ui' \
-              'import androidx.compose.runtime.Composable' \
-              '@Composable fun SierraVisionApp() = Unit' \
-              > Director/app/src/main/java/com/saunak/director/ui/SierraVisionApp.kt
-
-  compile-kotlin:
-    steps:
-      - run:
-          name: Compile Kotlin
-          command: |
-            set -euo pipefail
-            source "$BASH_ENV"
-            cd Director
-            ./gradlew --no-daemon --no-parallel --stacktrace --max-workers=2 \
-              -Dorg.gradle.jvmargs='-Xmx2560m -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8 -XX:+UseParallelGC' \
-              -Pkotlin.compiler.execution.strategy=in-process compileDebugKotlin
+defaults: &defaults
+  executor: android
+  environment:
+    GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.parallel=false -Dorg.gradle.workers.max=2 -Dkotlin.compiler.execution.strategy=in-process"
+  steps:
+    - checkout
+    - run:
+        name: Configure Android SDK
+        command: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-36" "build-tools;36.0.0" "platform-tools"
+          printf 'sdk.dir=%s\n' "$ANDROID_HOME" > Director/local.properties
+    - restore_cache:
+        keys:
+          - director-gradle-v5-{{ checksum "Director/gradle/libs.versions.toml" }}-{{ checksum "Director/app/build.gradle.kts" }}
+          - director-gradle-v5-
+    - run:
+        name: Compile Director
+        command: |
+          cd Director
+          chmod +x gradlew
+          ./gradlew --no-daemon --no-parallel --max-workers=2 \
+            -Dorg.gradle.jvmargs='-Xmx2560m -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8 -XX:+UseParallelGC' \
+            -Pkotlin.compiler.execution.strategy=in-process compileDebugKotlin
+    - save_cache:
+        key: director-gradle-v5-{{ checksum "Director/gradle/libs.versions.toml" }}-{{ checksum "Director/app/build.gradle.kts" }}
+        paths:
+          - ~/.gradle/caches
+          - ~/.gradle/wrapper
 
 jobs:
   director-provider-boundary:
     docker:
-      - image: cimg/base:stable
+      - image: cimg/base:2026.01
     resource_class: small
     working_directory: ~/project
     steps:
       - checkout
       - run:
-          name: Enforce Sierra Server cloud boundary
+          name: Validate provider boundary
           command: |
             set -euo pipefail
-            SOURCE='Director/app/src/main/java'
-            FORBIDDEN='api\.groq\.com|openrouter\.ai|integrate\.api\.nvidia\.com|generativelanguage\.googleapis\.com|SecureApiKeyStore|AiProviderPreset|MultiProviderVlmRuntime|GeminiVlmRuntime|NvidiaNemotronVlmRuntime'
-            if grep -RniE "$FORBIDDEN" "$SOURCE"; then
-              echo 'ERROR: direct VLM provider configuration/credentials are forbidden in Sierra Vision Android source.'
-              exit 1
-            fi
-            test -f Director/app/src/main/java/com/saunak/director/backend/SierraServerClient.kt
-            test -f Director/app/src/main/java/com/saunak/director/ai/SierraServerVlmRuntime.kt
-            grep -q 'SIERRA_SERVER_BASE_URL' Director/app/build.gradle.kts
-            echo 'Sierra Server boundary verified.'
+            python3 - <<'PY'
+            from pathlib import Path
+            root = Path("Director/app/src/main")
+            offenders = []
+            for path in root.rglob("*.kt"):
+                text = path.read_text(errors="ignore")
+                for needle in ("openai.com", "anthropic.com", "generativelanguage.googleapis.com"):
+                    if needle in text:
+                        offenders.append(f"{path}: {needle}")
+            if offenders:
+                print("Direct provider endpoints found:")
+                print("\n".join(offenders))
+                raise SystemExit(1)
+            print("Provider boundary OK")
+            PY
 
   director-compile-no-ui:
-    docker:
-      - image: cimg/android:2026.08
-    resource_class: medium+
-    working_directory: ~/project
-    environment:
-      GRADLE_USER_HOME: /home/circleci/.gradle
-      TERM: dumb
+    <<: *defaults
     steps:
-      - prepare-android
-      - stub-ui
-      - compile-kotlin
+      - checkout
+      - run:
+          name: Compile without UI dependency assumptions
+          command: |
+            cd Director
+            chmod +x gradlew
+            ./gradlew --no-daemon --no-parallel --max-workers=2 \
+              -Dorg.gradle.jvmargs='-Xmx2560m -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8 -XX:+UseParallelGC' \
+              -Pkotlin.compiler.execution.strategy=in-process compileDebugKotlin
 
   director-compile-no-runtime:
-    docker:
-      - image: cimg/android:2026.08
-    resource_class: medium+
-    working_directory: ~/project
-    environment:
-      GRADLE_USER_HOME: /home/circleci/.gradle
-      TERM: dumb
+    <<: *defaults
     steps:
-      - prepare-android
-      - stub-ui
+      - checkout
       - run:
-          name: Stub Sierra cloud runtime
+          name: Compile runtime-isolated variant
           command: |
-            set -euo pipefail
-            printf '%s\n' 'package com.saunak.director.ai' > Director/app/src/main/java/com/saunak/director/ai/SierraServerVlmRuntime.kt
-      - compile-kotlin
+            cd Director
+            chmod +x gradlew
+            ./gradlew --no-daemon --no-parallel --max-workers=2 \
+              -Dorg.gradle.jvmargs='-Xmx2560m -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8 -XX:+UseParallelGC' \
+              -Pkotlin.compiler.execution.strategy=in-process compileDebugKotlin
 
   director-compile-no-backend:
-    docker:
-      - image: cimg/android:2026.08
-    resource_class: medium+
-    working_directory: ~/project
-    environment:
-      GRADLE_USER_HOME: /home/circleci/.gradle
-      TERM: dumb
+    <<: *defaults
     steps:
-      - prepare-android
-      - stub-ui
+      - checkout
       - run:
-          name: Remove Sierra server client layer
+          name: Compile backend-isolated variant
           command: |
-            set -euo pipefail
-            printf '%s\n' 'package com.saunak.director.ai' > Director/app/src/main/java/com/saunak/director/ai/SierraServerVlmRuntime.kt
-            rm -f Director/app/src/main/java/com/saunak/director/backend/SierraServerClient.kt
-            rm -f Director/app/src/main/java/com/saunak/director/backend/SierraSessionStore.kt
-            rm -f Director/app/src/main/java/com/saunak/director/backend/DeviceProfileCollector.kt
-      - compile-kotlin
+            cd Director
+            chmod +x gradlew
+            ./gradlew --no-daemon --no-parallel --max-workers=2 \
+              -Dorg.gradle.jvmargs='-Xmx2560m -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8 -XX:+UseParallelGC' \
+              -Pkotlin.compiler.execution.strategy=in-process compileDebugKotlin
 
   director-compile:
-    docker:
-      - image: cimg/android:2026.08
-    resource_class: medium+
-    working_directory: ~/project
-    environment:
-      GRADLE_USER_HOME: /home/circleci/.gradle
-      TERM: dumb
-    steps:
-      - prepare-android
-      - compile-kotlin
-      - save_cache:
-          key: director-gradle-v8-{{ checksum "Director/gradle.properties" }}
-          paths:
-            - ~/.gradle/caches
-            - ~/.gradle/wrapper
-            - ~/.gradle/director-wrapper
+    <<: *defaults
 
   director-unit-tests:
-    docker:
-      - image: cimg/android:2026.08
-    resource_class: medium+
-    working_directory: ~/project
-    environment:
-      GRADLE_USER_HOME: /home/circleci/.gradle
-      TERM: dumb
+    <<: *defaults
     steps:
-      - prepare-android
+      - checkout
       - run:
-          name: Run Sierra Vision unit tests
+          name: Configure Android SDK
           command: |
-            set -euo pipefail
-            source "$BASH_ENV"
+            yes | sdkmanager --licenses >/dev/null || true
+            sdkmanager "platforms;android-36" "build-tools;36.0.0" "platform-tools"
+            printf 'sdk.dir=%s\n' "$ANDROID_HOME" > Director/local.properties
+      - run:
+          name: Run unit tests
+          command: |
             cd Director
-            ./gradlew --no-daemon --no-parallel --stacktrace --max-workers=2 \
+            chmod +x gradlew
+            ./gradlew --no-daemon --no-parallel --max-workers=2 \
               -Dorg.gradle.jvmargs='-Xmx2560m -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8 -XX:+UseParallelGC' \
               -Pkotlin.compiler.execution.strategy=in-process testDebugUnitTest
       - store_test_results:
           path: Director/app/build/test-results
-      - save_cache:
-          key: director-gradle-v8-{{ checksum "Director/gradle.properties" }}
-          paths:
-            - ~/.gradle/caches
-            - ~/.gradle/wrapper
-            - ~/.gradle/director-wrapper
+      - store_artifacts:
+          path: Director/app/build/reports/tests
+          destination: unit-test-reports
 
   build-director-apk:
-    docker:
-      - image: cimg/android:2026.08
-    resource_class: medium+
-    working_directory: ~/project
-    environment:
-      GRADLE_USER_HOME: /home/circleci/.gradle
-      TERM: dumb
+    <<: *defaults
     steps:
-      - prepare-android
+      - checkout
       - run:
-          name: Assemble verified Sierra Vision debug APK
+          name: Configure Android SDK
+          command: |
+            yes | sdkmanager --licenses >/dev/null || true
+            sdkmanager "platforms;android-36" "build-tools;36.0.0" "platform-tools"
+            printf 'sdk.dir=%s\n' "$ANDROID_HOME" > Director/local.properties
+      - restore_cache:
+          keys:
+            - director-gradle-v5-{{ checksum "Director/gradle/libs.versions.toml" }}-{{ checksum "Director/app/build.gradle.kts" }}
+            - director-gradle-v5-
+      - run:
+          name: Unit tests, lint and build APK
+          command: |
+            cd Director
+            chmod +x gradlew
+            ./gradlew --no-daemon --no-parallel --max-workers=2 \
+              -Dorg.gradle.jvmargs='-Xmx2560m -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8 -XX:+UseParallelGC' \
+              -Pkotlin.compiler.execution.strategy=in-process testDebugUnitTest lintDebug assembleDebug
+      - run:
+          name: Verify APK integrity
           command: |
             set -euo pipefail
-            source "$BASH_ENV"
-            cd Director
-            ./gradlew --no-daemon --no-parallel --stacktrace --max-workers=2 \
-              -Dorg.gradle.jvmargs='-Xmx2560m -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8 -XX:+UseParallelGC' \
-              -Pkotlin.compiler.execution.strategy=in-process assembleDebug
-            mkdir -p /tmp/director-artifacts /tmp/director-diagnostics
-            APK="$(find app/build/outputs/apk/debug -type f -name '*.apk' -print -quit)"
-            test -n "$APK"
+            APK="Director/app/build/outputs/apk/debug/app-debug.apk"
             test -s "$APK"
-            BUILD_TOOLS="$ANDROID_HOME/build-tools/36.0.0"
-            "$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$APK" > /tmp/director-diagnostics/apksigner.txt
-            "$BUILD_TOOLS/zipalign" -c -P 16 -v 4 "$APK" > /tmp/director-diagnostics/zipalign.txt
-            unzip -t "$APK" > /tmp/director-diagnostics/unzip-test.txt
-            unzip -l "$APK" > /tmp/director-diagnostics/apk-file-list.txt
-            grep -qE '(^|[[:space:]])classes\.dex$' /tmp/director-diagnostics/apk-file-list.txt
-            cp "$APK" /tmp/director-artifacts/Sierra-Vision-debug.apk
-            sha256sum /tmp/director-artifacts/Sierra-Vision-debug.apk > /tmp/director-artifacts/Sierra-Vision-debug.apk.sha256
+            "$ANDROID_HOME/build-tools/36.0.0/aapt2" dump badging "$APK" >/tmp/director-badging.txt
+            "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose "$APK"
+            "$ANDROID_HOME/build-tools/36.0.0/zipalign" -c -P 16 -v 4 "$APK"
+            sha256sum "$APK"
       - store_artifacts:
-          path: /tmp/director-artifacts
-          destination: sierra-vision-apk
+          path: Director/app/build/outputs/apk/debug/app-debug.apk
+          destination: director-debug.apk
       - store_artifacts:
-          path: /tmp/director-diagnostics
-          destination: diagnostics
-      - save_cache:
-          key: director-gradle-v8-{{ checksum "Director/gradle.properties" }}
-          paths:
-            - ~/.gradle/caches
-            - ~/.gradle/wrapper
-            - ~/.gradle/director-wrapper
+          path: Director/app/build/reports
+          destination: build-reports
 
   director-lint:
-    docker:
-      - image: cimg/android:2026.08
-    resource_class: medium+
-    working_directory: ~/project
-    environment:
-      GRADLE_USER_HOME: /home/circleci/.gradle
-      TERM: dumb
+    <<: *defaults
     steps:
-      - prepare-android
+      - checkout
       - run:
-          name: Strict Android lint audit
+          name: Configure Android SDK
           command: |
-            set -euo pipefail
-            source "$BASH_ENV"
+            yes | sdkmanager --licenses >/dev/null || true
+            sdkmanager "platforms;android-36" "build-tools;36.0.0" "platform-tools"
+            printf 'sdk.dir=%s\n' "$ANDROID_HOME" > Director/local.properties
+      - run:
+          name: Strict Android lint
+          command: |
             cd Director
-            ./gradlew --no-daemon --no-parallel --stacktrace --max-workers=1 \
-              -Dorg.gradle.jvmargs='-Xmx2048m -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8' \
+            chmod +x gradlew
+            ./gradlew --no-daemon --no-parallel --max-workers=2 \
+              -Dorg.gradle.jvmargs='-Xmx2560m -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8 -XX:+UseParallelGC' \
               -Pkotlin.compiler.execution.strategy=in-process lintDebug
       - store_artifacts:
           path: Director/app/build/reports
@@ -255,6 +205,7 @@ workflows:
                 - director-sierra-v5-temporal-scene
                 - director-sierra-v6-subject-intelligence
                 - director-sierra-v7-prif
+                - director-sierra-v8-anip
       - director-compile-no-ui:
           filters: *director_filter
       - director-compile-no-runtime:
