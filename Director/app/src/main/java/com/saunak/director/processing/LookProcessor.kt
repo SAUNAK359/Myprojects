@@ -11,6 +11,7 @@ import android.graphics.Shader
 import com.saunak.director.engine.SierraEngine
 import com.saunak.director.engine.render.AnipEngine
 import com.saunak.director.engine.render.AnipRequest
+import com.saunak.director.engine.render.AnipSubjectContext
 
 enum class Look {
     NATURAL,
@@ -43,7 +44,19 @@ object LookProcessor {
         val engine = SierraEngine.getOrNull()
         if (engine != null && !source.isRecycled) {
             val rendered = runCatching {
-                val subject = engine.subjects.latest()?.bounds
+                val track = engine.subjects.latest()
+                val subject = track?.let {
+                    val mask = it.mask
+                    AnipSubjectContext(
+                        bounds = it.bounds,
+                        maskWidth = mask?.width ?: 0,
+                        maskHeight = mask?.height ?: 0,
+                        mask = mask?.probabilities,
+                        maskConfidence = mask?.confidence ?: 0.0,
+                        depthSeparation = it.depth?.foregroundSeparation ?: 0.0,
+                        trackConfidence = it.confidence
+                    )
+                }
                 val request = AnipRequest(
                     sceneLabel = "",
                     objective = "",
