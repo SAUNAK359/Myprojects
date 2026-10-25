@@ -1,9 +1,8 @@
 package com.saunak.director.engine.render
 
 import android.graphics.Bitmap
-import com.saunak.director.engine.subject.NormalizedRect
+import com.saunak.director.processing.Look
 import kotlin.math.abs
-import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
@@ -27,8 +26,7 @@ object AnipRenderer {
                 val sy = y0 + y
                 val ry = sy - readY
                 for (x in 0 until source.width) {
-                    val srcIndex = ry * source.width + x
-                    val c = src[srcIndex]
+                    val c = src[ry * source.width + x]
                     var r = srgbToLinear(((c ushr 16) and 255) / 255.0)
                     var g = srgbToLinear(((c ushr 8) and 255) / 255.0)
                     var b = srgbToLinear((c and 255) / 255.0)
@@ -38,8 +36,6 @@ object AnipRenderer {
                     val ny = (sy + 0.5) / source.height.toDouble()
                     val f = sample(field, nx, ny)
 
-                    // Edge-aware restoration routing. Flat/noisy pixels are averaged more strongly;
-                    // high-confidence edges retain or increase their original residual.
                     val residual = originalLuma - local
                     val edgeMagnitude = abs(residual)
                     val smoothWeight = (1.0 - edgeMagnitude / 0.055).coerceIn(0.0, 1.0)
@@ -50,13 +46,10 @@ object AnipRenderer {
                         r *= denoiseScale; g *= denoiseScale; b *= denoiseScale
                     }
 
-                    // Exposure is spatial and smoothly interpolated. Work stays in linear light.
                     val exposureGain = 2.0.pow(f.exposureEv)
                     r *= exposureGain; g *= exposureGain; b *= exposureGain
                     var yLin = luma(r, g, b)
 
-                    // Nonlinear local tone: shadows are lifted without flattening blacks; highlights
-                    // are compressed smoothly instead of hard clipping.
                     val shadowMask = ((0.48 - yLin) / 0.48).coerceIn(0.0, 1.0).pow(1.35)
                     val lifted = yLin + shadowMask * recipe.shadowRecovery * (0.115 + 0.12 * (1.0 - yLin))
                     val highlightMask = ((lifted - 0.62) / 0.55).coerceIn(0.0, 1.0)
@@ -67,7 +60,6 @@ object AnipRenderer {
                     }
                     yLin = luma(r, g, b)
 
-                    // Local contrast/dehaze operates around the measured local mean, not globally.
                     val contrastStrength = (0.32 * f.contrast + 0.30 * f.dehaze).coerceIn(0.0, 0.48)
                     val contrastTarget = (yLin + (yLin - local) * contrastStrength).coerceAtLeast(0.0)
                     if (yLin > 1e-6) {
@@ -75,7 +67,6 @@ object AnipRenderer {
                         r *= scale; g *= scale; b *= scale
                     }
 
-                    // Micro-deblur/detail: only reinforce measured high-frequency residuals.
                     val detailStrength = (0.48 * f.detail + 0.32 * recipe.routing.microDeblur +
                         0.18 * recipe.routing.opticalCompensation).coerceIn(0.0, 0.88)
                     val detailDelta = residual.coerceIn(-0.10, 0.10) * detailStrength
@@ -86,8 +77,6 @@ object AnipRenderer {
                         r *= scale; g *= scale; b *= scale
                     }
 
-                    // Spatial color field. Saturation is performed around luminance to preserve skin
-                    // brightness; warmth is mostly chromatic and shadow cooling is already in field.
                     val lum = luma(r, g, b)
                     r = lum + (r - lum) * f.saturation
                     g = lum + (g - lum) * f.saturation
@@ -97,15 +86,12 @@ object AnipRenderer {
                     g *= 1.0 + warm * 0.18
                     b *= 1.0 - warm * 0.88
 
-                    // Subtle subject-centric sculpting: edges remain continuous because subjectWeight
-                    // is a smooth field, not a binary segmentation mask.
                     val sw = f.subjectWeight
                     if (sw > 0.001) {
                         val subjectPop = 1.0 + sw * recipe.localContrast * 0.055
                         r *= subjectPop; g *= subjectPop; b *= subjectPop
                     }
 
-                    // Optical finishing.
                     val dx = nx - 0.5; val dy = ny - 0.5
                     val radial = sqrt(dx * dx + dy * dy) / 0.70710678
                     val vignette = 1.0 - recipe.vignette * radial.pow(1.8) * 0.72
@@ -185,11 +171,13 @@ object AnipCandidateCritic {
         val contrastGain = (output.p95Luma - output.p05Luma) - (source.p95Luma - source.p05Luma)
         val contrast = (0.68 + contrastGain * 1.4).coerceIn(0.0, 1.0)
         val saturationTarget = when {
+            request.look == Look.MONOCHROME -> 0.0
             request.subjectPresent -> 0.30
             request.sceneLabel.lowercase().contains("landscape") -> 0.38
             else -> 0.34
         }
-        val color = closeness(output.meanSaturation, saturationTarget, 0.30)
+        val colorTolerance = if (request.look == Look.MONOCHROME) 0.08 else 0.30
+        val color = closeness(output.meanSaturation, saturationTarget, colorTolerance)
         val edgeRatio = output.edgeEnergy.safeRatio(source.edgeEnergy.coerceAtLeast(0.006))
         val detail = when {
             edgeRatio < 0.88 -> (edgeRatio / 0.88).coerceIn(0.0, 1.0)
@@ -202,7 +190,7 @@ object AnipCandidateCritic {
         } else 0.75
         val clipPenalty = (output.highlightFraction * 5.5 + max(0.0, output.shadowFraction - 0.32) * 1.8).coerceIn(0.0, 1.0)
         val oversharpenPenalty = max(0.0, edgeRatio - 1.85).coerceIn(0.0, 1.0)
-        val saturationPenalty = max(0.0, output.meanSaturation - 0.62) * 1.8
+        val saturationPenalty = if (request.look == Look.MONOCHROME) output.meanSaturation * 2.0 else max(0.0, output.meanSaturation - 0.62) * 1.8
         val artifact = (0.52 * clipPenalty + 0.32 * oversharpenPenalty + 0.16 * saturationPenalty).coerceIn(0.0, 1.0)
         val total = (0.23 * exposure + 0.19 * contrast + 0.16 * color + 0.18 * detail + 0.24 * subject - 0.34 * artifact)
             .coerceIn(0.0, 1.0)
@@ -211,29 +199,39 @@ object AnipCandidateCritic {
 }
 
 class AnipEngine {
-    fun render(source: Bitmap, request: AnipRequest, subject: NormalizedRect?): Pair<Bitmap, AnipRenderResult> {
-        val sourceStats = AnipImageAnalyzer.analyze(source, subject)
+    fun render(source: Bitmap, request: AnipRequest, subject: AnipSubjectContext?): Pair<Bitmap, AnipRenderResult> {
+        val bounds = subject?.bounds
+        val sourceStats = AnipImageAnalyzer.analyze(source, bounds)
         val base = AnipRecipePlanner.base(request, sourceStats)
         val candidates = AnipRecipePlanner.candidates(base)
         val maxEdge = 640
         val scale = min(1.0, maxEdge.toDouble() / max(source.width, source.height).toDouble())
-        val preview = if (scale < 0.999) Bitmap.createScaledBitmap(source, max(32, (source.width * scale).toInt()), max(32, (source.height * scale).toInt()), true) else source
+        val preview = if (scale < 0.999) Bitmap.createScaledBitmap(
+            source,
+            max(32, (source.width * scale).toInt()),
+            max(32, (source.height * scale).toInt()),
+            true
+        ) else source
         try {
             var bestRecipe = candidates.first()
             var bestScore = RenderCandidateScore(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
-            var bestStats = sourceStats
             for (candidate in candidates) {
                 val field = AnipRenderFieldBuilder.build(candidate, subject)
                 val rendered = AnipRenderer.render(preview, candidate, field)
                 try {
-                    val stats = AnipImageAnalyzer.analyze(rendered, subject)
+                    val stats = AnipImageAnalyzer.analyze(rendered, bounds)
                     val score = AnipCandidateCritic.score(sourceStats, stats, request)
-                    if (score.total > bestScore.total) { bestRecipe = candidate; bestScore = score; bestStats = stats }
-                } finally { if (!rendered.isRecycled) rendered.recycle() }
+                    if (score.total > bestScore.total) {
+                        bestRecipe = candidate
+                        bestScore = score
+                    }
+                } finally {
+                    if (!rendered.isRecycled) rendered.recycle()
+                }
             }
             val finalField = AnipRenderFieldBuilder.build(bestRecipe, subject)
             val finalBitmap = AnipRenderer.render(source, bestRecipe, finalField)
-            val finalStats = AnipImageAnalyzer.analyze(finalBitmap, subject)
+            val finalStats = AnipImageAnalyzer.analyze(finalBitmap, bounds)
             val finalScore = AnipCandidateCritic.score(sourceStats, finalStats, request)
             return finalBitmap to AnipRenderResult(bestRecipe, finalScore, sourceStats, finalStats, candidates.size)
         } finally {
