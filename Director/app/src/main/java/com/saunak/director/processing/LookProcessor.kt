@@ -37,10 +37,14 @@ data class LookSpec(val look: Look = Look.NATURAL, val strength: Float = 0f) {
 
 object LookProcessor {
     /**
-     * Sierra v8 routes normal finishing through ANIP, even for NATURAL. The legacy color-matrix
-     * implementation remains as a fail-safe so rendering can never make capture/save unavailable.
+     * Small verification frames are readiness probes, not deliverables. Keep them on the cheap
+     * matrix renderer so shutter preparation never runs the full adaptive search on the UI path.
+     * Saved photos still use ANIP at the larger bounded working resolution.
      */
     fun apply(source: Bitmap, spec: LookSpec): Bitmap {
+        if (maxOf(source.width, source.height) <= VERIFICATION_FAST_PATH_MAX_EDGE) {
+            return legacyApply(source, spec)
+        }
         val engine = SierraEngine.getOrNull()
         if (engine != null && !source.isRecycled) {
             val rendered = runCatching {
@@ -153,4 +157,6 @@ object LookProcessor {
         )
         return m
     }
+
+    private const val VERIFICATION_FAST_PATH_MAX_EDGE = 1200
 }
