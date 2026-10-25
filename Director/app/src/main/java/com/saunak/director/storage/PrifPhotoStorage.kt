@@ -2,6 +2,7 @@ package com.saunak.director.storage
 
 import android.graphics.Bitmap
 import android.net.Uri
+import com.saunak.director.engine.SierraEngine
 import com.saunak.director.processing.LookProcessor
 import com.saunak.director.processing.LookSpec
 import java.io.File
@@ -11,6 +12,9 @@ import kotlin.math.roundToInt
 /**
  * Keeps the accepted P-RIF reconstruction in memory through crop/look rendering, avoiding an
  * unnecessary reconstructed-JPEG -> decode round trip. [sourceJpeg] is used only for safe EXIF copy.
+ *
+ * The newest P-RIF evidence transaction is rolled back if the final gallery write fails, so Sierra's
+ * ledger never claims that a reconstructed photo was delivered when only the safety JPEG survived.
  */
 suspend fun PhotoRepository.savePrifReconstruction(
     bitmap: Bitmap,
@@ -21,6 +25,15 @@ suspend fun PhotoRepository.savePrifReconstruction(
     cropCenterY: Double
 ): Uri {
     require(!bitmap.isRecycled)
+    val evidenceLedger = SierraEngine.get().evidence
+    val newestPrifTimestamp = evidenceLedger.snapshot()
+        .asSequence()
+        .filter { it.regionId.value.startsWith("prif/") }
+        .maxOfOrNull { it.timestampNs }
+    val transactionIds = if (newestPrifTimestamp == null) emptyList() else evidenceLedger.snapshot()
+        .filter { it.timestampNs == newestPrifTimestamp && it.regionId.value.startsWith("prif/") }
+        .map { it.regionId }
+
     val ratio = SierraCropPolicy.ratioOrNull(aspectRatio)
     val cropped = if (ratio == null) bitmap else cropPrifBitmap(
         bitmap, ratio.first, ratio.second, cropCenterX, cropCenterY
@@ -28,6 +41,9 @@ suspend fun PhotoRepository.savePrifReconstruction(
     val rendered = LookProcessor.apply(cropped, look)
     return try {
         saveProcessed(rendered, sourceJpeg)
+    } catch (t: Throwable) {
+        transactionIds.forEach(evidenceLedger::remove)
+        throw t
     } finally {
         if (rendered !== cropped && !rendered.isRecycled) rendered.recycle()
         if (cropped !== bitmap && !cropped.isRecycled) cropped.recycle()
