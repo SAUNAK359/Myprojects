@@ -9,6 +9,7 @@ on:
       - director-sierra-v5-temporal-scene
       - director-sierra-v6-subject-intelligence
       - director-sierra-v7-prif
+      - director-sierra-v8-anip
     paths:
       - 'Director/**'
       - '.github/workflows/director-android.yml'
