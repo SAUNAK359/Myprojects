@@ -118,7 +118,7 @@ class SierraEngine private constructor(context: Context) : AutoCloseable {
     }
 
     companion object {
-        private const val RUNTIME_VERSION = "onnxruntime-1.31.0+sierra-v7-prif"
+        private const val RUNTIME_VERSION = "onnxruntime-1.31.0+sierra-v8-anip"
         private const val PRIF_STALE_MS = 6L * 60L * 60L * 1000L
         @Volatile private var instance: SierraEngine? = null
 
