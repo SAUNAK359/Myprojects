@@ -92,4 +92,25 @@ class AnipRecipePlannerTest {
         }
         assertTrue(maxAdjacentJump < 0.12f)
     }
+
+    @Test fun semanticMaskOverridesBoxForSubjectRelight() {
+        val request = AnipRequest("portrait", "strong subject separation", Look.CLEAN_PORTRAIT, 0.8f, true, 0.10, 0.96)
+        val recipe = AnipRecipePlanner.base(request, stats())
+        val mask = FloatArray(16 * 16)
+        for (y in 2 until 14) for (x in 9 until 15) mask[y * 16 + x] = 1f
+        val context = AnipSubjectContext(
+            bounds = NormalizedRect(0.18, 0.12, 0.88, 0.88),
+            maskWidth = 16,
+            maskHeight = 16,
+            mask = mask,
+            maskConfidence = 1.0,
+            depthSeparation = 0.65,
+            trackConfidence = 0.95
+        )
+        val field = AnipRenderFieldBuilder.build(recipe, context, width = 48, height = 48)
+        val maskSide = field.subjectWeight[24 * 48 + 38]
+        val emptySide = field.subjectWeight[24 * 48 + 10]
+        assertTrue(maskSide > emptySide + 0.55f)
+        assertTrue(field.exposureEv[24 * 48 + 38] > field.exposureEv[24 * 48 + 10] + 0.25f)
+    }
 }
