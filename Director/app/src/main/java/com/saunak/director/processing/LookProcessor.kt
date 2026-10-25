@@ -8,6 +8,9 @@ import android.graphics.ColorMatrixColorFilter
 import android.graphics.Paint
 import android.graphics.RadialGradient
 import android.graphics.Shader
+import com.saunak.director.engine.SierraEngine
+import com.saunak.director.engine.render.AnipEngine
+import com.saunak.director.engine.render.AnipRequest
 
 enum class Look {
     NATURAL,
@@ -32,7 +35,32 @@ data class LookSpec(val look: Look = Look.NATURAL, val strength: Float = 0f) {
 }
 
 object LookProcessor {
+    /**
+     * Sierra v8 routes normal finishing through ANIP, even for NATURAL. The legacy color-matrix
+     * implementation remains as a fail-safe so rendering can never make capture/save unavailable.
+     */
     fun apply(source: Bitmap, spec: LookSpec): Bitmap {
+        val engine = SierraEngine.getOrNull()
+        if (engine != null && !source.isRecycled) {
+            val rendered = runCatching {
+                val subject = engine.subjects.latest()?.bounds
+                val request = AnipRequest(
+                    sceneLabel = "",
+                    objective = "",
+                    look = spec.look,
+                    lookStrength = spec.normalizedStrength,
+                    subjectPresent = subject != null,
+                    motionRisk = engine.motion.latest().conservativeRisk,
+                    reconstructionIntegrity = 0.78
+                )
+                AnipEngine().render(source, request, subject).first
+            }.getOrNull()
+            if (rendered != null) return rendered
+        }
+        return legacyApply(source, spec)
+    }
+
+    private fun legacyApply(source: Bitmap, spec: LookSpec): Bitmap {
         if (spec.isIdentity()) return source
         val s = spec.normalizedStrength
         val target = when (spec.look) {
