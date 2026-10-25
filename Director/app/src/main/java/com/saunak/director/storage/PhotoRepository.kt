@@ -67,6 +67,11 @@ class PhotoRepository(private val context: Context) {
         bitmap
     }
 
+    /**
+     * Full-resolution finishing is deliberately bounded by the process heap. v8 ANIP keeps the
+     * photographic effect strength, but never allows one shutter press to hold several 4K ARGB
+     * bitmaps on a low-memory phone. CPU-heavy crop/render work also runs off the main dispatcher.
+     */
     suspend fun saveFinal(
         file: File,
         look: LookSpec,
@@ -77,14 +82,21 @@ class PhotoRepository(private val context: Context) {
         val ratio = SierraCropPolicy.ratioOrNull(aspectRatio)
         if (look.isIdentity() && ratio == null) return saveRawJpeg(file)
 
-        val source = decodeOriented(file, PROCESSED_MAX_DIMENSION)
-        val cropped = if (ratio == null) source else cropToRatio(source, ratio.first, ratio.second, cropCenterX, cropCenterY)
-        val rendered = LookProcessor.apply(cropped, look)
+        val source = decodeOriented(file, processingMaxDimension())
+        var cropped: Bitmap? = null
+        var rendered: Bitmap? = null
         return try {
-            saveProcessed(rendered, file)
+            val pair = withContext(Dispatchers.Default) {
+                val c = if (ratio == null) source else cropToRatio(source, ratio.first, ratio.second, cropCenterX, cropCenterY)
+                val r = LookProcessor.apply(c, look)
+                c to r
+            }
+            cropped = pair.first
+            rendered = pair.second
+            saveProcessed(checkNotNull(rendered), file)
         } finally {
-            if (rendered !== cropped && !rendered.isRecycled) rendered.recycle()
-            if (cropped !== source && !cropped.isRecycled) cropped.recycle()
+            rendered?.let { if (it !== cropped && !it.isRecycled) it.recycle() }
+            cropped?.let { if (it !== source && !it.isRecycled) it.recycle() }
             if (!source.isRecycled) source.recycle()
         }
     }
@@ -229,6 +241,15 @@ class PhotoRepository(private val context: Context) {
 
     fun cleanup(files: Iterable<File>, keep: File? = null) { files.forEach { if (it != keep) runCatching { it.delete() } } }
     fun markFinalized(reference: File) { runCatching { reference.delete() } }
+
+    private fun processingMaxDimension(): Int {
+        val heapMb = Runtime.getRuntime().maxMemory() / (1024L * 1024L)
+        return when {
+            heapMb < 256L -> 2048
+            heapMb < 384L -> 2560
+            else -> 3072
+        }
+    }
 
     companion object {
         const val AI_DECODE_MAX_DIMENSION = 1024
