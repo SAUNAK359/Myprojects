@@ -1,12 +1,9 @@
 package com.saunak.director.engine.render
 
+import com.saunak.director.engine.subject.NormalizedRect
 import com.saunak.director.processing.Look
 import kotlin.math.max
 
-/**
- * Sierra v8 ANIP operates on a verified v7 radiance image. Reconstruction truth stays untouched;
- * this state describes how aggressively the verified image may be rendered for photographic impact.
- */
 data class AnipRequest(
     val sceneLabel: String,
     val objective: String,
@@ -20,6 +17,27 @@ data class AnipRequest(
         require(lookStrength in 0f..1f)
         require(motionRisk in 0.0..1.0)
         require(reconstructionIntegrity in 0.0..1.0)
+    }
+}
+
+data class AnipSubjectContext(
+    val bounds: NormalizedRect,
+    val maskWidth: Int = 0,
+    val maskHeight: Int = 0,
+    val mask: FloatArray? = null,
+    val maskConfidence: Double = 0.0,
+    val depthSeparation: Double = 0.0,
+    val trackConfidence: Double = 1.0
+) {
+    init {
+        require(maskConfidence in 0.0..1.0)
+        require(depthSeparation in -1.0..1.0)
+        require(trackConfidence in 0.0..1.0)
+        if (mask != null) {
+            require(maskWidth > 0 && maskHeight > 0)
+            require(mask.size == maskWidth * maskHeight)
+            require(mask.all { it.isFinite() && it in 0f..1f })
+        }
     }
 }
 
