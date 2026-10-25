@@ -6,6 +6,7 @@ import com.saunak.director.engine.SierraEngine
 import com.saunak.director.engine.render.AnipEngine
 import com.saunak.director.engine.render.AnipRequest
 import com.saunak.director.engine.render.AnipRenderResult
+import com.saunak.director.engine.render.AnipSubjectContext
 import com.saunak.director.processing.LookSpec
 import java.io.File
 import kotlin.math.abs
@@ -22,7 +23,19 @@ internal object AnipPhotoFinish {
         reconstructionIntegrity: Double
     ): Output {
         val engine = SierraEngine.getOrNull()
-        val subject = engine?.subjects?.latest()?.bounds
+        val track = engine?.subjects?.latest()
+        val subject = track?.let {
+            val mask = it.mask
+            AnipSubjectContext(
+                bounds = it.bounds,
+                maskWidth = mask?.width ?: 0,
+                maskHeight = mask?.height ?: 0,
+                mask = mask?.probabilities,
+                maskConfidence = mask?.confidence ?: 0.0,
+                depthSeparation = it.depth?.foregroundSeparation ?: 0.0,
+                trackConfidence = it.confidence
+            )
+        }
         val motionRisk = engine?.motion?.latest()?.conservativeRisk ?: 0.45
         val request = AnipRequest(
             sceneLabel = sceneLabel,
