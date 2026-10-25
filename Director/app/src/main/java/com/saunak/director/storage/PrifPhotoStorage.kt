@@ -4,14 +4,14 @@ import android.graphics.Bitmap
 import android.net.Uri
 import com.saunak.director.engine.SierraEngine
 import com.saunak.director.processing.LookSpec
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.File
+import kotlin.math.max
 
 /**
- * Keeps the accepted P-RIF reconstruction in memory through ANIP rendering, crop and final save.
- * [sourceJpeg] remains the safe EXIF source and same-shutter recovery image.
- *
- * P-RIF evidence is rolled back if the final gallery write fails, so Sierra never claims that a
- * reconstructed/rendered photo was delivered when only the safety JPEG survived.
+ * Keeps the accepted P-RIF reconstruction protected while ANIP renders a bounded working copy.
+ * [sourceJpeg] remains the same-shutter recovery image if finishing fails on a specific device.
  */
 suspend fun PhotoRepository.savePrifReconstruction(
     bitmap: Bitmap,
@@ -34,27 +34,53 @@ suspend fun PhotoRepository.savePrifReconstruction(
         .filter { it.timestampNs == newestPrifTimestamp && it.regionId.value.startsWith("prif/") }
         .map { it.regionId }
 
-    var anip: Bitmap? = null
+    var working: Bitmap? = null
     var cropped: Bitmap? = null
+    var anip: Bitmap? = null
     return try {
-        val output = AnipPhotoFinish.render(
-            source = bitmap,
-            look = look,
-            sceneLabel = sceneLabel,
-            objective = objective,
-            reconstructionIntegrity = reconstructionIntegrity
-        )
-        anip = output.bitmap
-        val ratio = SierraCropPolicy.ratioOrNull(aspectRatio)
-        cropped = if (ratio == null) output.bitmap else cropAnipBitmap(
-            output.bitmap, ratio.first, ratio.second, cropCenterX, cropCenterY
-        )
-        saveProcessed(checkNotNull(cropped), sourceJpeg)
+        val rendered = withContext(Dispatchers.Default) {
+            val maxDimension = prifProcessingMaxDimension()
+            val longest = max(bitmap.width, bitmap.height)
+            working = if (longest > maxDimension) {
+                val scale = maxDimension.toFloat() / longest.toFloat()
+                Bitmap.createScaledBitmap(
+                    bitmap,
+                    maxOf(1, (bitmap.width * scale).toInt()),
+                    maxOf(1, (bitmap.height * scale).toInt()),
+                    true
+                )
+            } else bitmap
+
+            val ratio = SierraCropPolicy.ratioOrNull(aspectRatio)
+            cropped = if (ratio == null) working else cropAnipBitmap(
+                checkNotNull(working), ratio.first, ratio.second, cropCenterX, cropCenterY
+            )
+            val output = AnipPhotoFinish.render(
+                source = checkNotNull(cropped),
+                look = look,
+                sceneLabel = sceneLabel,
+                objective = objective,
+                reconstructionIntegrity = reconstructionIntegrity
+            )
+            anip = output.bitmap
+            output.bitmap
+        }
+        saveProcessed(rendered, sourceJpeg)
     } catch (t: Throwable) {
         transactionIds.forEach(evidenceLedger::remove)
         throw t
     } finally {
-        cropped?.let { if (it !== anip && !it.isRecycled) it.recycle() }
-        anip?.let { if (!it.isRecycled) it.recycle() }
+        anip?.let { if (it !== cropped && !it.isRecycled) it.recycle() }
+        cropped?.let { if (it !== working && it !== bitmap && !it.isRecycled) it.recycle() }
+        working?.let { if (it !== bitmap && !it.isRecycled) it.recycle() }
+    }
+}
+
+private fun prifProcessingMaxDimension(): Int {
+    val heapMb = Runtime.getRuntime().maxMemory() / (1024L * 1024L)
+    return when {
+        heapMb < 256L -> 1792
+        heapMb < 384L -> 2304
+        else -> 2880
     }
 }
