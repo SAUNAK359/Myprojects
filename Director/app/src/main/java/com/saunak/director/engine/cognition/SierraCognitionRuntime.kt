@@ -2,6 +2,7 @@ package com.saunak.director.engine.cognition
 
 import android.content.Context
 import com.saunak.director.engine.state.SceneState
+import com.saunak.director.processing.Look
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
@@ -30,6 +31,8 @@ class SierraCognitionRuntime(context: Context) {
         return decision.takeIf { nowNs <= it.intent.expiresAtNs && it.reliability.freshness > 0.0 }
     }
 
+    fun themeLook(themeId: String): Look? = themes.profile(themeId)?.look()
+    fun themeExists(themeId: String): Boolean = themes.profile(themeId) != null
     fun manifestVersion(): Int = manifest.policy.schemaVersion
     fun themeCount(): Int = manifest.themes.size
 }
