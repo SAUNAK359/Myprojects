@@ -20,8 +20,8 @@ import kotlin.math.max
 
 /**
  * Converts one coherent temporal SceneState into a physics-constrained Sierra capture program.
- * Identity-aware subject prediction now tightens exposure and burst/fusion policy when confidence
- * is sufficient; weak subject evidence only raises uncertainty and never fabricates motion.
+ * v10 additionally evaluates the cognition/reliability plane from the same SceneState before the
+ * CaptureCompiler runs. Cognition may tighten priorities, but sensor legality remains compiler-owned.
  */
 class SierraCaptureBridge(
     private val camera: CameraEngine,
@@ -51,7 +51,17 @@ class SierraCaptureBridge(
                 zoomRatio = camera.snapshot().zoomRatio,
                 subject = engine.subjects.latest()
             )
-            val observation = estimateObservation(state)
+            val cognition = engine.cognition.evaluate(state)
+            val observation = estimateObservation(state).let { base ->
+                val intent = cognition.intent
+                base.copy(
+                    highlightClipRisk = max(base.highlightClipRisk, intent.capture.highlightProtectionPriority * base.highlightClipRisk),
+                    shadowNoiseRisk = max(base.shadowNoiseRisk, intent.capture.shadowRecoveryPriority * base.shadowNoiseRisk),
+                    confidence = minOf(base.confidence, cognition.reliability.effectiveConfidence),
+                    motionRisk = max(base.motionRisk ?: 0.0, intent.capture.motionFreezePriority * (base.motionRisk ?: state.motion.conservativeRisk))
+                        .coerceIn(0.0, 1.0)
+                )
+            }
             val budget = CaptureBudget(
                 thermalPressure = thermal.thermalPressure,
                 memoryPressure = MemoryPressureBus.normalizedPressure(),
