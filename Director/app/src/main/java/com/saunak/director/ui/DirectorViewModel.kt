@@ -46,6 +46,7 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
     private val initialAspectRatioOverride = preferences.getString("aspect_ratio_override", null)?.takeIf(SierraCropPolicy::isSupported)
     private val initialKeepOriginal = preferences.getBoolean("keep_original", false)
     private val initialSession = server.session()
+    private val directAiReadyAtStart = runtime.isReady() && initialSession == null
 
     private val orchestrator = DirectorOrchestrator(
         camera = camera,
@@ -92,7 +93,7 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
             keepOriginal = initialKeepOriginal,
             serverConfigured = server.configured,
             signedIn = initialSession != null,
-            guestMode = initialGuestMode && initialSession == null,
+            guestMode = (initialGuestMode || directAiReadyAtStart) && initialSession == null,
             accountName = initialSession?.displayName,
             creditsAvailable = initialSession?.creditsAvailable
         )
@@ -104,7 +105,7 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
     private var cameraBound = false
 
     init {
-        orchestrator.setCloudEnabled(initialSession != null && !initialPrivateMode)
+        orchestrator.setCloudEnabled(runtime.isReady() && !initialPrivateMode)
         orchestrator.setAspectRatioOverride(initialAspectRatioOverride)
         orchestrator.setKeepOriginal(initialKeepOriginal)
         refreshGallery()
@@ -213,16 +214,17 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
     fun signOut() {
         orchestrator.cancelForUserAction()
         server.logoutLocal()
-        preferences.edit().putBoolean("guest_mode", false).apply()
-        orchestrator.setCloudEnabled(false)
+        val directReady = runtime.isReady() && !_ui.value.privateMode
+        preferences.edit().putBoolean("guest_mode", directReady).apply()
+        orchestrator.setCloudEnabled(directReady)
         _ui.value = _ui.value.copy(
             signedIn = false,
-            guestMode = false,
+            guestMode = directReady,
             accountName = null,
             creditsAvailable = null,
-            aiAvailable = false,
-            sierraMode = SierraMode.BETA,
-            status = "Signed out • Sierra β available"
+            aiAvailable = directReady,
+            sierraMode = if (directReady) SierraMode.AI else SierraMode.BETA,
+            status = if (directReady) "Sierra AI + β ready" else "Signed out • Sierra β available"
         )
     }
 
@@ -318,7 +320,7 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
     fun togglePrivateMode() {
         val enabled = !_ui.value.privateMode
         orchestrator.cancelForUserAction()
-        orchestrator.setCloudEnabled(!enabled && _ui.value.signedIn)
+        orchestrator.setCloudEnabled(!enabled && runtime.isReady())
         preferences.edit().putBoolean("private_mode", enabled).apply()
         val aiReady = !enabled && runtime.isReady()
         _ui.value = _ui.value.copy(
