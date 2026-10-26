@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "interactions_url": "https://generativelanguage.googleapis.com/v1/interactions",
+  "models_url": "https://generativelanguage.googleapis.com/v1beta/models",
+  "preferred_models": [
+    "gemini-flash-latest",
+    "gemini-3.8-flash"
+  ],
+  "resolution_ttl_ms": 86400000,
+  "connect_timeout_ms": 1800,
+  "read_timeout_ms": 5200,
+  "write_timeout_ms": 3200,
+  "call_timeout_ms": 6200,
+  "max_output_tokens": 1150,
+  "thinking_level": "low"
+}
