@@ -3,6 +3,7 @@ package com.saunak.director.storage
 import android.graphics.Bitmap
 import android.net.Uri
 import com.saunak.director.engine.SierraEngine
+import com.saunak.director.processing.AdaptiveContrastFinisher
 import com.saunak.director.processing.LookSpec
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -37,6 +38,7 @@ suspend fun PhotoRepository.savePrifReconstruction(
     var working: Bitmap? = null
     var cropped: Bitmap? = null
     var anip: Bitmap? = null
+    var finished: Bitmap? = null
     return try {
         val rendered = withContext(Dispatchers.Default) {
             val maxDimension = prifProcessingMaxDimension()
@@ -63,13 +65,15 @@ suspend fun PhotoRepository.savePrifReconstruction(
                 reconstructionIntegrity = reconstructionIntegrity
             )
             anip = output.bitmap
-            output.bitmap
+            finished = AdaptiveContrastFinisher.apply(output.bitmap)
+            checkNotNull(finished)
         }
         saveProcessed(rendered, sourceJpeg)
     } catch (t: Throwable) {
         transactionIds.forEach(evidenceLedger::remove)
         throw t
     } finally {
+        finished?.let { if (it !== anip && it !== cropped && it !== working && it !== bitmap && !it.isRecycled) it.recycle() }
         anip?.let { if (it !== cropped && !it.isRecycled) it.recycle() }
         cropped?.let { if (it !== working && it !== bitmap && !it.isRecycled) it.recycle() }
         working?.let { if (it !== bitmap && !it.isRecycled) it.recycle() }
