@@ -6,7 +6,9 @@ import com.saunak.director.engine.capture.AutoExposureSnapshot
 import com.saunak.director.engine.capture.CaptureBudget
 import com.saunak.director.engine.capture.CaptureCompiler
 import com.saunak.director.engine.capture.CaptureObservation
+import com.saunak.director.engine.capture.CapturePreference
 import com.saunak.director.engine.capture.CaptureProgram
+import com.saunak.director.engine.cognition.CaptureFamily
 import com.saunak.director.engine.cognition.CognitionDecision
 import com.saunak.director.engine.motion.MotionExposurePolicy
 import com.saunak.director.engine.state.SceneState
@@ -24,7 +26,6 @@ class SierraCaptureBridge(
     private val engine: SierraEngine = SierraEngine.get(),
     private val compiler: CaptureCompiler = CaptureCompiler()
 ) {
-    /** Always available, including when an OEM CameraX extension is active. */
     suspend fun evaluateCognition(quality: TechnicalQuality, scene: SierraSceneSignals): Result<CognitionDecision> =
         withContext(Dispatchers.Default) {
             runCatching { engine.cognition.evaluate(assembleState(quality, scene)) }
@@ -42,15 +43,10 @@ class SierraCaptureBridge(
             val twin = engine.deviceTwin().getOrThrow()
             val cameraId = telemetry.cameraId ?: camera.activeCameraId()
             val module = requireNotNull(cameraId?.let(twin::camera)) { "Active camera is missing from Sierra device twin" }
-            val observation = estimateObservation(state).let { base ->
-                val intent = cognition.intent
-                base.copy(
-                    highlightClipRisk = max(base.highlightClipRisk, intent.capture.highlightProtectionPriority * base.highlightClipRisk),
-                    shadowNoiseRisk = max(base.shadowNoiseRisk, intent.capture.shadowRecoveryPriority * base.shadowNoiseRisk),
-                    confidence = minOf(base.confidence, cognition.reliability.effectiveConfidence),
-                    motionRisk = max(base.motionRisk ?: 0.0, intent.capture.motionFreezePriority * (base.motionRisk ?: state.motion.conservativeRisk)).coerceIn(0.0, 1.0)
-                )
-            }
+            val observation = estimateObservation(state).copy(
+                // Reliability may reduce authority, but artistic intent must never rewrite measured risk.
+                confidence = minOf(estimateObservation(state).confidence, cognition.reliability.effectiveConfidence)
+            )
             val budget = CaptureBudget(
                 thermalPressure = thermal.thermalPressure,
                 memoryPressure = MemoryPressureBus.normalizedPressure(),
@@ -61,9 +57,25 @@ class SierraCaptureBridge(
                 autoExposure = AutoExposureSnapshot(telemetry.exposureTimeNs, telemetry.sensitivityIso),
                 observation = observation,
                 budget = budget,
-                oemExtensionAvailable = camera.capabilities().extensions.isNotEmpty()
+                oemExtensionAvailable = camera.capabilities().extensions.isNotEmpty(),
+                preference = cognition.toCapturePreference()
             )
         }
+    }
+
+    private fun CognitionDecision.toCapturePreference(): CapturePreference {
+        val capture = intent.capture
+        val family = capture.family
+        return CapturePreference(
+            motionFreeze = capture.motionFreezePriority * reliability.effectiveConfidence,
+            highlightProtection = capture.highlightProtectionPriority * reliability.effectiveConfidence,
+            shadowRecovery = capture.shadowRecoveryPriority * reliability.effectiveConfidence,
+            preferBurst = when (family) {
+                CaptureFamily.FAST_BURST, CaptureFamily.LOW_LIGHT_BURST, CaptureFamily.HDR_BURST -> reliability.effectiveConfidence
+                else -> 0.0
+            },
+            preferHdr = if (family == CaptureFamily.HDR_BURST) reliability.effectiveConfidence else 0.0
+        )
     }
 
     private suspend fun assembleState(quality: TechnicalQuality, scene: SierraSceneSignals): SceneState {
