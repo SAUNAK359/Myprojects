@@ -120,9 +120,6 @@ class GeminiDirectVlmRuntime(
             .put(
                 "generationConfig",
                 JSONObject()
-                    .put("temperature", 0.15)
-                    .put("topP", 0.85)
-                    .put("maxOutputTokens", 700)
                     .put("responseMimeType", "application/json")
                     .put("thinkingConfig", JSONObject().put("thinkingLevel", "low"))
             )
