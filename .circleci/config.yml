@@ -77,9 +77,16 @@ jobs:
               fi
               test -f Director/app/src/main/java/com/saunak/director/ai/GeminiApiKeyStore.kt
               test -f Director/app/src/main/java/com/saunak/director/ai/GeminiDirectVlmRuntime.kt
+              test -f Director/app/src/main/java/com/saunak/director/ai/GeminiProviderConfig.kt
+              test -f Director/app/src/main/assets/sierra/gemini_provider_v1.json
               test -f Director/app/src/main/java/com/saunak/director/GeminiSetupActivity.kt
               grep -q 'AndroidKeyStore' Director/app/src/main/java/com/saunak/director/ai/GeminiApiKeyStore.kt
-              grep -q 'generativelanguage.googleapis.com' Director/app/src/main/java/com/saunak/director/ai/GeminiDirectVlmRuntime.kt
+              grep -q 'generativelanguage.googleapis.com/v1/interactions' Director/app/src/main/assets/sierra/gemini_provider_v1.json
+              grep -q 'generativelanguage.googleapis.com/v1beta/models' Director/app/src/main/assets/sierra/gemini_provider_v1.json
+              if grep -nE 'private const val MODEL|MODEL[[:space:]]*=[[:space:]]*"gemini-' Director/app/src/main/java/com/saunak/director/ai/GeminiDirectVlmRuntime.kt; then
+                echo 'ERROR: Sierra v10 must not compile a fixed Gemini model id into runtime code.'
+                exit 1
+              fi
               if grep -RniE 'AIza[0-9A-Za-z_-]{20,}' Director .circleci codemagic.yaml; then
                 echo 'ERROR: a Gemini-style API key appears to be hardcoded in the repository.'
                 exit 1
@@ -88,7 +95,7 @@ jobs:
                 echo 'ERROR: Gemini credential must not be compiled into BuildConfig or source.'
                 exit 1
               fi
-              echo 'Sierra v10 direct Gemini beta boundary verified.'
+              echo 'Sierra v10 data-driven Gemini beta boundary verified.'
             else
               FORBIDDEN='api\.groq\.com|openrouter\.ai|integrate\.api\.nvidia\.com|generativelanguage\.googleapis\.com|SecureApiKeyStore|AiProviderPreset|MultiProviderVlmRuntime|GeminiVlmRuntime|NvidiaNemotronVlmRuntime'
               if grep -RniE "$FORBIDDEN" "$SOURCE"; then
