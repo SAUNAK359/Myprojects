@@ -3,6 +3,7 @@ package com.saunak.director.engine
 import android.content.ComponentCallbacks2
 import android.content.Context
 import com.saunak.director.engine.belief.SceneBeliefGraph
+import com.saunak.director.engine.cognition.SierraCognitionRuntime
 import com.saunak.director.engine.device.BackendExecutionProfile
 import com.saunak.director.engine.device.DeviceTwin
 import com.saunak.director.engine.device.DeviceTwinBuilder
@@ -45,6 +46,7 @@ class SierraEngine private constructor(context: Context) : AutoCloseable {
     val deterministicBurst = DeterministicBurstPipeline(evidence)
     val runtimeProfiles = RuntimeProfileStore(appContext)
     val backendProfiler = BackendProfiler(appContext, runtimeProfiles, RUNTIME_VERSION)
+    val cognition = SierraCognitionRuntime(appContext)
 
     // Temporal state is application-scoped so history survives individual shutter requests.
     val motion = MotionFusionEngine(appContext, beliefs)
@@ -88,7 +90,10 @@ class SierraEngine private constructor(context: Context) : AutoCloseable {
             evidenceRegions = evidence.snapshot().size,
             measuredBackendProfiles = runtimeProfiles.snapshot().count { it.valid },
             onnxInitialized = onnxLazy.isInitialized(),
-            subjectTrackReady = subjects.latest() != null
+            subjectTrackReady = subjects.latest() != null,
+            cognitionSchemaVersion = cognition.manifestVersion(),
+            cognitionThemeCount = cognition.themeCount(),
+            cognitionReady = true
         )
     }
 
@@ -118,7 +123,7 @@ class SierraEngine private constructor(context: Context) : AutoCloseable {
     }
 
     companion object {
-        private const val RUNTIME_VERSION = "onnxruntime-1.31.0+sierra-v8-anip"
+        private const val RUNTIME_VERSION = "onnxruntime-1.31.0+sierra-v10-cognition"
         private const val PRIF_STALE_MS = 6L * 60L * 60L * 1000L
         @Volatile private var instance: SierraEngine? = null
 
@@ -140,5 +145,8 @@ data class SierraEngineHealth(
     val evidenceRegions: Int,
     val measuredBackendProfiles: Int,
     val onnxInitialized: Boolean,
-    val subjectTrackReady: Boolean
+    val subjectTrackReady: Boolean,
+    val cognitionSchemaVersion: Int = 0,
+    val cognitionThemeCount: Int = 0,
+    val cognitionReady: Boolean = false
 )
