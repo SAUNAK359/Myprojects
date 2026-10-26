@@ -21,15 +21,10 @@ data class CaptureObservation(
     val facePresent: Boolean,
     val digitalZoomRatio: Double = 1.0,
     val confidence: Double = 1.0,
-    /** Continuous physics-derived cap from the temporal motion subsystem. */
     val motionExposureCapNs: Long? = null,
-    /** Continuous upper-bound motion risk retained for policy and diagnostics. */
     val motionRisk: Double? = null,
-    /** Identity-aware motion/acceleration risk from the persistent subject trajectory. */
     val subjectKinematicRisk: Double? = null,
-    /** Risk that the predicted subject box crosses a frame boundary during capture. */
     val subjectEdgeRisk: Double? = null,
-    /** Confidence in the identity-aware subject trajectory. */
     val subjectTrackConfidence: Double? = null
 ) {
     init {
@@ -49,13 +44,30 @@ data class CaptureObservation(
 data class CaptureBudget(
     val thermalPressure: Double = 0.0,
     val memoryPressure: Double = 0.0,
-    /** A value below three explicitly disables computational burst candidates. */
     val maxBurstFrames: Int = 8
 ) {
     init {
         require(thermalPressure in 0.0..1.0)
         require(memoryPressure in 0.0..1.0)
         require(maxBurstFrames in 1..16)
+    }
+}
+
+/**
+ * Artistic/semantic preference only. These values never alter measured sensor risk, legal camera
+ * ranges, or the set of physically-safe candidates. They only rerank candidates already admitted
+ * by the deterministic compiler.
+ */
+data class CapturePreference(
+    val motionFreeze: Double = 0.0,
+    val highlightProtection: Double = 0.0,
+    val shadowRecovery: Double = 0.0,
+    val preferBurst: Double = 0.0,
+    val preferHdr: Double = 0.0
+) {
+    init {
+        listOf(motionFreeze, highlightProtection, shadowRecovery, preferBurst, preferHdr)
+            .forEach { require(it in 0.0..1.0) }
     }
 }
 
@@ -90,7 +102,8 @@ class CaptureCompiler {
         autoExposure: AutoExposureSnapshot,
         observation: CaptureObservation,
         budget: CaptureBudget,
-        oemExtensionAvailable: Boolean = false
+        oemExtensionAvailable: Boolean = false,
+        preference: CapturePreference? = null
     ): CaptureProgram {
         val candidates = mutableListOf<CaptureProgram>()
         candidates += safeSingle(camera, autoExposure, observation, oemExtensionAvailable)
@@ -108,9 +121,32 @@ class CaptureCompiler {
             }
         }
 
-        return candidates.maxWithOrNull(
-            compareBy<CaptureProgram> { it.expectedUtility }.thenByDescending { -it.expectedCaptureDurationMs }
+        val selected = candidates.maxWithOrNull(
+            compareBy<CaptureProgram> { intentAwareUtility(it, preference) }
+                .thenByDescending { -it.expectedCaptureDurationMs }
         ) ?: safeSingle(camera, autoExposure, observation, oemExtensionAvailable)
+        val adjusted = intentAwareUtility(selected, preference)
+        return if (preference == null || kotlin.math.abs(adjusted - selected.expectedUtility) < 0.001) selected
+        else selected.copy(
+            expectedUtility = adjusted,
+            rationale = selected.rationale + "; bounded photographic-intent rerank"
+        )
+    }
+
+    /** Package-visible for deterministic tests. */
+    internal fun intentAwareUtility(program: CaptureProgram, preference: CapturePreference?): Double {
+        val p = preference ?: return program.expectedUtility
+        val burst = if (program.frames.size > 1) 1.0 else 0.0
+        val bracket = if (program.frames.any { it.role == CaptureFrameRole.HIGHLIGHT || it.role == CaptureFrameRole.SHADOW }) 1.0 else 0.0
+        val hdr = if (program.hdrFusion) 1.0 else 0.0
+        val durationPenalty = (program.expectedCaptureDurationMs / 450.0).coerceIn(0.0, 1.0)
+        val motionTerm = p.motionFreeze * (0.07 * (1.0 - durationPenalty) - 0.025 * durationPenalty)
+        val highlightTerm = p.highlightProtection * (0.055 * hdr + 0.035 * bracket)
+        val shadowTerm = p.shadowRecovery * (0.045 * burst + 0.025 * bracket)
+        val burstTerm = p.preferBurst * 0.04 * burst
+        val hdrTerm = p.preferHdr * 0.05 * hdr
+        val delta = (motionTerm + highlightTerm + shadowTerm + burstTerm + hdrTerm).coerceIn(-MAX_INTENT_DELTA, MAX_INTENT_DELTA)
+        return (program.expectedUtility + delta).coerceIn(0.0, 1.0)
     }
 
     private fun safeSingle(camera: CameraModuleTwin, base: AutoExposureSnapshot, observation: CaptureObservation, oemExtensionAvailable: Boolean): CaptureProgram {
@@ -256,5 +292,8 @@ class CaptureCompiler {
     private fun maxMotion(observation: CaptureObservation): MotionClass = maxOf(observation.cameraMotion, observation.subjectMotion)
     private fun estimateDuration(frames: List<CaptureFrameSpec>): Double = frames.sumOf { maxOf(it.exposureTimeNs / 1_000_000.0, 8.0) } + 18.0 * frames.size
 
-    companion object { private const val MIN_COMPUTATIONAL_BURST = 3 }
+    companion object {
+        private const val MIN_COMPUTATIONAL_BURST = 3
+        private const val MAX_INTENT_DELTA = 0.16
+    }
 }
