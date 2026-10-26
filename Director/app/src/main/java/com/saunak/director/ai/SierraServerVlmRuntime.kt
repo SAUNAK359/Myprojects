@@ -43,40 +43,25 @@ class SierraServerVlmRuntime(
     @Volatile private var activeJobId: String? = null
 
     override suspend fun load(modelPath: String, projectorPath: String): Result<Unit> =
-        if (isReady()) Result.success(Unit)
-        else Result.failure(IllegalStateException("Add a Gemini API key in Sierra or sign in to Sierra Vision"))
+        if (isReady()) Result.success(Unit) else Result.failure(IllegalStateException("Add a Gemini API key in Sierra or sign in to Sierra Vision"))
 
-    override suspend fun plan(
-        image: Bitmap,
-        capabilities: CapabilityRegistry,
-        camera: CameraSnapshot,
-        skillContext: String
-    ): Result<PlanOutput> {
-        // Beta priority: a user-entered Gemini key stays entirely in the app and is never sent to
-        // Sierra Server. The local reconciler / CaptureCompiler remain the safety authority.
+    override suspend fun plan(image: Bitmap, capabilities: CapabilityRegistry, camera: CameraSnapshot, skillContext: String): Result<PlanOutput> {
         if (geminiKeyStore.isConfigured()) {
             directGemini.setMaxImageDimension(maxImageDimension)
             return directGemini.plan(image, capabilities, camera, skillContext)
         }
-        if (!server.configured || !server.authenticated) {
-            return Result.failure(IllegalStateException("Sierra AI requires a Gemini API key or signed-in Sierra Server session"))
-        }
+        if (!server.configured || !server.authenticated) return Result.failure(IllegalStateException("Sierra AI requires a Gemini API key or signed-in Sierra Server session"))
         return try {
             val capabilityJson = readCapabilitySnapshot(capabilities, camera)
             val localQualityJson = buildQualityJson(image)
             val cameraContextJson = buildCameraContextJson(capabilities, camera)
             val created = server.createAnalysisJob(
-                imageJpeg = encode(image),
-                cameraContextJson = cameraContextJson,
-                deviceCapabilitiesJson = capabilityJson,
-                localQualityJson = localQualityJson,
-                skillContext = skillContext,
-                idempotencyKey = UUID.randomUUID().toString()
+                imageJpeg = encode(image), cameraContextJson = cameraContextJson,
+                deviceCapabilitiesJson = capabilityJson, localQualityJson = localQualityJson,
+                skillContext = skillContext, idempotencyKey = UUID.randomUUID().toString()
             ).getOrThrow()
             activeJobId = created.id
-            val readyJob = awaitReady(created)
-            val plan = toPlanOutput(readyJob)
-            Result.success(VlmContractValidator.plan(plan))
+            Result.success(VlmContractValidator.plan(toPlanOutput(awaitReady(created))))
         } catch (t: Throwable) {
             activeJobId = null
             Result.failure(t)
@@ -91,12 +76,14 @@ class SierraServerVlmRuntime(
         previousIssues: List<String>,
         evaluationContext: String,
         capabilities: CapabilityRegistry
-    ): Result<EvaluationOutput> = Result.failure(
-        UnsupportedOperationException("Sierra Vision uses one semantic plan; final technical QA is local")
-    )
+    ): Result<EvaluationOutput> {
+        return if (geminiKeyStore.isConfigured()) {
+            directGemini.setMaxImageDimension(maxImageDimension)
+            directGemini.evaluate(image, objective, attempt, camera, previousIssues, evaluationContext, capabilities)
+        } else Result.failure(UnsupportedOperationException("Sierra Server final review is not enabled for this beta path"))
+    }
 
     override suspend fun completeFinalCapture(captureId: String): Result<Unit> {
-        // Direct Gemini requests are stateless and have no Sierra credit settlement.
         if (geminiKeyStore.isConfigured()) return Result.success(Unit)
         val jobId = activeJobId ?: return Result.success(Unit)
         activeJobId = null
@@ -132,9 +119,12 @@ class SierraServerVlmRuntime(
         directGemini.setMaxImageDimension(maxImageDimension)
     }
 
-    override fun cancel() { cancelCloudJob() }
+    override fun cancel() = cancelCloudJob()
     override fun isReady(): Boolean = geminiKeyStore.isConfigured() || (server.configured && server.authenticated)
-    override fun unload() { cancelCloudJob() }
+    override fun waitForSemanticPlan(): Boolean = geminiKeyStore.isConfigured()
+    override fun supportsFinalReview(): Boolean = geminiKeyStore.isConfigured()
+    override fun diagnostics(): VlmDiagnostics = if (geminiKeyStore.isConfigured()) directGemini.diagnostics() else VlmDiagnostics("sierra_server")
+    override fun unload() = cancelCloudJob()
     override fun close() { cancelCloudJob(); directGemini.close(); scope.cancel() }
 
     private suspend fun readCapabilitySnapshot(capabilities: CapabilityRegistry, camera: CameraSnapshot): String = withContext(Dispatchers.IO) {
@@ -146,31 +136,20 @@ class SierraServerVlmRuntime(
     private fun buildQualityJson(image: Bitmap): String {
         val quality = PhotoQuality.analyze(image)
         return JSONObject().apply {
-            put("mean_luma", quality.meanLuma)
-            put("luma_std_dev", quality.lumaStdDev)
-            put("shadow_p05", quality.shadowP05)
-            put("median_luma", quality.medianLuma)
-            put("highlight_p95", quality.highlightP95)
-            put("top_mean_luma", quality.topMeanLuma)
-            put("bottom_mean_luma", quality.bottomMeanLuma)
-            put("top_bottom_delta", quality.topMeanLuma - quality.bottomMeanLuma)
-            put("highlight_clip", quality.brightClipFraction)
-            put("shadow_clip", quality.darkClipFraction)
-            put("edge_energy", quality.edgeEnergy)
-            put("horizontal_edge_energy", quality.horizontalEdgeEnergy)
-            put("vertical_edge_energy", quality.verticalEdgeEnergy)
-            put("strong_edge_fraction", quality.strongEdgeFraction)
-            put("heuristic_score", quality.heuristicScore)
-            put("catastrophic", quality.catastrophic)
+            put("mean_luma", quality.meanLuma); put("luma_std_dev", quality.lumaStdDev)
+            put("shadow_p05", quality.shadowP05); put("median_luma", quality.medianLuma)
+            put("highlight_p95", quality.highlightP95); put("top_mean_luma", quality.topMeanLuma)
+            put("bottom_mean_luma", quality.bottomMeanLuma); put("top_bottom_delta", quality.topMeanLuma - quality.bottomMeanLuma)
+            put("highlight_clip", quality.brightClipFraction); put("shadow_clip", quality.darkClipFraction)
+            put("edge_energy", quality.edgeEnergy); put("horizontal_edge_energy", quality.horizontalEdgeEnergy)
+            put("vertical_edge_energy", quality.verticalEdgeEnergy); put("strong_edge_fraction", quality.strongEdgeFraction)
+            put("heuristic_score", quality.heuristicScore); put("catastrophic", quality.catastrophic)
         }.toString()
     }
 
     private fun buildCameraContextJson(capabilities: CapabilityRegistry, camera: CameraSnapshot): String = JSONObject().apply {
-        put("snapshot", camera.compactDescription())
-        put("lens_facing", capabilities.lensFacing)
-        put("zoom", camera.zoomRatio)
-        put("exposure_index", camera.exposureCompensationIndex)
-        put("extension", camera.extension.wireName)
+        put("snapshot", camera.compactDescription()); put("lens_facing", capabilities.lensFacing)
+        put("zoom", camera.zoomRatio); put("exposure_index", camera.exposureCompensationIndex); put("extension", camera.extension.wireName)
     }.toString()
 
     private suspend fun awaitReady(created: SierraJobDto): SierraJobDto {
@@ -190,34 +169,22 @@ class SierraServerVlmRuntime(
     private fun toPlanOutput(job: SierraJobDto): PlanOutput {
         val dto = checkNotNull(job.plan) { "Sierra Server returned ready without a plan" }
         return PlanOutput(
-            scene = dto.scene,
-            objective = dto.objective,
-            skillBranch = dto.branch,
-            referenceScore = dto.reference_score,
-            referenceAccept = dto.reference_accept,
+            scene = dto.scene, objective = dto.objective, skillBranch = dto.branch,
+            referenceScore = dto.reference_score, referenceAccept = dto.reference_accept,
             toolCalls = dto.calls.map { ToolCall(id = it.id, value = it.value, x = it.x, y = it.y, stringValue = it.stringValue) },
-            recapture = dto.recapture,
-            aspectRatio = dto.aspect_ratio,
-            cropCenterX = dto.crop_center_x,
-            cropCenterY = dto.crop_center_y,
-            planner = "sierra_ai_server"
+            recapture = dto.recapture, aspectRatio = dto.aspect_ratio,
+            cropCenterX = dto.crop_center_x, cropCenterY = dto.crop_center_y, planner = "sierra_ai_server"
         )
     }
 
     private fun encode(source: Bitmap): ByteArray {
         val longest = max(source.width, source.height)
         val output = if (longest > maxImageDimension) {
-            val scale = maxImageDimension.toFloat() / longest.toFloat()
+            val scale = maxImageDimension.toFloat() / longest
             Bitmap.createScaledBitmap(source, (source.width * scale).toInt().coerceAtLeast(1), (source.height * scale).toInt().coerceAtLeast(1), true)
         } else source
-        return try {
-            ByteArrayOutputStream().use { stream ->
-                check(output.compress(Bitmap.CompressFormat.JPEG, 76, stream)) { "Could not encode Sierra analysis frame" }
-                stream.toByteArray()
-            }
-        } finally {
-            if (output !== source && !output.isRecycled) output.recycle()
-        }
+        return try { ByteArrayOutputStream().use { stream -> check(output.compress(Bitmap.CompressFormat.JPEG, 76, stream)); stream.toByteArray() } }
+        finally { if (output !== source && !output.isRecycled) output.recycle() }
     }
 
     companion object {
