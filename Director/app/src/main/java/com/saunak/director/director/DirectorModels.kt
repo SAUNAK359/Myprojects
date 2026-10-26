@@ -81,11 +81,11 @@ data class EvaluationOutput(
     @SerialName("composition") val composition: Double = score,
     @SerialName("subject") val subject: Double = score,
     @SerialName("aesthetic") val aesthetic: Double = score,
-    @SerialName("intent_match") val intentMatch: Double = score,
-    @SerialName("naturalness") val naturalness: Double = score,
     @SerialName("accept") val accept: Boolean,
     @SerialName("issues") val issues: List<String> = emptyList(),
     @SerialName("delta") val deltaCalls: List<ToolCall> = emptyList(),
+    @SerialName("intent_match") val intentMatch: Double = score,
+    @SerialName("naturalness") val naturalness: Double = score,
     @SerialName("render_adjustment") val renderAdjustment: FinalRenderAdjustment = FinalRenderAdjustment()
 )
 
