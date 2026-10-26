@@ -39,7 +39,8 @@ object LookProcessor {
     /**
      * Small verification frames are readiness probes, not deliverables. Keep them on the cheap
      * matrix renderer so shutter preparation never runs the full adaptive search on the UI path.
-     * Saved photos still use ANIP at the larger bounded working resolution.
+     * Saved photos use the latest fresh v10 PhotographicIntent when available, so capture strategy
+     * and final artistic rendering are driven by one shared decision rather than separate guesses.
      */
     fun apply(source: Bitmap, spec: LookSpec): Bitmap {
         if (maxOf(source.width, source.height) <= VERIFICATION_FAST_PATH_MAX_EDGE) {
@@ -48,6 +49,16 @@ object LookProcessor {
         val engine = SierraEngine.getOrNull()
         if (engine != null && !source.isRecycled) {
             val rendered = runCatching {
+                val cognition = engine.cognition.latest()
+                val resolvedSpec = cognition?.intent?.render?.theme?.let { theme ->
+                    if (!theme.abstained && cognition.reliability.effectiveConfidence >= MIN_COGNITION_RENDER_CONFIDENCE) {
+                        LookSpec(
+                            look = theme.fallbackLook,
+                            strength = maxOf(spec.normalizedStrength, theme.strength)
+                                .coerceAtMost(cognition.intent.render.aggressiveness.toFloat().coerceAtLeast(theme.strength))
+                        )
+                    } else spec
+                } ?: spec
                 val track = engine.subjects.latest()
                 val subject = track?.let {
                     val mask = it.mask
@@ -62,13 +73,13 @@ object LookProcessor {
                     )
                 }
                 val request = AnipRequest(
-                    sceneLabel = "",
-                    objective = "",
-                    look = spec.look,
-                    lookStrength = spec.normalizedStrength,
+                    sceneLabel = cognition?.world?.sceneBranch.orEmpty(),
+                    objective = cognition?.intent?.objective.orEmpty(),
+                    look = resolvedSpec.look,
+                    lookStrength = resolvedSpec.normalizedStrength,
                     subjectPresent = subject != null,
-                    motionRisk = engine.motion.latest().conservativeRisk,
-                    reconstructionIntegrity = 0.78
+                    motionRisk = cognition?.world?.motionRisk ?: engine.motion.latest().conservativeRisk,
+                    reconstructionIntegrity = cognition?.reliability?.effectiveConfidence?.coerceIn(0.0, 1.0) ?: 0.78
                 )
                 AnipEngine().render(source, request, subject).first
             }.getOrNull()
@@ -159,4 +170,5 @@ object LookProcessor {
     }
 
     private const val VERIFICATION_FAST_PATH_MAX_EDGE = 1200
+    private const val MIN_COGNITION_RENDER_CONFIDENCE = 0.24
 }
