@@ -43,9 +43,10 @@ class SierraCaptureBridge(
             val twin = engine.deviceTwin().getOrThrow()
             val cameraId = telemetry.cameraId ?: camera.activeCameraId()
             val module = requireNotNull(cameraId?.let(twin::camera)) { "Active camera is missing from Sierra device twin" }
-            val observation = estimateObservation(state).copy(
+            val measuredObservation = estimateObservation(state)
+            val observation = measuredObservation.copy(
                 // Reliability may reduce authority, but artistic intent must never rewrite measured risk.
-                confidence = minOf(estimateObservation(state).confidence, cognition.reliability.effectiveConfidence)
+                confidence = minOf(measuredObservation.confidence, cognition.reliability.effectiveConfidence)
             )
             val budget = CaptureBudget(
                 thermalPressure = thermal.thermalPressure,
