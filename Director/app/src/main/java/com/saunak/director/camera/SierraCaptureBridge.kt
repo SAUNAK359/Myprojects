@@ -7,6 +7,7 @@ import com.saunak.director.engine.capture.CaptureBudget
 import com.saunak.director.engine.capture.CaptureCompiler
 import com.saunak.director.engine.capture.CaptureObservation
 import com.saunak.director.engine.capture.CaptureProgram
+import com.saunak.director.engine.cognition.CognitionDecision
 import com.saunak.director.engine.motion.MotionExposurePolicy
 import com.saunak.director.engine.state.SceneState
 import com.saunak.director.engine.state.SceneStateAssembler
@@ -18,48 +19,36 @@ import kotlinx.coroutines.withContext
 import kotlin.math.log2
 import kotlin.math.max
 
-/**
- * Converts one coherent temporal SceneState into a physics-constrained Sierra capture program.
- * v10 additionally evaluates the cognition/reliability plane from the same SceneState before the
- * CaptureCompiler runs. Cognition may tighten priorities, but sensor legality remains compiler-owned.
- */
 class SierraCaptureBridge(
     private val camera: CameraEngine,
     private val engine: SierraEngine = SierraEngine.get(),
     private val compiler: CaptureCompiler = CaptureCompiler()
 ) {
+    /** Always available, including when an OEM CameraX extension is active. */
+    suspend fun evaluateCognition(quality: TechnicalQuality, scene: SierraSceneSignals): Result<CognitionDecision> =
+        withContext(Dispatchers.Default) {
+            runCatching { engine.cognition.evaluate(assembleState(quality, scene)) }
+        }
+
     suspend fun plan(
         quality: TechnicalQuality,
         scene: SierraSceneSignals,
         thermal: ThermalPolicy
     ): Result<CaptureProgram> = withContext(Dispatchers.Default) {
         runCatching {
-            val motion = engine.motionProbe.measure(camera)
-            val telemetry = requireNotNull(camera.sensorTelemetry()) {
-                "No synchronized Camera2 sensor telemetry is available yet"
-            }
+            val state = assembleState(quality, scene)
+            val cognition = engine.cognition.evaluate(state)
+            val telemetry = state.telemetry
             val twin = engine.deviceTwin().getOrThrow()
             val cameraId = telemetry.cameraId ?: camera.activeCameraId()
-            val module = requireNotNull(cameraId?.let(twin::camera)) {
-                "Active camera is missing from Sierra device twin"
-            }
-            val state = SceneStateAssembler.assemble(
-                scene = scene,
-                quality = quality,
-                motion = motion,
-                telemetry = telemetry,
-                zoomRatio = camera.snapshot().zoomRatio,
-                subject = engine.subjects.latest()
-            )
-            val cognition = engine.cognition.evaluate(state)
+            val module = requireNotNull(cameraId?.let(twin::camera)) { "Active camera is missing from Sierra device twin" }
             val observation = estimateObservation(state).let { base ->
                 val intent = cognition.intent
                 base.copy(
                     highlightClipRisk = max(base.highlightClipRisk, intent.capture.highlightProtectionPriority * base.highlightClipRisk),
                     shadowNoiseRisk = max(base.shadowNoiseRisk, intent.capture.shadowRecoveryPriority * base.shadowNoiseRisk),
                     confidence = minOf(base.confidence, cognition.reliability.effectiveConfidence),
-                    motionRisk = max(base.motionRisk ?: 0.0, intent.capture.motionFreezePriority * (base.motionRisk ?: state.motion.conservativeRisk))
-                        .coerceIn(0.0, 1.0)
+                    motionRisk = max(base.motionRisk ?: 0.0, intent.capture.motionFreezePriority * (base.motionRisk ?: state.motion.conservativeRisk)).coerceIn(0.0, 1.0)
                 )
             }
             val budget = CaptureBudget(
@@ -77,6 +66,19 @@ class SierraCaptureBridge(
         }
     }
 
+    private suspend fun assembleState(quality: TechnicalQuality, scene: SierraSceneSignals): SceneState {
+        val motion = engine.motionProbe.measure(camera)
+        val telemetry = requireNotNull(camera.sensorTelemetry()) { "No synchronized Camera2 sensor telemetry is available yet" }
+        return SceneStateAssembler.assemble(
+            scene = scene,
+            quality = quality,
+            motion = motion,
+            telemetry = telemetry,
+            zoomRatio = camera.snapshot().zoomRatio,
+            subject = engine.subjects.latest()
+        )
+    }
+
     internal fun estimateObservation(state: SceneState): CaptureObservation {
         val quality = state.technicalQuality
         val scene = state.sceneSignals
@@ -90,14 +92,9 @@ class SierraCaptureBridge(
         val effectiveConfidence = (state.confidence * (1.0 - 0.35 * state.uncertainty)).coerceIn(0.0, 1.0)
         val baseExposureCap = MotionExposurePolicy.exposureCapNs(state.motion)
         val predictive = state.predictiveSubject
-        val predictiveCap = predictive?.let {
-            (baseExposureCap.toDouble() * it.exposureCapMultiplier).toLong().coerceAtLeast(MIN_PREDICTIVE_EXPOSURE_NS)
-        }
+        val predictiveCap = predictive?.let { (baseExposureCap.toDouble() * it.exposureCapMultiplier).toLong().coerceAtLeast(MIN_PREDICTIVE_EXPOSURE_NS) }
         val exposureCap = minOf(baseExposureCap, predictiveCap ?: baseExposureCap)
-        val combinedMotionRisk = max(
-            state.motion.conservativeRisk,
-            predictive?.kinematicRisk?.times(predictive.confidence) ?: 0.0
-        ).coerceIn(0.0, 1.0)
+        val combinedMotionRisk = max(state.motion.conservativeRisk, predictive?.kinematicRisk?.times(predictive.confidence) ?: 0.0).coerceIn(0.0, 1.0)
 
         return CaptureObservation(
             dynamicRangeStops = rangeProxyStops,
@@ -116,7 +113,5 @@ class SierraCaptureBridge(
         )
     }
 
-    companion object {
-        private const val MIN_PREDICTIVE_EXPOSURE_NS = 2_000_000L
-    }
+    companion object { private const val MIN_PREDICTIVE_EXPOSURE_NS = 2_000_000L }
 }
