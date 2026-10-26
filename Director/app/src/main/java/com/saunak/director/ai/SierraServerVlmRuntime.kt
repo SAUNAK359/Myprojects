@@ -36,12 +36,15 @@ class SierraServerVlmRuntime(
 ) : VlmRuntime, SierraCloudJobRuntime {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val settlementPrefs = context.getSharedPreferences("sierra_ai_settlement_v1", Context.MODE_PRIVATE)
+    private val geminiKeyStore = GeminiApiKeyStore(context)
+    private val directGemini = GeminiDirectVlmRuntime(context, keyStore = geminiKeyStore)
 
     @Volatile private var maxImageDimension = 704
     @Volatile private var activeJobId: String? = null
 
     override suspend fun load(modelPath: String, projectorPath: String): Result<Unit> =
-        if (isReady()) Result.success(Unit) else Result.failure(IllegalStateException("Sign in to Sierra Vision"))
+        if (isReady()) Result.success(Unit)
+        else Result.failure(IllegalStateException("Add a Gemini API key in Sierra or sign in to Sierra Vision"))
 
     override suspend fun plan(
         image: Bitmap,
@@ -49,7 +52,15 @@ class SierraServerVlmRuntime(
         camera: CameraSnapshot,
         skillContext: String
     ): Result<PlanOutput> {
-        if (!isReady()) return Result.failure(IllegalStateException("Sierra AI requires a signed-in Sierra Server session"))
+        // Beta priority: a user-entered Gemini key stays entirely in the app and is never sent to
+        // Sierra Server. The local reconciler / CaptureCompiler remain the safety authority.
+        if (geminiKeyStore.isConfigured()) {
+            directGemini.setMaxImageDimension(maxImageDimension)
+            return directGemini.plan(image, capabilities, camera, skillContext)
+        }
+        if (!server.configured || !server.authenticated) {
+            return Result.failure(IllegalStateException("Sierra AI requires a Gemini API key or signed-in Sierra Server session"))
+        }
         return try {
             val capabilityJson = readCapabilitySnapshot(capabilities, camera)
             val localQualityJson = buildQualityJson(image)
@@ -81,10 +92,12 @@ class SierraServerVlmRuntime(
         evaluationContext: String,
         capabilities: CapabilityRegistry
     ): Result<EvaluationOutput> = Result.failure(
-        UnsupportedOperationException("Sierra Vision uses one cloud plan; final technical QA is local")
+        UnsupportedOperationException("Sierra Vision uses one semantic plan; final technical QA is local")
     )
 
     override suspend fun completeFinalCapture(captureId: String): Result<Unit> {
+        // Direct Gemini requests are stateless and have no Sierra credit settlement.
+        if (geminiKeyStore.isConfigured()) return Result.success(Unit)
         val jobId = activeJobId ?: return Result.success(Unit)
         activeJobId = null
         settlementPrefs.edit().putString(KEY_PENDING_JOB, jobId).putString(KEY_PENDING_CAPTURE, captureId).apply()
@@ -108,16 +121,21 @@ class SierraServerVlmRuntime(
     }
 
     override fun cancelCloudJob() {
+        directGemini.cancel()
         val jobId = activeJobId ?: return
         activeJobId = null
         scope.launch { server.cancel(jobId) }
     }
 
-    override fun setMaxImageDimension(pixels: Int) { maxImageDimension = pixels.coerceIn(384, 896) }
+    override fun setMaxImageDimension(pixels: Int) {
+        maxImageDimension = pixels.coerceIn(384, 896)
+        directGemini.setMaxImageDimension(maxImageDimension)
+    }
+
     override fun cancel() { cancelCloudJob() }
-    override fun isReady(): Boolean = server.configured && server.authenticated
+    override fun isReady(): Boolean = geminiKeyStore.isConfigured() || (server.configured && server.authenticated)
     override fun unload() { cancelCloudJob() }
-    override fun close() { cancelCloudJob(); scope.cancel() }
+    override fun close() { cancelCloudJob(); directGemini.close(); scope.cancel() }
 
     private suspend fun readCapabilitySnapshot(capabilities: CapabilityRegistry, camera: CameraSnapshot): String = withContext(Dispatchers.IO) {
         deviceSkill.refresh(capabilities, camera)
