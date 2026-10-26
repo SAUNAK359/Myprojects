@@ -5,14 +5,20 @@ import org.json.JSONObject
 
 /** Reads the same asset-driven theme catalog used by Sierra cognition; no duplicated theme list. */
 class ThemePromptCatalog(context: Context) {
-    private val compact: String = run {
+    private val ids: Set<String>
+    private val compact: String
+
+    init {
         val root = JSONObject(context.applicationContext.assets.open("sierra/cognition_v1.json").bufferedReader().use { it.readText() })
         val themes = root.getJSONArray("themes")
-        buildString {
+        val collected = LinkedHashSet<String>()
+        compact = buildString {
             for (i in 0 until themes.length()) {
                 val theme = themes.getJSONObject(i)
+                val id = theme.getString("id")
+                collected += id
                 if (isNotEmpty()) append(" | ")
-                append(theme.getString("id"))
+                append(id)
                     .append("=")
                     .append(theme.getString("display_name"))
                     .append(";look=")
@@ -31,7 +37,12 @@ class ThemePromptCatalog(context: Context) {
                 }
             }
         }
+        ids = collected.toSet()
     }
 
     fun compactDescription(): String = compact
+    fun contains(themeId: String): Boolean = themeId in ids
+    fun requireInstalled(themeId: String) {
+        require(themeId.isBlank() || contains(themeId)) { "Gemini selected unknown Sierra theme: $themeId" }
+    }
 }
