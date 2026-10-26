@@ -7,6 +7,7 @@ import com.saunak.director.engine.render.AnipEngine
 import com.saunak.director.engine.render.AnipRequest
 import com.saunak.director.engine.render.AnipRenderResult
 import com.saunak.director.engine.render.AnipSubjectContext
+import com.saunak.director.processing.AdaptiveContrastFinisher
 import com.saunak.director.processing.LookSpec
 import java.io.File
 import kotlin.math.abs
@@ -67,6 +68,7 @@ suspend fun PhotoRepository.saveAnipFinal(
     val source = decodeOriented(file, PhotoRepository.PROCESSED_MAX_DIMENSION)
     var anip: Bitmap? = null
     var cropped: Bitmap? = null
+    var finished: Bitmap? = null
     return try {
         val output = AnipPhotoFinish.render(
             source = source,
@@ -80,8 +82,10 @@ suspend fun PhotoRepository.saveAnipFinal(
         cropped = if (ratio == null) output.bitmap else cropAnipBitmap(
             output.bitmap, ratio.first, ratio.second, cropCenterX, cropCenterY
         )
-        saveProcessed(checkNotNull(cropped), file)
+        finished = AdaptiveContrastFinisher.apply(checkNotNull(cropped))
+        saveProcessed(checkNotNull(finished), file)
     } finally {
+        finished?.let { if (it !== cropped && it !== anip && !it.isRecycled) it.recycle() }
         cropped?.let { if (it !== anip && !it.isRecycled) it.recycle() }
         anip?.let { if (!it.isRecycled) it.recycle() }
         if (!source.isRecycled) source.recycle()
