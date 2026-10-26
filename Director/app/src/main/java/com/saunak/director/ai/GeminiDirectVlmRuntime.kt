@@ -50,7 +50,11 @@ class GeminiDirectVlmRuntime(
             prompt = promptBuilder.planPrompt(capabilities, camera, skillContext, themeCatalog.compactDescription()),
             image = image,
             schema = planSchema(),
-            decode = { VlmContractValidator.plan(json.decodeFromString<PlanOutput>(it)) }
+            decode = { raw ->
+                val plan = VlmContractValidator.plan(json.decodeFromString<PlanOutput>(raw))
+                validateThemeReferences(plan)
+                plan
+            }
         )
 
     override suspend fun evaluate(
@@ -67,6 +71,17 @@ class GeminiDirectVlmRuntime(
         schema = evaluationSchema(),
         decode = { VlmContractValidator.evaluation(json.decodeFromString<EvaluationOutput>(it)) }
     )
+
+    private fun validateThemeReferences(plan: PlanOutput) {
+        val direction = plan.photographicDirection
+        if (!direction.abstain) {
+            require(direction.selectedThemeId.isNotBlank()) { "Gemini omitted the Sierra theme id" }
+            themeCatalog.requireInstalled(direction.selectedThemeId)
+        } else if (direction.selectedThemeId.isNotBlank()) {
+            themeCatalog.requireInstalled(direction.selectedThemeId)
+        }
+        direction.themeBlend.forEach { component -> themeCatalog.requireInstalled(component.themeId) }
+    }
 
     private suspend fun <T> request(prompt: String, image: Bitmap, schema: JSONObject, decode: (String) -> T): Result<T> = withContext(Dispatchers.IO) {
         val started = android.os.SystemClock.elapsedRealtime()
