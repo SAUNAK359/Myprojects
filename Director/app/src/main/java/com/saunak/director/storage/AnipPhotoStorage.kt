@@ -2,18 +2,20 @@ package com.saunak.director.storage
 
 import android.graphics.Bitmap
 import android.net.Uri
+import com.saunak.director.director.FinalRenderAdjustment
+import com.saunak.director.director.PhotographicDirection
 import com.saunak.director.engine.SierraEngine
 import com.saunak.director.engine.render.AnipEngine
 import com.saunak.director.engine.render.AnipRequest
 import com.saunak.director.engine.render.AnipRenderResult
 import com.saunak.director.engine.render.AnipSubjectContext
-import com.saunak.director.processing.AdaptiveContrastFinisher
 import com.saunak.director.processing.LookSpec
+import com.saunak.director.processing.PhotographicDirectionFinisher
 import java.io.File
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
-internal object AnipPhotoFinish {
+object AnipPhotoFinish {
     data class Output(val bitmap: Bitmap, val result: AnipRenderResult)
 
     fun render(
@@ -21,7 +23,9 @@ internal object AnipPhotoFinish {
         look: LookSpec,
         sceneLabel: String,
         objective: String,
-        reconstructionIntegrity: Double
+        reconstructionIntegrity: Double,
+        direction: PhotographicDirection? = null,
+        adjustment: FinalRenderAdjustment? = null
     ): Output {
         val engine = SierraEngine.getOrNull()
         val track = engine?.subjects?.latest()
@@ -37,25 +41,27 @@ internal object AnipPhotoFinish {
                 trackConfidence = it.confidence
             )
         }
+        val resolvedLook = direction
+            ?.takeIf { !it.abstain && it.themeConfidence >= 0.20 && it.selectedThemeId.isNotBlank() }
+            ?.let { d -> engine?.cognition?.themeLook(d.selectedThemeId)?.let { themeLook -> LookSpec(themeLook, maxOf(look.normalizedStrength, d.themeStrength.toFloat())) } }
+            ?: look
         val motionRisk = engine?.motion?.latest()?.conservativeRisk ?: 0.45
         val request = AnipRequest(
             sceneLabel = sceneLabel,
             objective = objective,
-            look = look.look,
-            lookStrength = look.normalizedStrength,
+            look = resolvedLook.look,
+            lookStrength = resolvedLook.normalizedStrength,
             subjectPresent = subject != null,
             motionRisk = motionRisk,
             reconstructionIntegrity = reconstructionIntegrity.coerceIn(0.0, 1.0)
         )
-        val (bitmap, result) = AnipEngine().render(source, request, subject)
-        return Output(bitmap, result)
+        val (anip, result) = AnipEngine().render(source, request, subject)
+        val finished = PhotographicDirectionFinisher.apply(anip, direction, adjustment)
+        if (finished !== anip && !anip.isRecycled) anip.recycle()
+        return Output(finished, result)
     }
 }
 
-/**
- * ANIP finishing for CameraX/JPEG evidence paths. Catastrophic frames never call this extension;
- * callers preserve those byte-for-byte through saveRawJpeg().
- */
 suspend fun PhotoRepository.saveAnipFinal(
     file: File,
     look: LookSpec,
@@ -63,31 +69,30 @@ suspend fun PhotoRepository.saveAnipFinal(
     cropCenterX: Double = 0.5,
     cropCenterY: Double = 0.5,
     sceneLabel: String = "",
-    objective: String = ""
+    objective: String = "",
+    direction: PhotographicDirection? = null,
+    adjustment: FinalRenderAdjustment? = null
 ): Uri {
     val source = decodeOriented(file, PhotoRepository.PROCESSED_MAX_DIMENSION)
-    var anip: Bitmap? = null
+    var rendered: Bitmap? = null
     var cropped: Bitmap? = null
-    var finished: Bitmap? = null
     return try {
         val output = AnipPhotoFinish.render(
             source = source,
             look = look,
             sceneLabel = sceneLabel,
             objective = objective,
-            reconstructionIntegrity = JPEG_EVIDENCE_INTEGRITY_PRIOR
+            reconstructionIntegrity = JPEG_EVIDENCE_INTEGRITY_PRIOR,
+            direction = direction,
+            adjustment = adjustment
         )
-        anip = output.bitmap
+        rendered = output.bitmap
         val ratio = SierraCropPolicy.ratioOrNull(aspectRatio)
-        cropped = if (ratio == null) output.bitmap else cropAnipBitmap(
-            output.bitmap, ratio.first, ratio.second, cropCenterX, cropCenterY
-        )
-        finished = AdaptiveContrastFinisher.apply(checkNotNull(cropped))
-        saveProcessed(checkNotNull(finished), file)
+        cropped = if (ratio == null) output.bitmap else cropAnipBitmap(output.bitmap, ratio.first, ratio.second, cropCenterX, cropCenterY)
+        saveProcessed(checkNotNull(cropped), file)
     } finally {
-        finished?.let { if (it !== cropped && it !== anip && !it.isRecycled) it.recycle() }
-        cropped?.let { if (it !== anip && !it.isRecycled) it.recycle() }
-        anip?.let { if (!it.isRecycled) it.recycle() }
+        cropped?.let { if (it !== rendered && !it.isRecycled) it.recycle() }
+        rendered?.let { if (!it.isRecycled) it.recycle() }
         if (!source.isRecycled) source.recycle()
     }
 }
