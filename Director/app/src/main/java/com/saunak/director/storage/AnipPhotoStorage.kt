@@ -56,7 +56,7 @@ object AnipPhotoFinish {
             reconstructionIntegrity = reconstructionIntegrity.coerceIn(0.0, 1.0)
         )
         val (anip, result) = AnipEngine().render(source, request, subject)
-        val finished = PhotographicDirectionFinisher.apply(anip, direction, adjustment)
+        val finished = PhotographicDirectionFinisher.apply(anip, direction, adjustment, subject)
         if (finished !== anip && !anip.isRecycled) anip.recycle()
         return Output(finished, result)
     }
