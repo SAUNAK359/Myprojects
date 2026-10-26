@@ -8,6 +8,7 @@
         <exclude domain="sharedpref" path="sierra_ai_settlement_v1.xml" />
         <exclude domain="sharedpref" path="sierra_vision_preferences.xml" />
         <exclude domain="sharedpref" path="sierra_install_identity_v1.xml" />
+        <exclude domain="sharedpref" path="sierra_gemini_key_v1.xml" />
     </cloud-backup>
     <device-transfer>
         <exclude domain="file" path="models/" />
@@ -17,5 +18,6 @@
         <exclude domain="sharedpref" path="sierra_ai_settlement_v1.xml" />
         <exclude domain="sharedpref" path="sierra_vision_preferences.xml" />
         <exclude domain="sharedpref" path="sierra_install_identity_v1.xml" />
+        <exclude domain="sharedpref" path="sierra_gemini_key_v1.xml" />
     </device-transfer>
 </data-extraction-rules>
