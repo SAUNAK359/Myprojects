@@ -257,6 +257,7 @@ workflows:
                 - director-sierra-v7-prif
                 - director-sierra-v8-anip
                 - director-sierra-v8-hotfix-capture
+                - director-sierra-v10-cognition
       - director-compile-no-ui:
           filters: *director_filter
       - director-compile-no-runtime:
