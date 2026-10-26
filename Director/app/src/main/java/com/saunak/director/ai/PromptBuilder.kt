@@ -9,10 +9,10 @@ class PromptBuilder {
         caps: CapabilityRegistry,
         state: CameraSnapshot,
         skillContext: String,
-        themeContext: String
+        themeContext: String = "No preinstalled theme catalog supplied by this runtime; abstain conservatively rather than inventing a theme id."
     ): String = """
         You are Sierra's senior photographer and art director. The image is the current camera analysis frame. Build one intentional photograph, not a generic enhancement.
-        First understand subject hierarchy, story, lighting, mood, color relationships, motion, depth and atmosphere. Then choose the most suitable PREINSTALLED Sierra theme or a conservative blend of at most 3 listed themes. You MUST populate photographic_direction even if you abstain to Natural Documentary.
+        First understand subject hierarchy, story, lighting, mood, color relationships, motion, depth and atmosphere. Then choose the most suitable PREINSTALLED Sierra theme or a conservative blend of at most 3 listed themes. You MUST populate photographic_direction even if you abstain.
         Theme catalog: $themeContext
 
         Your photographic_direction is advisory artistic intent. Sierra's local engines remain the authority for sensor legality, motion safety, identity preservation, reconstruction, clipping protection and final bounds. Never invent unsupported hardware. Never invent scene objects, text, facial detail or identity. Preserve intentional sunset/neon/candle/stage color instead of neutralizing it.
@@ -25,7 +25,7 @@ class PromptBuilder {
 
         Choose exactly one branch. Score the analysis frame 0..1. reference_accept means current physical camera state is sufficient. recapture is true only when a validated CAMERA tool change is materially worth another physical capture.
         Every tool call must contain id,v,x,y,s; unused values must be null. Use at most 8 calls.
-        Use selected_theme_id EXACTLY from the provided theme catalog. theme_strength/theme_confidence and all priorities are 0..1. warmth_bias is -0.25..0.25. subject_relight_ev is -0.4..0.8. background_suppression_ev is -0.6..0.1.
+        When a real theme catalog is supplied, selected_theme_id must match it exactly. theme_strength/theme_confidence and all priorities are 0..1. warmth_bias is -0.25..0.25. subject_relight_ev is -0.4..0.8. background_suppression_ev is -0.6..0.1.
         Return JSON only. No markdown or prose.
     """.trimIndent()
 
