@@ -6,6 +6,12 @@ import com.saunak.director.camera.CapabilityRegistry
 import com.saunak.director.director.EvaluationOutput
 import com.saunak.director.director.PlanOutput
 
+data class VlmDiagnostics(
+    val provider: String,
+    val latencyMs: Long? = null,
+    val lastError: String? = null
+)
+
 interface VlmRuntime {
     suspend fun load(modelPath: String, projectorPath: String): Result<Unit>
     suspend fun plan(image: Bitmap, capabilities: CapabilityRegistry, camera: CameraSnapshot, skillContext: String): Result<PlanOutput>
@@ -13,6 +19,9 @@ interface VlmRuntime {
     fun setMaxImageDimension(pixels: Int)
     fun cancel()
     fun isReady(): Boolean
+    fun waitForSemanticPlan(): Boolean = false
+    fun supportsFinalReview(): Boolean = false
+    fun diagnostics(): VlmDiagnostics = VlmDiagnostics(provider = "unknown")
     fun unload()
     fun close()
 }
