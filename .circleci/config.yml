@@ -63,19 +63,43 @@ jobs:
     steps:
       - checkout
       - run:
-          name: Enforce Sierra Server cloud boundary
+          name: Enforce Sierra AI provider boundary
           command: |
             set -euo pipefail
             SOURCE='Director/app/src/main/java'
-            FORBIDDEN='api\.groq\.com|openrouter\.ai|integrate\.api\.nvidia\.com|generativelanguage\.googleapis\.com|SecureApiKeyStore|AiProviderPreset|MultiProviderVlmRuntime|GeminiVlmRuntime|NvidiaNemotronVlmRuntime'
-            if grep -RniE "$FORBIDDEN" "$SOURCE"; then
-              echo 'ERROR: direct VLM provider configuration/credentials are forbidden in Sierra Vision Android source.'
-              exit 1
+            if [ "${CIRCLE_BRANCH:-}" = 'director-sierra-v10-cognition' ]; then
+              # v10 personal beta explicitly permits one direct Gemini path. The credential must be
+              # user-entered at runtime, Keystore-encrypted, and never compiled into the APK.
+              FORBIDDEN='api\.groq\.com|openrouter\.ai|integrate\.api\.nvidia\.com|SecureApiKeyStore|AiProviderPreset|MultiProviderVlmRuntime|NvidiaNemotronVlmRuntime'
+              if grep -RniE "$FORBIDDEN" "$SOURCE"; then
+                echo 'ERROR: unsupported direct AI provider path found in Sierra v10.'
+                exit 1
+              fi
+              test -f Director/app/src/main/java/com/saunak/director/ai/GeminiApiKeyStore.kt
+              test -f Director/app/src/main/java/com/saunak/director/ai/GeminiDirectVlmRuntime.kt
+              test -f Director/app/src/main/java/com/saunak/director/GeminiSetupActivity.kt
+              grep -q 'AndroidKeyStore' Director/app/src/main/java/com/saunak/director/ai/GeminiApiKeyStore.kt
+              grep -q 'generativelanguage.googleapis.com' Director/app/src/main/java/com/saunak/director/ai/GeminiDirectVlmRuntime.kt
+              if grep -RniE 'AIza[0-9A-Za-z_-]{20,}' Director .circleci codemagic.yaml; then
+                echo 'ERROR: a Gemini-style API key appears to be hardcoded in the repository.'
+                exit 1
+              fi
+              if grep -RniE 'GEMINI_API_KEY|buildConfigField\([^\n]*GEMINI' Director/app/build.gradle.kts Director/app/src/main/java; then
+                echo 'ERROR: Gemini credential must not be compiled into BuildConfig or source.'
+                exit 1
+              fi
+              echo 'Sierra v10 direct Gemini beta boundary verified.'
+            else
+              FORBIDDEN='api\.groq\.com|openrouter\.ai|integrate\.api\.nvidia\.com|generativelanguage\.googleapis\.com|SecureApiKeyStore|AiProviderPreset|MultiProviderVlmRuntime|GeminiVlmRuntime|NvidiaNemotronVlmRuntime'
+              if grep -RniE "$FORBIDDEN" "$SOURCE"; then
+                echo 'ERROR: direct VLM provider configuration/credentials are forbidden in Sierra Vision Android source.'
+                exit 1
+              fi
+              test -f Director/app/src/main/java/com/saunak/director/backend/SierraServerClient.kt
+              test -f Director/app/src/main/java/com/saunak/director/ai/SierraServerVlmRuntime.kt
+              grep -q 'SIERRA_SERVER_BASE_URL' Director/app/build.gradle.kts
+              echo 'Sierra Server boundary verified.'
             fi
-            test -f Director/app/src/main/java/com/saunak/director/backend/SierraServerClient.kt
-            test -f Director/app/src/main/java/com/saunak/director/ai/SierraServerVlmRuntime.kt
-            grep -q 'SIERRA_SERVER_BASE_URL' Director/app/build.gradle.kts
-            echo 'Sierra Server boundary verified.'
 
   director-compile-no-ui:
     docker:
