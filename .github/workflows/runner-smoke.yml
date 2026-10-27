@@ -12,19 +12,39 @@ permissions:
   contents: read
 
 jobs:
-  smoke:
-    name: GitHub hosted runner smoke test
+  linux:
+    name: Linux runner smoke
     runs-on: ubuntu-22.04
     timeout-minutes: 5
     steps:
       - name: Runner started
+        run: echo "linux-runner-ok"
+      - uses: actions/checkout@v4
+      - name: Confirm Director project
+        run: test -f Director/gradlew && test -f Director/settings.gradle.kts
+
+  windows:
+    name: Windows runner smoke
+    runs-on: windows-2022
+    timeout-minutes: 5
+    steps:
+      - name: Runner started
+        shell: pwsh
+        run: Write-Host "windows-runner-ok"
+      - uses: actions/checkout@v4
+      - name: Confirm Director project
+        shell: pwsh
         run: |
-          echo "runner-ok"
-          uname -a
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      - name: Confirm Director project exists
-        run: |
-          test -f Director/gradlew
-          test -f Director/settings.gradle.kts
-          echo "director-project-ok"
+          if (!(Test-Path 'Director/gradlew.bat')) { throw 'gradlew.bat missing' }
+          if (!(Test-Path 'Director/settings.gradle.kts')) { throw 'settings.gradle.kts missing' }
+
+  macos:
+    name: macOS runner smoke
+    runs-on: macos-14
+    timeout-minutes: 5
+    steps:
+      - name: Runner started
+        run: echo "macos-runner-ok"
+      - uses: actions/checkout@v4
+      - name: Confirm Director project
+        run: test -f Director/gradlew && test -f Director/settings.gradle.kts
