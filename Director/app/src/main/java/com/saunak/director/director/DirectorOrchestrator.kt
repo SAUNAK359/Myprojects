@@ -82,7 +82,6 @@ class DirectorOrchestrator(
 
     suspend fun onPrimaryPressed(): Uri? {
         if (approved != null) return captureFinal()
-        // Direct Gemini has its own network timeout. Do not silently replace it after 3.4 seconds.
         val completed = if (cloudEnabled && vlm.isReady() && vlm.waitForSemanticPlan()) {
             prepareShot(); true
         } else {
@@ -92,7 +91,9 @@ class DirectorOrchestrator(
             vlm.cancel()
             runCatching { tools.restoreUserState() }
             val session = generation.incrementAndGet()
-            emit(session, DirectorUiState(stage = DirectorStage.READY, aiAvailable = cloudEnabled && vlm.isReady(), sierraMode = SierraMode.BETA, status = "Sierra beta ready • preparation timed out", camera = camera.uiState(), recipeCount = recipeMemory.count(), aspectRatioOverride = aspectRatioOverride, keepOriginal = keepOriginal, aiFallbackReason = "prepare_timeout"))
+            emit(session, DirectorUiState(stage = DirectorStage.READY, aiAvailable = cloudEnabled && vlm.isReady(), sierraMode = SierraMode.BETA,
+                status = "Sierra ready • preparation deadline reached", camera = camera.uiState(), recipeCount = recipeMemory.count(),
+                aspectRatioOverride = aspectRatioOverride, keepOriginal = keepOriginal, aiFallbackReason = "prepare_timeout"))
         }
         return null
     }
@@ -105,11 +106,15 @@ class DirectorOrchestrator(
             tools.restoreUserState()
             val thermalPolicy = thermal.policy()
             val cloudAllowed = cloudEnabled && vlm.isReady() && thermalPolicy.allowAi
-            emit(session, DirectorUiState(DirectorStage.ANALYZING, cloudAllowed, if (cloudAllowed) "Sierra + Gemini reading the scene…" else "Sierra beta is reading the scene…", camera = camera.uiState(), sierraMode = if (cloudAllowed) SierraMode.AI else SierraMode.BETA, aspectRatioOverride = aspectRatioOverride, keepOriginal = keepOriginal))
+            emit(session, DirectorUiState(DirectorStage.ANALYZING, cloudAllowed,
+                if (cloudAllowed) "Sierra reading light, subject and scene…" else "Sierra local photography engine reading the scene…",
+                camera = camera.uiState(), sierraMode = if (cloudAllowed) SierraMode.AI else SierraMode.BETA,
+                aspectRatioOverride = aspectRatioOverride, keepOriginal = keepOriginal))
 
             planningBitmap = camera.captureAnalysisFrame(FAST_FRAME_TIMEOUT_MS)
             if (planningBitmap == null) {
-                emit(session, DirectorUiState(DirectorStage.CAPTURING, cloudAllowed, "Sampling camera…", camera = camera.uiState(), sierraMode = if (cloudAllowed) SierraMode.AI else SierraMode.BETA, aspectRatioOverride = aspectRatioOverride, keepOriginal = keepOriginal))
+                emit(session, DirectorUiState(DirectorStage.CAPTURING, cloudAllowed, "Sierra sampling camera…", camera = camera.uiState(),
+                    sierraMode = if (cloudAllowed) SierraMode.AI else SierraMode.BETA, aspectRatioOverride = aspectRatioOverride, keepOriginal = keepOriginal))
                 val fallback = storage.newAttempt(session, 0).also { created += it }
                 camera.capturePrivate(fallback)
                 assertCurrent(session)
@@ -119,7 +124,8 @@ class DirectorOrchestrator(
             val frame = checkNotNull(planningBitmap)
             val referenceQuality = PhotoQuality.analyze(frame)
             if (referenceQuality.catastrophic) {
-                emit(session, DirectorUiState(DirectorStage.READY, cloudAllowed, "Scene too dark or blank • reframe", camera = camera.uiState(), sierraMode = SierraMode.BETA, aspectRatioOverride = aspectRatioOverride, keepOriginal = keepOriginal))
+                emit(session, DirectorUiState(DirectorStage.READY, cloudAllowed, "Scene too dark or blank • reframe", camera = camera.uiState(),
+                    sierraMode = SierraMode.BETA, aspectRatioOverride = aspectRatioOverride, keepOriginal = keepOriginal))
                 return null
             }
 
@@ -138,21 +144,24 @@ class DirectorOrchestrator(
                     withTimeoutOrNull(COGNITION_BUDGET_MS) { captureBridge.evaluateCognition(referenceQuality, sceneSignals).getOrNull() }
                 }
                 val semanticPlan = if (cloudAllowed) {
-                    emit(session, DirectorUiState(DirectorStage.ANALYZING, true, "Gemini is directing the photograph…", camera = camera.uiState(), sierraMode = SierraMode.AI, aspectRatioOverride = aspectRatioOverride, keepOriginal = keepOriginal, aiProvider = vlm.diagnostics().provider))
+                    emit(session, DirectorUiState(DirectorStage.ANALYZING, true, "Sierra composing the photograph…", camera = camera.uiState(),
+                        sierraMode = SierraMode.AI, aspectRatioOverride = aspectRatioOverride, keepOriginal = keepOriginal))
                     vlm.setMaxImageDimension(if (vlm.waitForSemanticPlan()) 512 else thermalPolicy.maxAiDimension)
                     val result = if (vlm.waitForSemanticPlan()) {
                         vlm.plan(frame, planningCaps, camera.snapshot(), skills.planningContext())
                     } else {
                         withTimeoutOrNull(CLOUD_PLAN_BUDGET_MS) { vlm.plan(frame, planningCaps, camera.snapshot(), skills.planningContext()) }
-                            ?: Result.failure(IllegalStateException("AI planning timeout"))
+                            ?: Result.failure(IllegalStateException("Sierra semantic planning deadline"))
                     }
                     val cloudPlan = result.getOrNull()
                     if (cloudPlan != null) {
                         mode = SierraMode.AI
                         consumeCompositionIntent(SierraPlanReconciler.reconcile(cloudPlan, localPlan, sceneSignals), localPlan)
                     } else {
-                        aiFallbackReason = result.exceptionOrNull()?.message?.take(120) ?: "Gemini plan unavailable"
-                        emit(session, DirectorUiState(DirectorStage.PLANNING, false, "Gemini unavailable • Sierra beta taking over", camera = camera.uiState(), sierraMode = SierraMode.BETA, aspectRatioOverride = aspectRatioOverride, keepOriginal = keepOriginal, aiProvider = vlm.diagnostics().provider, aiLatencyMs = vlm.diagnostics().latencyMs, aiFallbackReason = aiFallbackReason))
+                        aiFallbackReason = result.exceptionOrNull()?.message?.take(120) ?: "Sierra semantic plan unavailable"
+                        emit(session, DirectorUiState(DirectorStage.PLANNING, false, "Sierra continuing locally • no interruption", camera = camera.uiState(),
+                            sierraMode = SierraMode.BETA, aspectRatioOverride = aspectRatioOverride, keepOriginal = keepOriginal,
+                            aiLatencyMs = vlm.diagnostics().latencyMs, aiFallbackReason = aiFallbackReason))
                         localPlan
                     }
                 } else localPlan
@@ -164,7 +173,14 @@ class DirectorOrchestrator(
             val userConstrainedPlan = aspectRatioOverride?.let { cognitionPlan.copy(aspectRatio = it) } ?: cognitionPlan
             val plan = InstantFinishEngine.enrich(userConstrainedPlan, referenceQuality)
             val aiDiag = vlm.diagnostics()
-            emit(session, DirectorUiState(DirectorStage.APPLYING, mode == SierraMode.AI, if (mode == SierraMode.AI) "Gemini directed • Sierra applying" else "Sierra beta preparing the shot", camera = camera.uiState(), sierraMode = mode, aspectRatio = plan.aspectRatio, aspectRatioOverride = aspectRatioOverride, sceneLabel = plan.scene, objective = plan.objective, keepOriginal = keepOriginal, aiProvider = if (mode == SierraMode.AI) aiDiag.provider else null, aiLatencyMs = if (mode == SierraMode.AI) aiDiag.latencyMs else null, aiTheme = plan.photographicDirection.selectedThemeId.takeIf(String::isNotBlank), aiThemeStrength = plan.photographicDirection.themeStrength, aiFallbackReason = aiFallbackReason))
+            emit(session, DirectorUiState(DirectorStage.APPLYING, mode == SierraMode.AI,
+                if (mode == SierraMode.AI) "Sierra direction locked • applying safely" else "Sierra preparing the shot",
+                camera = camera.uiState(), sierraMode = mode, aspectRatio = plan.aspectRatio, aspectRatioOverride = aspectRatioOverride,
+                sceneLabel = plan.scene, objective = plan.objective, keepOriginal = keepOriginal,
+                aiProvider = if (mode == SierraMode.AI) "Sierra Intelligence" else null,
+                aiLatencyMs = if (mode == SierraMode.AI) aiDiag.latencyMs else null,
+                aiTheme = plan.photographicDirection.selectedThemeId.takeIf(String::isNotBlank),
+                aiThemeStrength = plan.photographicDirection.themeStrength, aiFallbackReason = aiFallbackReason))
 
             val execution = tools.apply(plan.toolCalls, planningCaps)
             assertCurrent(session)
@@ -172,12 +188,16 @@ class DirectorOrchestrator(
             val appliedPlan = plan.copy(toolCalls = execution.applied)
 
             if (execution.requiresRecapture) {
-                emit(session, DirectorUiState(DirectorStage.CHECKING, mode == SierraMode.AI, "Locking focus & exposure…", camera = camera.uiState(), sierraMode = mode, aspectRatio = plan.aspectRatio, aspectRatioOverride = aspectRatioOverride, sceneLabel = plan.scene, objective = plan.objective, keepOriginal = keepOriginal, aiTheme = plan.photographicDirection.selectedThemeId))
+                emit(session, DirectorUiState(DirectorStage.CHECKING, mode == SierraMode.AI, "Sierra locking focus & exposure…", camera = camera.uiState(),
+                    sierraMode = mode, aspectRatio = plan.aspectRatio, aspectRatioOverride = aspectRatioOverride, sceneLabel = plan.scene,
+                    objective = plan.objective, keepOriginal = keepOriginal, aiTheme = plan.photographicDirection.selectedThemeId))
                 camera.awaitSettledState(LOCAL_SETTLE_TIMEOUT_MS)
                 assertCurrent(session)
             }
 
-            emit(session, DirectorUiState(DirectorStage.CHECKING, mode == SierraMode.AI, "Sierra checking capture integrity…", camera = camera.uiState(), sierraMode = mode, aspectRatio = plan.aspectRatio, aspectRatioOverride = aspectRatioOverride, sceneLabel = plan.scene, objective = plan.objective, keepOriginal = keepOriginal, aiTheme = plan.photographicDirection.selectedThemeId))
+            emit(session, DirectorUiState(DirectorStage.CHECKING, mode == SierraMode.AI, "Sierra checking capture integrity…", camera = camera.uiState(),
+                sierraMode = mode, aspectRatio = plan.aspectRatio, aspectRatioOverride = aspectRatioOverride, sceneLabel = plan.scene,
+                objective = plan.objective, keepOriginal = keepOriginal, aiTheme = plan.photographicDirection.selectedThemeId))
             val verification = camera.captureAnalysisFrame(FAST_VERIFY_TIMEOUT_MS)
             var finalObservedQuality: TechnicalQuality = referenceQuality
             val score = if (verification != null) {
@@ -186,7 +206,8 @@ class DirectorOrchestrator(
                     finalObservedQuality = cameraQuality
                     if (cameraQuality.catastrophic) {
                         tools.restoreUserState()
-                        emit(session, DirectorUiState(DirectorStage.READY, mode == SierraMode.AI, "Hold steady or add light • try again", camera = camera.uiState(), sierraMode = mode, aspectRatioOverride = aspectRatioOverride, keepOriginal = keepOriginal))
+                        emit(session, DirectorUiState(DirectorStage.READY, mode == SierraMode.AI, "Hold steady or add light • try again", camera = camera.uiState(),
+                            sierraMode = mode, aspectRatioOverride = aspectRatioOverride, keepOriginal = keepOriginal))
                         return null
                     }
                     val rendered = LookProcessor.apply(verification, look)
@@ -195,22 +216,20 @@ class DirectorOrchestrator(
                 } finally { if (!verification.isRecycled) verification.recycle() }
             } else CapturePolicy.combinedFallbackScore(plan.referenceScore, referenceQuality.heuristicScore)
 
-            // Cognition already ran above for every extension. Only custom capture compilation depends on extension support.
             val captureProgram = if (camera.snapshot().extension == DirectorExtension.NONE) {
                 withTimeoutOrNull(CAPTURE_PLAN_BUDGET_MS) { captureBridge.plan(finalObservedQuality, sceneSignals, thermalPolicy).getOrNull() }
             } else null
-
             approve(session, appliedPlan, look, score, mode, captureProgram, aiFallbackReason)
             return null
         } catch (_: StaleSession) {
-            runCatching { tools.restoreUserState() }
-            return null
+            runCatching { tools.restoreUserState() }; return null
         } catch (t: CancellationException) {
-            runCatching { tools.restoreUserState() }
-            throw t
+            runCatching { tools.restoreUserState() }; throw t
         } catch (t: Throwable) {
             runCatching { tools.restoreUserState() }
-            emit(session, DirectorUiState(DirectorStage.ERROR, false, "Sierra could not prepare this shot", error = t.message, camera = camera.uiState(), sierraMode = SierraMode.BETA, aspectRatioOverride = aspectRatioOverride, keepOriginal = keepOriginal, aiFallbackReason = t.message?.take(120)))
+            emit(session, DirectorUiState(DirectorStage.ERROR, false, "Sierra could not prepare this shot", error = t.message,
+                camera = camera.uiState(), sierraMode = SierraMode.BETA, aspectRatioOverride = aspectRatioOverride,
+                keepOriginal = keepOriginal, aiFallbackReason = t.message?.take(120)))
             return null
         } finally {
             planningBitmap?.let { if (!it.isRecycled) it.recycle() }
@@ -222,27 +241,17 @@ class DirectorOrchestrator(
         val current = plan.photographicDirection
         if (current.selectedThemeId.isNotBlank() && current.themeConfidence >= 0.20) return plan
         val local = cognition ?: return plan
-        val r = local.intent.render
-        val t = r.theme
+        val r = local.intent.render; val t = r.theme
         return plan.copy(photographicDirection = PhotographicDirection(
-            story = plan.objective,
-            mood = "scene-aware natural",
+            story = plan.objective, mood = "scene-aware natural",
             primarySubject = if (local.world.primaryHumanSubject) "human subject" else local.world.sceneBranch,
             narrativeRole = if (local.world.primaryHumanSubject) "hero" else "environment",
-            selectedThemeId = t.themeId,
-            themeStrength = t.strength.toDouble(),
-            themeConfidence = t.confidence,
-            atmospherePriority = r.atmospherePreservation,
-            skinNaturalness = r.skinNaturalness,
-            highlightProtection = r.highlightProtection,
-            shadowDepth = (1.0 - r.shadowRecovery * 0.55).coerceIn(0.0, 1.0),
-            midtoneContrast = 0.58,
-            localContrast = 0.56,
-            colorIntensity = 0.52,
-            subjectRelightEv = r.subjectRelightEv,
-            backgroundSuppressionEv = r.backgroundSuppressionEv,
-            abstain = t.abstained,
-            reasonCodes = t.reasonCodes
+            selectedThemeId = t.themeId, themeStrength = t.strength.toDouble(), themeConfidence = t.confidence,
+            atmospherePriority = r.atmospherePreservation, skinNaturalness = r.skinNaturalness,
+            highlightProtection = r.highlightProtection, shadowDepth = (1.0 - r.shadowRecovery * 0.55).coerceIn(0.0, 1.0),
+            midtoneContrast = 0.58, localContrast = 0.56, colorIntensity = 0.52,
+            subjectRelightEv = r.subjectRelightEv, backgroundSuppressionEv = r.backgroundSuppressionEv,
+            abstain = t.abstained, reasonCodes = t.reasonCodes
         ))
     }
 
@@ -254,9 +263,13 @@ class DirectorOrchestrator(
             SierraCropPolicy.isSupported(ai.aspectRatio) && ai.aspectRatio != "4:3" -> ai.aspectRatio
             else -> local.aspectRatio
         }
-        val centerX = (composition?.x ?: ai.cropCenterX).coerceIn(0.08, 0.92)
-        val centerY = (composition?.y ?: ai.cropCenterY).coerceIn(0.08, 0.92)
-        return ai.copy(aspectRatio = ratio, cropCenterX = centerX, cropCenterY = centerY, toolCalls = ai.toolCalls.filterNot { it.id == ToolIds.COMPOSITION }, planner = "sierra_ai")
+        return ai.copy(
+            aspectRatio = ratio,
+            cropCenterX = (composition?.x ?: ai.cropCenterX).coerceIn(0.08, 0.92),
+            cropCenterY = (composition?.y ?: ai.cropCenterY).coerceIn(0.08, 0.92),
+            toolCalls = ai.toolCalls.filterNot { it.id == ToolIds.COMPOSITION },
+            planner = "sierra_ai"
+        )
     }
 
     private fun combinedReadyScore(ai: Double, camera: Double, finish: Double): Double =
@@ -267,11 +280,19 @@ class DirectorOrchestrator(
         val captureSuffix = captureProgram?.takeIf { it.frames.size > 1 }?.let { " • ${it.frames.size}f smart burst" }.orEmpty()
         val theme = plan.photographicDirection.selectedThemeId.takeIf(String::isNotBlank)
         val diag = vlm.diagnostics()
-        emit(session, DirectorUiState(DirectorStage.PREPARED, mode == SierraMode.AI, if (mode == SierraMode.AI) "Ready • Gemini ${theme ?: "directed"}$captureSuffix" else "Ready • Sierra beta$captureSuffix", lastScore = score, camera = camera.uiState(), recipeCount = recipeMemory.count(), sierraMode = mode, aspectRatio = plan.aspectRatio, aspectRatioOverride = aspectRatioOverride, sceneLabel = plan.scene, objective = plan.objective, keepOriginal = keepOriginal, aiProvider = if (mode == SierraMode.AI) diag.provider else null, aiLatencyMs = if (mode == SierraMode.AI) diag.latencyMs else null, aiTheme = theme, aiThemeStrength = plan.photographicDirection.themeStrength, aiFallbackReason = fallback))
+        emit(session, DirectorUiState(DirectorStage.PREPARED, mode == SierraMode.AI,
+            if (mode == SierraMode.AI) "Ready • Sierra ${theme ?: "directed"}$captureSuffix" else "Ready • Sierra β$captureSuffix",
+            lastScore = score, camera = camera.uiState(), recipeCount = recipeMemory.count(), sierraMode = mode,
+            aspectRatio = plan.aspectRatio, aspectRatioOverride = aspectRatioOverride, sceneLabel = plan.scene,
+            objective = plan.objective, keepOriginal = keepOriginal, aiProvider = if (mode == SierraMode.AI) "Sierra Intelligence" else null,
+            aiLatencyMs = if (mode == SierraMode.AI) diag.latencyMs else null, aiTheme = theme,
+            aiThemeStrength = plan.photographicDirection.themeStrength, aiFallbackReason = fallback))
     }
 
     private suspend fun reviewFinal(source: Bitmap, state: ApprovedState): ReviewResult {
-        if (state.mode != SierraMode.AI || !cloudEnabled || !vlm.isReady() || !vlm.supportsFinalReview()) return ReviewResult(null, "local_critic_only")
+        if (state.mode != SierraMode.AI || !cloudEnabled || !vlm.isReady() || !vlm.supportsFinalReview()) {
+            return ReviewResult(null, "Sierra local critic passed")
+        }
         var scaled: Bitmap? = null
         var rendered: Bitmap? = null
         return try {
@@ -280,27 +301,18 @@ class DirectorOrchestrator(
                 val scale = FINAL_REVIEW_EDGE.toFloat() / longest
                 Bitmap.createScaledBitmap(source, maxOf(1, (source.width * scale).toInt()), maxOf(1, (source.height * scale).toInt()), true)
             } else source
-            rendered = AnipPhotoFinish.render(
-                source = checkNotNull(scaled),
-                look = state.look,
-                sceneLabel = state.plan.scene,
-                objective = state.plan.objective,
-                reconstructionIntegrity = 0.88,
-                direction = state.plan.photographicDirection
-            ).bitmap
-            val result = vlm.evaluate(
-                image = checkNotNull(rendered),
-                objective = state.plan.objective,
-                attempt = 1,
-                camera = camera.snapshot(),
-                previousIssues = emptyList(),
-                evaluationContext = skills.evaluationContext(state.plan.skillBranch),
-                capabilities = camera.capabilities()
-            )
+            rendered = AnipPhotoFinish.render(checkNotNull(scaled), state.look, state.plan.scene, state.plan.objective, 0.88, state.plan.photographicDirection).bitmap
+            val result = withTimeoutOrNull(FINAL_REVIEW_BUDGET_MS) {
+                vlm.evaluate(checkNotNull(rendered), state.plan.objective, 1, camera.snapshot(), emptyList(),
+                    skills.evaluationContext(state.plan.skillBranch), camera.capabilities())
+            }
+            if (result == null) return ReviewResult(null, "Sierra local critic passed • semantic review deadline")
             val review = result.getOrNull()
-            if (review == null) ReviewResult(null, "Gemini review unavailable: ${result.exceptionOrNull()?.message?.take(80) ?: "unknown"}")
-            else if (review.accept) ReviewResult(null, "Gemini review passed ${"%.2f".format(java.util.Locale.US, review.score)}")
-            else ReviewResult(review.renderAdjustment, "Gemini refined: ${review.issues.firstOrNull() ?: "intent mismatch"}")
+            when {
+                review == null -> ReviewResult(null, "Sierra local critic passed")
+                review.accept -> ReviewResult(null, "Sierra critic passed ${"%.2f".format(java.util.Locale.US, review.score)}")
+                else -> ReviewResult(review.renderAdjustment, "Sierra refined • ${review.issues.firstOrNull() ?: "intent alignment"}")
+            }
         } finally {
             rendered?.let { if (it !== scaled && !it.isRecycled) it.recycle() }
             scaled?.let { if (it !== source && !it.isRecycled) it.recycle() }
@@ -322,7 +334,11 @@ class DirectorOrchestrator(
             val activeExtension = camera.snapshot().extension
             val executableProgram = state.captureProgram.takeIf { activeExtension == DirectorExtension.NONE }
             val plannedFrames = executableProgram?.frames?.size ?: 1
-            emit(session, DirectorUiState(DirectorStage.FINAL_CAPTURING, state.mode == SierraMode.AI, if (plannedFrames > 1) "Capturing smart burst…" else "Capturing full quality…", lastScore = state.score, camera = camera.uiState(), sierraMode = state.mode, aspectRatio = state.plan.aspectRatio, aspectRatioOverride = aspectRatioOverride, sceneLabel = state.plan.scene, objective = state.plan.objective, keepOriginal = keepOriginal, aiTheme = state.plan.photographicDirection.selectedThemeId))
+            emit(session, DirectorUiState(DirectorStage.FINAL_CAPTURING, state.mode == SierraMode.AI,
+                if (plannedFrames > 1) "Capturing Sierra smart burst…" else "Capturing full quality…",
+                lastScore = state.score, camera = camera.uiState(), sierraMode = state.mode, aspectRatio = state.plan.aspectRatio,
+                aspectRatioOverride = aspectRatioOverride, sceneLabel = state.plan.scene, objective = state.plan.objective,
+                keepOriginal = keepOriginal, aiTheme = state.plan.photographicDirection.selectedThemeId))
             camera.awaitSettledState(550)
 
             if (executableProgram?.path == CapturePath.RAW_CUSTOM && camera.rawJpegCaptureSupported()) {
@@ -337,64 +353,65 @@ class DirectorOrchestrator(
                     if (prif.accepted && reconstruction != null) {
                         prifBitmap = reconstruction.bitmap
                         val captureScore = (0.55 * state.score + 0.45 * reconstruction.integrity.score).coerceIn(0.0, 1.0)
-                        emit(session, DirectorUiState(DirectorStage.SAVING, state.mode == SierraMode.AI, "P-RIF verified • Gemini reviewing render…", lastScore = captureScore, camera = camera.uiState(), sierraMode = state.mode, aiTheme = state.plan.photographicDirection.selectedThemeId))
+                        emit(session, DirectorUiState(DirectorStage.SAVING, state.mode == SierraMode.AI,
+                            "P-RIF verified • Sierra reviewing the photograph…", lastScore = captureScore, camera = camera.uiState(),
+                            sierraMode = state.mode, aiTheme = state.plan.photographicDirection.selectedThemeId))
                         val review = reviewFinal(reconstruction.bitmap, state)
-                        val uri = storage.savePrifReconstruction(
-                            bitmap = reconstruction.bitmap,
-                            sourceJpeg = safetyFile,
-                            look = state.look,
-                            aspectRatio = state.plan.aspectRatio,
-                            cropCenterX = state.plan.cropCenterX,
-                            cropCenterY = state.plan.cropCenterY,
-                            sceneLabel = state.plan.scene,
-                            objective = state.plan.objective,
-                            reconstructionIntegrity = reconstruction.integrity.score,
-                            direction = state.plan.photographicDirection,
-                            adjustment = review.adjustment
-                        )
+                        val uri = storage.savePrifReconstruction(reconstruction.bitmap, safetyFile, state.look, state.plan.aspectRatio,
+                            state.plan.cropCenterX, state.plan.cropCenterY, state.plan.scene, state.plan.objective,
+                            reconstruction.integrity.score, state.plan.photographicDirection, review.adjustment)
                         recipeMemory.remember(state.plan, captureScore)
-                        approved = null
-                        tools.restoreUserState()
-                        storage.markFinalized(safetyFile)
-                        prifSafety = null
-                        if (!reconstruction.bitmap.isRecycled) reconstruction.bitmap.recycle()
-                        prifBitmap = null
-                        emit(session, DirectorUiState(DirectorStage.READY, cloudEnabled && vlm.isReady(), "Sierra photo saved • ${review.status}", lastScore = captureScore, camera = camera.uiState(), lastSavedUri = uri.toString(), recipeCount = recipeMemory.count(), sierraMode = state.mode, aspectRatio = state.plan.aspectRatio, sceneLabel = state.plan.scene, objective = state.plan.objective, aiTheme = state.plan.photographicDirection.selectedThemeId, finalReviewStatus = review.status))
+                        approved = null; tools.restoreUserState(); storage.markFinalized(safetyFile); prifSafety = null
+                        if (!reconstruction.bitmap.isRecycled) reconstruction.bitmap.recycle(); prifBitmap = null
+                        emit(session, DirectorUiState(DirectorStage.READY, cloudEnabled && vlm.isReady(), "Sierra photo saved • ${review.status}",
+                            lastScore = captureScore, camera = camera.uiState(), lastSavedUri = uri.toString(), recipeCount = recipeMemory.count(),
+                            sierraMode = state.mode, aspectRatio = state.plan.aspectRatio, sceneLabel = state.plan.scene, objective = state.plan.objective,
+                            aiTheme = state.plan.photographicDirection.selectedThemeId, finalReviewStatus = review.status))
                         return uri
                     }
 
                     val captureScore = (0.78 * state.score + 0.22 * 0.55).coerceIn(0.0, 1.0)
                     val review = reviewFile(safetyFile, state)
-                    val uri = storage.saveAnipFinal(safetyFile, state.look, state.plan.aspectRatio, state.plan.cropCenterX, state.plan.cropCenterY, state.plan.scene, state.plan.objective, state.plan.photographicDirection, review.adjustment)
+                    val uri = storage.saveAnipFinal(safetyFile, state.look, state.plan.aspectRatio, state.plan.cropCenterX, state.plan.cropCenterY,
+                        state.plan.scene, state.plan.objective, state.plan.photographicDirection, review.adjustment)
                     recipeMemory.remember(state.plan, captureScore)
-                    approved = null
-                    tools.restoreUserState()
-                    storage.markFinalized(safetyFile)
-                    prifSafety = null
-                    emit(session, DirectorUiState(DirectorStage.READY, cloudEnabled && vlm.isReady(), "Sierra photo saved • ${review.status}", lastScore = captureScore, camera = camera.uiState(), lastSavedUri = uri.toString(), recipeCount = recipeMemory.count(), sierraMode = state.mode, aiTheme = state.plan.photographicDirection.selectedThemeId, finalReviewStatus = review.status))
+                    approved = null; tools.restoreUserState(); storage.markFinalized(safetyFile); prifSafety = null
+                    emit(session, DirectorUiState(DirectorStage.READY, cloudEnabled && vlm.isReady(), "Sierra photo saved • ${review.status}",
+                        lastScore = captureScore, camera = camera.uiState(), lastSavedUri = uri.toString(), recipeCount = recipeMemory.count(),
+                        sierraMode = state.mode, aiTheme = state.plan.photographicDirection.selectedThemeId, finalReviewStatus = review.status))
                     return uri
                 }
             }
 
-            val burstResult = safeBurstExecutor.execute(session, executableProgram, if (activeExtension == DirectorExtension.NONE) thermal.policy().maxSierraBurstFrames else 1)
+            val burstResult = safeBurstExecutor.execute(session, executableProgram,
+                if (activeExtension == DirectorExtension.NONE) thermal.policy().maxSierraBurstFrames else 1)
             burst = burstResult
             assertCurrent(session)
             val selected = burstResult.selected.file
             val captureScore = combinedReadyScore(state.score, burstResult.selected.quality.heuristicScore, burstResult.selected.score)
-            emit(session, DirectorUiState(DirectorStage.SAVING, state.mode == SierraMode.AI, if (burstResult.allCatastrophic) "Technical gate failed • preserving evidence…" else "Rendering ${state.plan.photographicDirection.selectedThemeId.ifBlank { "Sierra intent" }}…", lastScore = captureScore, camera = camera.uiState(), sierraMode = state.mode, aiTheme = state.plan.photographicDirection.selectedThemeId))
+            emit(session, DirectorUiState(DirectorStage.SAVING, state.mode == SierraMode.AI,
+                if (burstResult.allCatastrophic) "Technical gate failed • preserving evidence…" else "Sierra rendering ${state.plan.photographicDirection.selectedThemeId.ifBlank { "photographic intent" }}…",
+                lastScore = captureScore, camera = camera.uiState(), sierraMode = state.mode, aiTheme = state.plan.photographicDirection.selectedThemeId))
             if (keepOriginal) runCatching { storage.saveOriginal(selected) }
-            val review = if (burstResult.allCatastrophic) ReviewResult(null, "technical_safety_frame") else reviewFile(selected, state)
-            val uri = if (burstResult.allCatastrophic) storage.saveRawJpeg(selected) else storage.saveAnipFinal(selected, state.look, state.plan.aspectRatio, state.plan.cropCenterX, state.plan.cropCenterY, state.plan.scene, state.plan.objective, state.plan.photographicDirection, review.adjustment)
+            val review = if (burstResult.allCatastrophic) ReviewResult(null, "technical safety frame") else reviewFile(selected, state)
+            val uri = if (burstResult.allCatastrophic) storage.saveRawJpeg(selected)
+                else storage.saveAnipFinal(selected, state.look, state.plan.aspectRatio, state.plan.cropCenterX, state.plan.cropCenterY,
+                    state.plan.scene, state.plan.objective, state.plan.photographicDirection, review.adjustment)
             recipeMemory.remember(state.plan, captureScore)
-            approved = null
-            tools.restoreUserState()
+            approved = null; tools.restoreUserState()
             val savedStatus = when {
                 burstResult.allCatastrophic -> "Sierra saved untouched safety evidence"
                 burstResult.truncatedByFailure -> "Sierra photo saved • burst shortened • ${review.status}"
                 burstResult.executedCount > 1 -> "Sierra photo saved • best of ${burstResult.executedCount} • ${review.status}"
                 else -> "Sierra photo saved • ${review.status}"
             }
-            emit(session, DirectorUiState(DirectorStage.READY, cloudEnabled && vlm.isReady(), savedStatus, lastScore = captureScore, camera = camera.uiState(), lastSavedUri = uri.toString(), recipeCount = recipeMemory.count(), sierraMode = state.mode, aspectRatio = state.plan.aspectRatio, aspectRatioOverride = aspectRatioOverride, sceneLabel = state.plan.scene, objective = state.plan.objective, keepOriginal = keepOriginal, aiProvider = vlm.diagnostics().provider, aiLatencyMs = vlm.diagnostics().latencyMs, aiTheme = state.plan.photographicDirection.selectedThemeId, aiThemeStrength = state.plan.photographicDirection.themeStrength, finalReviewStatus = review.status))
+            emit(session, DirectorUiState(DirectorStage.READY, cloudEnabled && vlm.isReady(), savedStatus,
+                lastScore = captureScore, camera = camera.uiState(), lastSavedUri = uri.toString(), recipeCount = recipeMemory.count(),
+                sierraMode = state.mode, aspectRatio = state.plan.aspectRatio, aspectRatioOverride = aspectRatioOverride,
+                sceneLabel = state.plan.scene, objective = state.plan.objective, keepOriginal = keepOriginal,
+                aiProvider = if (state.mode == SierraMode.AI) "Sierra Intelligence" else null,
+                aiLatencyMs = vlm.diagnostics().latencyMs, aiTheme = state.plan.photographicDirection.selectedThemeId,
+                aiThemeStrength = state.plan.photographicDirection.themeStrength, finalReviewStatus = review.status))
             uri
         } catch (t: Throwable) {
             approved = null
@@ -402,10 +419,13 @@ class DirectorOrchestrator(
                 ?: burst?.selected?.file?.takeIf { it.isFile && it.length() > 0L }?.let { runCatching { storage.saveRawJpeg(it) }.getOrNull() }
             runCatching { tools.restoreUserState() }
             if (fallbackUri != null) {
-                emit(session, DirectorUiState(DirectorStage.READY, cloudEnabled && vlm.isReady(), "Sierra finishing failed • untouched capture saved", error = t.message, camera = camera.uiState(), lastSavedUri = fallbackUri.toString(), sierraMode = state.mode, aiTheme = state.plan.photographicDirection.selectedThemeId, finalReviewStatus = "failed:${t.message?.take(80)}"))
+                emit(session, DirectorUiState(DirectorStage.READY, cloudEnabled && vlm.isReady(), "Sierra finishing failed • untouched capture saved",
+                    error = t.message, camera = camera.uiState(), lastSavedUri = fallbackUri.toString(), sierraMode = state.mode,
+                    aiTheme = state.plan.photographicDirection.selectedThemeId, finalReviewStatus = "failed:${t.message?.take(80)}"))
                 fallbackUri
             } else {
-                emit(session, DirectorUiState(DirectorStage.ERROR, cloudEnabled && vlm.isReady(), "Final capture failed", error = t.message, camera = camera.uiState(), sierraMode = state.mode, finalReviewStatus = "failed"))
+                emit(session, DirectorUiState(DirectorStage.ERROR, cloudEnabled && vlm.isReady(), "Final capture failed", error = t.message,
+                    camera = camera.uiState(), sierraMode = state.mode, finalReviewStatus = "failed"))
                 null
             }
         } finally {
@@ -429,6 +449,7 @@ class DirectorOrchestrator(
         private const val LOCAL_PERCEPTION_BUDGET_MS = 520L
         private const val COGNITION_BUDGET_MS = 900L
         private const val CAPTURE_PLAN_BUDGET_MS = 550L
+        private const val FINAL_REVIEW_BUDGET_MS = 1_650L
         private const val FINAL_REVIEW_EDGE = 640
     }
 }
