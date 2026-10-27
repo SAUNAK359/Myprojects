@@ -1,6 +1,6 @@
 workflows:
   director-android-debug:
-    name: Director Android Debug
+    name: Sierra Android Demo Debug
     working_directory: Director
     instance_type: mac_mini_m2
     max_build_duration: 60
@@ -20,39 +20,38 @@ workflows:
           echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
           java -version
           ./gradlew --version
-      - name: Unit tests
+      - name: Compile, test and lint
         script: |
           set -euo pipefail
-          ./gradlew --no-daemon testDebugUnitTest
-      - name: Build debug APK
+          ./gradlew --no-daemon --stacktrace compileDebugKotlin testDebugUnitTest lintDebug
+      - name: Build and verify demo APK
         script: |
           set -euo pipefail
-          ./gradlew --no-daemon assembleDebug
+          ./gradlew --no-daemon --stacktrace assembleDebug
           APK="$(find app/build/outputs/apk/debug -name '*.apk' -type f -print -quit)"
           test -n "$APK" && test -s "$APK"
-          echo "APK: $APK"
-          ls -lh "$APK"
-      - name: Lint report (debug diagnostic)
-        script: |
-          set -uo pipefail
-          set +e
-          ./gradlew --no-daemon lintDebug
-          STATUS=$?
-          set -e
-          if [ "$STATUS" -ne 0 ]; then
-            echo "Debug APK remains publishable; lint findings are retained as artifacts."
-            echo "Release workflow remains strict and will fail on lint errors."
-          fi
-          exit 0
+          APKSIGNER="$(command -v apksigner || true)"
+          ZIPALIGN="$(command -v zipalign || true)"
+          if [ -z "$APKSIGNER" ]; then APKSIGNER="$(find "$ANDROID_SDK_ROOT/build-tools" -name apksigner -type f | sort | tail -1)"; fi
+          if [ -z "$ZIPALIGN" ]; then ZIPALIGN="$(find "$ANDROID_SDK_ROOT/build-tools" -name zipalign -type f | sort | tail -1)"; fi
+          test -x "$APKSIGNER" && test -x "$ZIPALIGN"
+          "$APKSIGNER" verify --verbose --print-certs "$APK"
+          "$ZIPALIGN" -c -P 16 -v 4 "$APK" >/dev/null
+          unzip -t "$APK" >/dev/null
+          unzip -l "$APK" | grep -qE '(^|[[:space:]])classes\.dex$'
+          sha256sum "$APK" | tee "$APK.sha256"
+          echo "Verified demo APK: $APK"
+          ls -lh "$APK" "$APK.sha256"
     artifacts:
       - app/build/outputs/**/*.apk
+      - app/build/outputs/**/*.sha256
       - app/build/reports/lint-results-*.html
       - app/build/reports/lint-results-*.txt
       - app/build/reports/lint-results-*.xml
       - app/build/test-results/**/*.xml
 
   director-android-release:
-    name: Director Android Release
+    name: Sierra Android Production Release
     working_directory: Director
     instance_type: mac_mini_m2
     max_build_duration: 60
@@ -65,6 +64,15 @@ workflows:
         - $HOME/.gradle/caches
         - $HOME/.gradle/director-wrapper
     scripts:
+      - name: Validate release signing contract
+        script: |
+          set -euo pipefail
+          : "${CM_KEYSTORE_PATH:?CM_KEYSTORE_PATH is required for a production release}"
+          : "${CM_KEYSTORE_PASSWORD:?CM_KEYSTORE_PASSWORD is required for a production release}"
+          : "${CM_KEY_ALIAS:?CM_KEY_ALIAS is required for a production release}"
+          : "${CM_KEY_PASSWORD:?CM_KEY_PASSWORD is required for a production release}"
+          test -f "$CM_KEYSTORE_PATH"
+          test -n "${BUILD_NUMBER:-}"
       - name: Environment
         script: |
           set -euo pipefail
@@ -72,22 +80,41 @@ workflows:
           echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
           java -version
           ./gradlew --version
-      - name: Validate release
+      - name: Compile, test, lint and build production artifacts
         script: |
           set -euo pipefail
-          ./gradlew --no-daemon testReleaseUnitTest lintRelease assembleRelease bundleRelease \
+          ./gradlew --no-daemon --stacktrace \
+            compileReleaseKotlin \
+            testReleaseUnitTest \
+            lintRelease \
+            assembleRelease \
+            bundleRelease \
             -PversionCode=$BUILD_NUMBER \
             -PversionName=1.0.$BUILD_NUMBER
+      - name: Verify signed production artifacts
+        script: |
+          set -euo pipefail
           APK="$(find app/build/outputs/apk/release -name '*.apk' -type f -print -quit)"
           AAB="$(find app/build/outputs/bundle/release -name '*.aab' -type f -print -quit)"
           test -n "$APK" && test -s "$APK"
           test -n "$AAB" && test -s "$AAB"
-          echo "Release APK: $APK"
-          echo "Release AAB: $AAB"
-          ls -lh "$APK" "$AAB"
+          APKSIGNER="$(command -v apksigner || true)"
+          ZIPALIGN="$(command -v zipalign || true)"
+          if [ -z "$APKSIGNER" ]; then APKSIGNER="$(find "$ANDROID_SDK_ROOT/build-tools" -name apksigner -type f | sort | tail -1)"; fi
+          if [ -z "$ZIPALIGN" ]; then ZIPALIGN="$(find "$ANDROID_SDK_ROOT/build-tools" -name zipalign -type f | sort | tail -1)"; fi
+          test -x "$APKSIGNER" && test -x "$ZIPALIGN"
+          "$APKSIGNER" verify --verbose --print-certs "$APK"
+          "$ZIPALIGN" -c -P 16 -v 4 "$APK" >/dev/null
+          unzip -t "$APK" >/dev/null
+          unzip -t "$AAB" >/dev/null
+          sha256sum "$APK" "$AAB" | tee app/build/outputs/sierra-release.sha256
+          echo "Verified release APK: $APK"
+          echo "Verified release AAB: $AAB"
+          ls -lh "$APK" "$AAB" app/build/outputs/sierra-release.sha256
     artifacts:
       - app/build/outputs/**/*.apk
       - app/build/outputs/**/*.aab
+      - app/build/outputs/**/*.sha256
       - app/build/reports/lint-results-*.html
       - app/build/reports/lint-results-*.txt
       - app/build/reports/lint-results-*.xml
