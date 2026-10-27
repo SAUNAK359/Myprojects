@@ -1,0 +1,30 @@
+name: Runner Smoke Test
+
+on:
+  push:
+    branches:
+      - director-sierra-v10-demo-photographic-engine
+    paths:
+      - '.github/workflows/runner-smoke.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: GitHub hosted runner smoke test
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - name: Runner started
+        run: |
+          echo "runner-ok"
+          uname -a
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Confirm Director project exists
+        run: |
+          test -f Director/gradlew
+          test -f Director/settings.gradle.kts
+          echo "director-project-ok"
