@@ -10,6 +10,8 @@ on:
       - director-sierra-v6-subject-intelligence
       - director-sierra-v7-prif
       - director-sierra-v8-anip
+      - director-sierra-v10-cognition
+      - director-sierra-v10-demo-photographic-engine
     paths:
       - 'Director/**'
       - '.github/workflows/director-android.yml'
