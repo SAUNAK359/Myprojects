@@ -10,7 +10,14 @@ import kotlin.math.min
 import kotlin.math.pow
 import kotlin.math.sqrt
 
-/** Deterministic bounded executor for Gemini/Sierra photographic direction. */
+/**
+ * Bounded residual finisher for Sierra v10.
+ *
+ * ANIP already consumes the full PhotographicDirection. This stage must therefore never replay the
+ * base direction a second time. It applies only the final-review deltas plus the two theme details
+ * that ANIP does not currently carry explicitly (grain/vignette), then rejects the correction if it
+ * materially worsens clipping or technical quality.
+ */
 object PhotographicDirectionFinisher {
     fun apply(
         source: Bitmap,
@@ -19,32 +26,35 @@ object PhotographicDirectionFinisher {
         subject: AnipSubjectContext? = null
     ): Bitmap {
         if (source.isRecycled) return source
-        val d = direction ?: return AdaptiveContrastFinisher.apply(source)
-        val a = adjustment ?: FinalRenderAdjustment()
-        val q = runCatching { PhotoQuality.analyze(source) }.getOrNull() ?: return source
 
-        val themeStrength = (d.themeStrength + a.themeStrengthDelta).coerceIn(0.0, 1.0) * d.themeConfidence.coerceIn(0.0, 1.0)
-        val midtoneIntent = (d.midtoneContrast + a.midtoneContrastDelta).coerceIn(0.0, 1.0)
-        val localIntent = (d.localContrast + a.localContrastDelta).coerceIn(0.0, 1.0)
-        val shadowDepth = (d.shadowDepth + a.shadowDepthDelta).coerceIn(0.0, 1.0)
-        val highlightProtection = (d.highlightProtection + a.highlightProtectionDelta).coerceIn(0.0, 1.0)
-        val warmth = (d.warmthBias + a.warmthDelta).coerceIn(-0.25, 0.25)
-        val color = (d.colorIntensity + a.colorIntensityDelta).coerceIn(0.0, 1.0)
-        val subjectEv = (d.subjectRelightEv + a.subjectRelightDeltaEv).coerceIn(-0.4, 0.8)
-        val backgroundEv = (d.backgroundSuppressionEv + a.backgroundSuppressionDeltaEv).coerceIn(-0.6, 0.1)
-        val grainStrength = d.grain.coerceIn(0.0, 0.20) * themeStrength
-        val vignetteStrength = d.vignette.coerceIn(0.0, 0.35) * themeStrength
+        val d = direction
+        val a = adjustment
+        val themeConfidence = d?.takeUnless { it.abstain }?.themeConfidence?.coerceIn(0.0, 1.0) ?: 0.0
+        val grainStrength = (d?.grain ?: 0.0).coerceIn(0.0, 0.20) * themeConfidence * 0.55
+        val vignetteStrength = (d?.vignette ?: 0.0).coerceIn(0.0, 0.35) * themeConfidence * 0.55
+        val hasReviewDelta = a?.let(::hasMeaningfulDelta) == true
+        if (!hasReviewDelta && grainStrength <= 0.001 && vignetteStrength <= 0.001) return source
 
-        val span = (q.highlightP95 - q.shadowP05).coerceAtLeast(1.0)
-        val flatness = max(((156.0 - span) / 156.0).coerceIn(0.0, 1.0), ((45.0 - q.lumaStdDev) / 45.0).coerceIn(0.0, 1.0))
-        val clipRisk = max(q.darkClipFraction, q.brightClipFraction)
-        val headroom = (1.0 - clipRisk * 14.0).coerceIn(0.0, 1.0)
-        val styleWeight = if (d.abstain) 0.28 else (0.45 + 0.55 * themeStrength)
-        val contrastPower = ((0.10 + 0.24 * midtoneIntent + 0.10 * localIntent + 0.14 * flatness) * headroom * styleWeight).coerceIn(0.0, 0.34)
-        val toePower = ((shadowDepth - 0.5) * 0.14 * styleWeight).coerceIn(-0.055, 0.075)
-        val shoulderPower = (0.06 + highlightProtection * 0.16).coerceIn(0.06, 0.22)
-        val targetSaturation = if (d.abstain) 1.0 else (0.88 + color * 0.28 * styleWeight).coerceIn(0.86, 1.16)
-        val pivot = (q.medianLuma / 255.0).coerceIn(0.24, 0.72)
+        val baseline = runCatching { PhotoQuality.analyze(source) }.getOrNull() ?: return source
+        val trust = when {
+            d == null -> 0.55
+            d.abstain -> 0.45
+            else -> 0.60 + 0.40 * themeConfidence
+        }
+        val safe = a ?: FinalRenderAdjustment()
+
+        // These are intentionally much smaller than the contract bounds. The cloud critic proposes
+        // a correction; it does not get to re-grade the photo after ANIP has already rendered it.
+        val contrastDelta = ((safe.midtoneContrastDelta * 0.16) +
+            (safe.localContrastDelta * 0.12) +
+            (safe.themeStrengthDelta * 0.06)).times(trust).coerceIn(-0.075, 0.075)
+        val toeDelta = (safe.shadowDepthDelta * 0.10 * trust).coerceIn(-0.025, 0.025)
+        val shoulderDelta = (safe.highlightProtectionDelta * 0.12 * trust).coerceIn(-0.025, 0.025)
+        val warmthDelta = (safe.warmthDelta * 0.55 * trust).coerceIn(-0.045, 0.045)
+        val saturationScale = (1.0 + safe.colorIntensityDelta * 0.34 * trust).coerceIn(0.95, 1.05)
+        val subjectEv = (safe.subjectRelightDeltaEv * trust).coerceIn(-0.18, 0.18)
+        val backgroundEv = (safe.backgroundSuppressionDeltaEv * trust).coerceIn(-0.14, 0.10)
+        val pivot = (baseline.medianLuma / 255.0).coerceIn(0.24, 0.72)
 
         val out = Bitmap.createBitmap(source.width, source.height, Bitmap.Config.ARGB_8888)
         val stripeHeight = 72
@@ -62,44 +72,47 @@ object PhotographicDirectionFinisher {
                 var r = ((c ushr 16) and 255) / 255.0
                 var g = ((c ushr 8) and 255) / 255.0
                 var b = (c and 255) / 255.0
-                val y = (0.2126 * r + 0.7152 * g + 0.0722 * b).coerceIn(0.0, 1.0)
 
                 val subjectWeight = subjectWeight(subject, nx, ny)
-                val spatialEv = (subjectWeight * subjectEv + (1.0 - subjectWeight) * backgroundEv) * styleWeight
+                val spatialEv = subjectWeight * subjectEv + (1.0 - subjectWeight) * backgroundEv
                 val exposureGain = 2.0.pow(spatialEv)
                 r *= exposureGain; g *= exposureGain; b *= exposureGain
 
                 val exposedY = (0.2126 * r + 0.7152 * g + 0.0722 * b).coerceIn(0.0, 1.0)
                 val midWeight = (4.0 * exposedY * (1.0 - exposedY)).coerceIn(0.0, 1.0)
-                var targetY = pivot + (exposedY - pivot) * (1.0 + contrastPower * midWeight)
-                val shadowMask = ((0.55 - exposedY) / 0.55).coerceIn(0.0, 1.0).let { it * it }
-                targetY -= toePower * shadowMask
-                if (targetY > 0.70) {
-                    val over = targetY - 0.70
-                    targetY = 0.70 + over / (1.0 + shoulderPower * over * 3.2)
+                var targetY = pivot + (exposedY - pivot) * (1.0 + contrastDelta * midWeight)
+
+                // Residual toe correction is proportional to existing signal, so literal black stays black.
+                if (targetY < 0.34 && toeDelta != 0.0) {
+                    val toeMask = ((0.34 - targetY) / 0.34).coerceIn(0.0, 1.0)
+                    targetY *= (1.0 - toeDelta * toeMask).coerceIn(0.96, 1.04)
+                }
+                if (targetY > 0.72 && shoulderDelta > 0.0) {
+                    val over = targetY - 0.72
+                    targetY = 0.72 + over / (1.0 + shoulderDelta * over * 4.0)
                 }
                 targetY = targetY.coerceIn(0.0, 1.0)
                 if (exposedY > 1e-5) {
-                    val scale = (targetY / exposedY).coerceIn(0.55, 1.65)
+                    val scale = (targetY / exposedY).coerceIn(0.88, 1.12)
                     r *= scale; g *= scale; b *= scale
                 }
 
                 val lum = (0.2126 * r + 0.7152 * g + 0.0722 * b).coerceAtLeast(0.0)
-                r = lum + (r - lum) * targetSaturation
-                g = lum + (g - lum) * targetSaturation
-                b = lum + (b - lum) * targetSaturation
-                r *= 1.0 + warmth * 0.55 * styleWeight
-                g *= 1.0 + warmth * 0.10 * styleWeight
-                b *= 1.0 - warmth * 0.60 * styleWeight
+                r = lum + (r - lum) * saturationScale
+                g = lum + (g - lum) * saturationScale
+                b = lum + (b - lum) * saturationScale
+                r *= 1.0 + warmthDelta * 0.48
+                g *= 1.0 + warmthDelta * 0.08
+                b *= 1.0 - warmthDelta * 0.52
 
                 if (vignetteStrength > 0.001) {
                     val dx = nx - 0.5; val dy = ny - 0.5
                     val radial = (sqrt(dx * dx + dy * dy) / 0.70710678).coerceIn(0.0, 1.0)
-                    val v = 1.0 - vignetteStrength * radial.pow(1.85) * 0.62
+                    val v = 1.0 - vignetteStrength * radial.pow(1.90) * 0.42
                     r *= v; g *= v; b *= v
                 }
                 if (grainStrength > 0.001) {
-                    val grain = deterministicNoise(px, py) * grainStrength * 0.025
+                    val grain = deterministicNoise(px, py) * grainStrength * 0.018
                     r += grain; g += grain; b += grain
                 }
 
@@ -111,7 +124,34 @@ object PhotographicDirectionFinisher {
             out.setPixels(pixels, 0, source.width, 0, y0, source.width, h)
             y0 += h
         }
+
+        val corrected = runCatching { PhotoQuality.analyze(out) }.getOrNull()
+        if (corrected == null || shouldRejectCorrection(baseline, corrected)) {
+            if (!out.isRecycled) out.recycle()
+            return source
+        }
         return out
+    }
+
+    private fun hasMeaningfulDelta(a: FinalRenderAdjustment): Boolean =
+        listOf(
+            a.themeStrengthDelta,
+            a.midtoneContrastDelta,
+            a.localContrastDelta,
+            a.shadowDepthDelta,
+            a.highlightProtectionDelta,
+            a.subjectRelightDeltaEv,
+            a.backgroundSuppressionDeltaEv,
+            a.warmthDelta,
+            a.colorIntensityDelta
+        ).any { kotlin.math.abs(it) > 0.002 }
+
+    private fun shouldRejectCorrection(before: TechnicalQuality, after: TechnicalQuality): Boolean {
+        if (after.catastrophic) return true
+        if (after.darkClipFraction > before.darkClipFraction + 0.015) return true
+        if (after.brightClipFraction > before.brightClipFraction + 0.015) return true
+        if (after.heuristicScore + 0.08 < before.heuristicScore) return true
+        return false
     }
 
     private fun subjectWeight(subject: AnipSubjectContext?, nx: Double, ny: Double): Double {
