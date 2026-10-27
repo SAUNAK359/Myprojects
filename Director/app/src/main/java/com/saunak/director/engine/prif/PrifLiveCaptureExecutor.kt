@@ -3,6 +3,7 @@ package com.saunak.director.engine.prif
 import com.saunak.director.camera.CameraEngine
 import com.saunak.director.camera.ManualRawFrameSpec
 import com.saunak.director.camera.RawJpegCaptureFrame
+import com.saunak.director.camera.StillFlashMode
 import com.saunak.director.engine.SierraEngine
 import com.saunak.director.engine.capture.CaptureProgram
 import com.saunak.director.engine.quality.QualityAxis
@@ -36,6 +37,8 @@ data class PrifLiveCaptureResult(
 /**
  * Live P-RIF shutter executor. Evidence selection happens before RAW allocation, captured RAW floats
  * are immediately spilled to canonical disk storage, and probabilistic reconstruction is tile-bounded.
+ * RAW/JPEG capture is intentionally disallowed while still-flash AUTO/ON is armed because CameraX's
+ * RAW path is bound with flash disabled; silently dropping requested flash would produce unsafe output.
  */
 class PrifLiveCaptureExecutor(
     private val camera: CameraEngine,
@@ -45,6 +48,9 @@ class PrifLiveCaptureExecutor(
         captureProgram: CaptureProgram,
         thermal: ThermalPolicy
     ): PrifLiveCaptureResult {
+        require(camera.snapshot().flashMode == StillFlashMode.OFF) {
+            "P-RIF RAW capture is unavailable while still flash is armed"
+        }
         require(camera.rawJpegCaptureSupported()) { "Active camera does not satisfy Sierra P-RIF RAW contract" }
         val motion = engine.motion.latest()
         val subject = engine.subjects.latest()
@@ -92,8 +98,6 @@ class PrifLiveCaptureExecutor(
                 StoredRawBurstFrame(frameId = frame.raw.timestampNs, stored = stored)
             }
 
-            // Remove the only collection-level strong reference to the large RAW FloatArrays before
-            // tile reconstruction. The runtime may reclaim them while canonical RAW16 stays on disk.
             captured = emptyList()
 
             val liveProgram = PrifReconstructionCompiler.compile(
@@ -191,10 +195,6 @@ class PrifLiveCaptureExecutor(
             .forEach(engine.evidence::remove)
     }
 
-    /**
-     * CameraX currently materializes the full RAW FloatArrays before P-RIF can spill them. Refuse an
-     * unsafe burst before shutter instead of relying on an OOM recovery that Android cannot guarantee.
-     */
     private fun liveRawFrameHeapCap(requested: Int): Int {
         val cameraId = camera.activeCameraId()
         val module = engine.deviceTwin().getOrNull()?.let { twin -> cameraId?.let(twin::camera) }
