@@ -6,10 +6,12 @@ import com.saunak.director.director.FinalRenderAdjustment
 import com.saunak.director.director.PhotographicDirection
 import com.saunak.director.engine.SierraEngine
 import com.saunak.director.engine.render.AnipEngine
-import com.saunak.director.engine.render.AnipRequest
 import com.saunak.director.engine.render.AnipRenderResult
+import com.saunak.director.engine.render.AnipRequest
+import com.saunak.director.engine.render.AnipSituation
 import com.saunak.director.engine.render.AnipSubjectContext
 import com.saunak.director.processing.LookSpec
+import com.saunak.director.processing.PhotoQuality
 import com.saunak.director.processing.PhotographicDirectionFinisher
 import java.io.File
 import kotlin.math.abs
@@ -77,8 +79,40 @@ object AnipPhotoFinish {
         )
         val (anip, result) = AnipEngine().render(source, request, subject)
         val finished = PhotographicDirectionFinisher.apply(anip, direction, adjustment, subject)
-        if (finished !== anip && !anip.isRecycled) anip.recycle()
-        return Output(finished, result)
+        val released = if (passesReleaseGate(source, finished, result)) finished else source
+
+        // Recycle only intermediates not returned to the caller. Returning the untouched source is an
+        // intentional fail-safe when every artistic candidate violates hard technical invariants.
+        if (finished !== released && finished !== source && !finished.isRecycled) finished.recycle()
+        if (anip !== finished && anip !== released && anip !== source && !anip.isRecycled) anip.recycle()
+        return Output(released, result)
+    }
+
+    private fun passesReleaseGate(source: Bitmap, candidate: Bitmap, result: AnipRenderResult): Boolean {
+        if (candidate.isRecycled) return false
+        if (result.score.artifactPenalty >= 0.72 || result.score.total < 0.18) return false
+        val before = runCatching { PhotoQuality.analyze(source) }.getOrNull() ?: return true
+        val after = runCatching { PhotoQuality.analyze(candidate) }.getOrNull() ?: return false
+        if (after.catastrophic) return false
+        if (after.brightClipFraction > before.brightClipFraction + 0.025) return false
+        if (after.darkClipFraction > before.darkClipFraction + 0.035) return false
+        if (after.heuristicScore + 0.16 < before.heuristicScore) return false
+
+        val darkSituation = result.recipe.situation in setOf(
+            AnipSituation.NIGHT,
+            AnipSituation.NIGHT_NEON,
+            AnipSituation.STAGE,
+            AnipSituation.SUNSET,
+            AnipSituation.PORTRAIT_LOW_LIGHT,
+            AnipSituation.SELFIE_LOW_LIGHT
+        )
+        val allowedBlackRise = if (darkSituation) 12.0 else 20.0
+        if (before.shadowP05 < 45.0 && after.shadowP05 - before.shadowP05 > allowedBlackRise) return false
+
+        val beforeSpan = (before.highlightP95 - before.shadowP05).coerceAtLeast(12.0)
+        val afterSpan = (after.highlightP95 - after.shadowP05).coerceAtLeast(0.0)
+        if (afterSpan / beforeSpan < if (darkSituation) 0.68 else 0.62) return false
+        return true
     }
 }
 
