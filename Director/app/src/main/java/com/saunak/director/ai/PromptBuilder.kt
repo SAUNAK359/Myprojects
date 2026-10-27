@@ -47,7 +47,8 @@ class PromptBuilder {
         evaluationContext: String,
         caps: CapabilityRegistry
     ): String = """
-        You are Sierra's final photographic critic. This image is a rendered preview of ACTUAL captured evidence and intended final processing. Be demanding like a professional photo editor, but request only bounded corrections supported by the image.
+        You are Sierra's final photographic critic. The supplied image is a SAME-CAPTURE comparison frame: LEFT is faithful captured/reconstructed evidence before artistic rendering; RIGHT is Sierra's ANIP render candidate made from that exact evidence. Compare right against left. The left half is evidence, not a style target; the right half should improve the photograph without contradicting or destroying evidence.
+
         Objective: $objective
         Capture attempt: $attempt
         Camera state: ${state.compactDescription()}
@@ -55,18 +56,27 @@ class PromptBuilder {
         Context: $evaluationContext
 
         Inspect, in order:
-        - subject hierarchy, composition and whether the intended story reads immediately;
+        - preservation of subject identity, geometry, text, object shape and scene relationships from LEFT to RIGHT;
+        - subject hierarchy, composition and whether the intended story reads immediately on RIGHT;
         - exposure hierarchy, black floor, shadow separation, midtone shape and highlight rolloff;
-        - whether deep blacks were incorrectly lifted into grey or the image became flat HDR;
-        - whether luminous sources such as sun, neon, stage lights and practicals still feel luminous without destructive clipping;
+        - whether deep blacks present in the evidence were incorrectly lifted into grey or the render became flat HDR;
+        - whether luminous sources such as sun, neon, stage lights and practicals remain luminous without destructive clipping;
         - skin tone/texture and identity preservation; reject waxy skin, excessive relight or artificial face/background separation;
         - material texture: glass/metal reflections, fabric, foliage, architecture, food, product edges and readable text;
-        - color relationships and atmosphere; reject oversaturation, unwanted white-balance neutralization and color casts not justified by the scene;
+        - color relationships and atmosphere; reject oversaturation, unwanted white-balance neutralization and color casts not justified by the evidence;
         - denoise/sharpening artifacts, halos, crunchy edges, chroma noise, banding and over-dehaze;
-        - overall naturalness and whether the photograph feels deliberately photographed rather than filtered.
+        - overall naturalness and whether RIGHT feels deliberately photographed rather than filtered.
 
-        Do not request a camera recapture here unless the image has a genuine physical defect that rendering cannot repair. For rendering problems use render_adjustment only. Keep deltas small and bounded. One correction pass only.
+        HARD RULES:
+        - Never ask to recover information absent from LEFT.
+        - Never reward lifted blacks merely for revealing more shadow detail.
+        - Never reward smoother skin when identity/texture is lost.
+        - Never reward brighter output simply because it is brighter.
+        - If RIGHT loses scene truth, material identity, text, geometry, skin identity or luminous-source character, accept=false.
+        - Rendering corrections must be small. Do not issue camera tool changes in this final review.
+
+        For rendering problems use render_adjustment only. One correction pass only.
         render adjustments ranges: theme_strength ±0.20, midtone/local contrast ±0.25, shadow_depth ±0.20, highlight_protection ±0.20, subject_relight ±0.25 EV, background_suppression ±0.20 EV, warmth ±0.10, color_intensity ±0.15.
-        Scores are 0..1. accept=true only when the photograph is technically sound, photographically coherent, natural and matches intent. Return JSON only.
+        Scores are 0..1. accept=true only when the rendered half is technically sound, photographically coherent, natural, faithful to the evidence and matches intent. Return JSON only.
     """.trimIndent()
 }
