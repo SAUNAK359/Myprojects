@@ -46,6 +46,11 @@ object AnipPhotoFinish {
             ?.let { d -> engine?.cognition?.themeLook(d.selectedThemeId)?.let { themeLook -> LookSpec(themeLook, maxOf(look.normalizedStrength, d.themeStrength.toFloat())) } }
             ?: look
         val motionRisk = engine?.motion?.latest()?.conservativeRisk ?: 0.45
+        val semanticConfidence = direction
+            ?.takeUnless { it.abstain }
+            ?.themeConfidence
+            ?.coerceIn(0.0, 1.0)
+            ?: 0.0
         val request = AnipRequest(
             sceneLabel = sceneLabel,
             objective = objective,
@@ -53,7 +58,22 @@ object AnipPhotoFinish {
             lookStrength = resolvedLook.normalizedStrength,
             subjectPresent = subject != null,
             motionRisk = motionRisk,
-            reconstructionIntegrity = reconstructionIntegrity.coerceIn(0.0, 1.0)
+            reconstructionIntegrity = reconstructionIntegrity.coerceIn(0.0, 1.0),
+            story = direction?.story.orEmpty(),
+            mood = direction?.mood.orEmpty(),
+            primarySubject = direction?.primarySubject.orEmpty(),
+            narrativeRole = direction?.narrativeRole.orEmpty(),
+            atmospherePriority = direction?.atmospherePriority?.coerceIn(0.0, 1.0) ?: 0.5,
+            skinNaturalness = direction?.skinNaturalness?.coerceIn(0.0, 1.0) ?: 0.8,
+            highlightProtectionIntent = direction?.highlightProtection?.coerceIn(0.0, 1.0) ?: 0.6,
+            shadowDepthIntent = direction?.shadowDepth?.coerceIn(0.0, 1.0) ?: 0.5,
+            midtoneContrastIntent = direction?.midtoneContrast?.coerceIn(0.0, 1.0) ?: 0.5,
+            localContrastIntent = direction?.localContrast?.coerceIn(0.0, 1.0) ?: 0.5,
+            colorIntensityIntent = direction?.colorIntensity?.coerceIn(0.0, 1.0) ?: 0.5,
+            warmthBiasIntent = direction?.warmthBias?.coerceIn(-0.25, 0.25) ?: 0.0,
+            subjectRelightIntentEv = direction?.subjectRelightEv?.coerceIn(-0.4, 0.8) ?: 0.0,
+            backgroundSuppressionIntentEv = direction?.backgroundSuppressionEv?.coerceIn(-0.6, 0.1) ?: 0.0,
+            directionConfidence = semanticConfidence
         )
         val (anip, result) = AnipEngine().render(source, request, subject)
         val finished = PhotographicDirectionFinisher.apply(anip, direction, adjustment, subject)
