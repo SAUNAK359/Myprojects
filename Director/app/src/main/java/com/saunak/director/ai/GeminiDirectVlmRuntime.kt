@@ -22,7 +22,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * Optional personal-beta Gemini semantic supervisor.
+ * Optional personal-beta semantic supervisor used behind Sierra branding.
  * Transport/model preferences are asset-driven and the model is capability-checked at runtime.
  * Any discovery/network/schema failure is surfaced to the orchestrator, which falls back locally.
  */
@@ -40,11 +40,11 @@ class GeminiDirectVlmRuntime(
 
     @Volatile private var maxImageDimension = 512
     @Volatile private var activeCall: Call? = null
-    @Volatile private var lastDiagnostics = VlmDiagnostics("gemini-unresolved")
+    @Volatile private var lastDiagnostics = VlmDiagnostics("sierra-unresolved")
 
     override suspend fun load(modelPath: String, projectorPath: String): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
-            val key = keyStore.read().takeIf(String::isNotBlank) ?: error("Add a Gemini API key in Sierra settings")
+            val key = keyStore.read().takeIf(String::isNotBlank) ?: error("Add the Sierra Intelligence API key in Sierra settings")
             modelResolver.resolve(key)
         }.map { Unit }
     }
@@ -83,7 +83,7 @@ class GeminiDirectVlmRuntime(
     private fun validateThemeReferences(plan: PlanOutput) {
         val direction = plan.photographicDirection
         if (!direction.abstain) {
-            require(direction.selectedThemeId.isNotBlank()) { "Gemini omitted the Sierra theme id" }
+            require(direction.selectedThemeId.isNotBlank()) { "Sierra omitted the theme id" }
             themeCatalog.requireInstalled(direction.selectedThemeId)
         } else if (direction.selectedThemeId.isNotBlank()) {
             themeCatalog.requireInstalled(direction.selectedThemeId)
@@ -98,9 +98,9 @@ class GeminiDirectVlmRuntime(
         decode: (String) -> T
     ): Result<T> = withContext(Dispatchers.IO) {
         val started = android.os.SystemClock.elapsedRealtime()
-        var resolvedModel = "gemini-unresolved"
+        var resolvedModel = "sierra-unresolved"
         runCatching {
-            val key = keyStore.read().takeIf(String::isNotBlank) ?: error("Gemini API key is not configured")
+            val key = keyStore.read().takeIf(String::isNotBlank) ?: error("Sierra Intelligence API key is not configured")
             resolvedModel = modelResolver.resolve(key)
             val body = buildInteractionBody(resolvedModel, prompt, encode(image), schema)
             val request = Request.Builder()
@@ -130,10 +130,11 @@ class GeminiDirectVlmRuntime(
         }
     }
 
-    override fun setMaxImageDimension(pixels: Int) { maxImageDimension = pixels.coerceIn(384, 640) }
+    // Planning normally uses 384–640 px. Final same-capture comparison is allowed up to 896 px so
+    // each evidence/render half retains enough material, skin and text detail for the critic.
+    override fun setMaxImageDimension(pixels: Int) { maxImageDimension = pixels.coerceIn(384, 896) }
     override fun cancel() { activeCall?.cancel(); activeCall = null }
     override fun isReady(): Boolean = keyStore.isConfigured()
-    // Cloud semantic advice is opportunistic. Shutter preparation always retains a bounded deadline.
     override fun waitForSemanticPlan(): Boolean = false
     override fun supportsFinalReview(): Boolean = true
     override fun diagnostics(): VlmDiagnostics = lastDiagnostics
@@ -181,8 +182,8 @@ class GeminiDirectVlmRuntime(
 
     private fun extractInteractionText(payload: String): String {
         val root = JSONObject(payload)
-        if (root.optString("status") != "completed") throw IOException("Gemini interaction did not complete")
-        val steps = root.optJSONArray("steps") ?: throw IOException("Gemini returned no interaction steps")
+        if (root.optString("status") != "completed") throw IOException("Sierra interaction did not complete")
+        val steps = root.optJSONArray("steps") ?: throw IOException("Sierra returned no interaction steps")
         for (stepIndex in steps.length() - 1 downTo 0) {
             val step = steps.optJSONObject(stepIndex) ?: continue
             if (step.optString("type") != "model_output") continue
@@ -195,7 +196,7 @@ class GeminiDirectVlmRuntime(
             }.trim()
             if (text.isNotBlank()) return text
         }
-        throw IOException("Gemini returned no structured model output")
+        throw IOException("Sierra returned no structured model output")
     }
 
     private fun encode(source: Bitmap): ByteArray {
@@ -206,7 +207,7 @@ class GeminiDirectVlmRuntime(
         } else source
         return try {
             ByteArrayOutputStream().use { stream ->
-                check(output.compress(Bitmap.CompressFormat.JPEG, 72, stream))
+                check(output.compress(Bitmap.CompressFormat.JPEG, 80, stream))
                 stream.toByteArray()
             }
         } finally {
@@ -217,7 +218,7 @@ class GeminiDirectVlmRuntime(
     private fun apiError(code: Int, payload: String): String =
         runCatching { JSONObject(payload).optJSONObject("error")?.optString("message") }
             .getOrNull()?.takeIf(String::isNotBlank)?.take(180)
-            ?: "Gemini interaction failed ($code)"
+            ?: "Sierra interaction failed ($code)"
 
     companion object {
         private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
