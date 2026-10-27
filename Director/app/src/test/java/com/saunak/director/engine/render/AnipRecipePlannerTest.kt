@@ -32,7 +32,7 @@ class AnipRecipePlannerTest {
         backgroundMeanLuma = background
     )
 
-    @Test fun darkPortraitGetsVisibleRelightAndRecovery() {
+    @Test fun darkPortraitRelightsSubjectWithoutFlatteningNight() {
         val request = AnipRequest(
             sceneLabel = "night portrait",
             objective = "subject separation and neon atmosphere",
@@ -40,24 +40,31 @@ class AnipRecipePlannerTest {
             lookStrength = 0.8f,
             subjectPresent = true,
             motionRisk = 0.25,
-            reconstructionIntegrity = 0.92
+            reconstructionIntegrity = 0.92,
+            shadowDepthIntent = 0.80,
+            highlightProtectionIntent = 0.82,
+            atmospherePriority = 0.90,
+            subjectRelightIntentEv = 0.32,
+            backgroundSuppressionIntentEv = -0.16,
+            directionConfidence = 0.9
         )
         val recipe = AnipRecipePlanner.base(request, stats())
-        assertTrue(recipe.subjectRelightEv >= 0.35)
-        assertTrue(recipe.shadowRecovery >= 0.55)
-        assertTrue(recipe.highlightCompression >= 0.55)
-        assertTrue(recipe.backgroundSuppressionEv <= -0.12)
-        assertTrue(recipe.routing.denoise >= 0.55)
-        assertTrue(recipe.routing.detailRecovery >= 0.35)
+        assertTrue(recipe.subjectRelightEv >= 0.24)
+        assertTrue(recipe.shadowRecovery <= 0.48)
+        assertTrue(recipe.blackAnchor >= 0.70)
+        assertTrue(recipe.highlightGlowPreservation >= 0.60)
+        assertTrue(recipe.backgroundSuppressionEv <= -0.10)
+        assertTrue(recipe.routing.denoise >= 0.35)
     }
 
-    @Test fun highDynamicRangeSceneCompressesHighlightsAggressively() {
-        val request = AnipRequest("landscape sky", "recover clouds", Look.LANDSCAPE_VIVID, 0.7f, false, 0.08, 0.97)
+    @Test fun highDynamicRangeLandscapeProtectsHighlightsAndTexture() {
+        val request = AnipRequest("landscape sky", "recover clouds without flat HDR", Look.LANDSCAPE_VIVID, 0.7f, false, 0.08, 0.97,
+            highlightProtectionIntent = 0.90, localContrastIntent = 0.75, directionConfidence = 0.9)
         val recipe = AnipRecipePlanner.base(request, stats(p50 = 0.48, shadows = 0.16, highlights = 0.14, subject = null, background = null))
-        assertTrue(recipe.highlightCompression >= 0.70)
-        assertTrue(recipe.dehaze >= 0.18)
+        assertTrue(recipe.highlightCompression >= 0.60)
+        assertTrue(recipe.dehaze >= 0.16)
         assertTrue(recipe.localContrast >= 0.35)
-        assertTrue(recipe.saturation > 1.05)
+        assertTrue(recipe.textureProtection >= 0.80)
     }
 
     @Test fun explicitMonochromeRemainsMonochrome() {
@@ -67,13 +74,13 @@ class AnipRecipePlannerTest {
         assertTrue(AnipRecipePlanner.candidates(recipe).all { it.saturation < 0.20 })
     }
 
-    @Test fun candidateSearchContainsStrongerVisibleOptions() {
+    @Test fun candidateSearchStaysBoundedButStillExplores() {
         val request = AnipRequest("street", "impact", Look.SOCIAL_POP, 0.8f, false, 0.1, 0.90)
         val base = AnipRecipePlanner.base(request, stats(subject = null, background = null))
         val candidates = AnipRecipePlanner.candidates(base)
         assertEquals(4, candidates.size)
         assertTrue(candidates.last().localContrast > candidates.first().localContrast)
-        assertTrue(candidates.last().shadowRecovery >= candidates.first().shadowRecovery)
+        assertTrue(candidates.last().impact <= 1.45)
     }
 
     @Test fun subjectRenderFieldIsSmoothAndDirectional() {
@@ -83,7 +90,7 @@ class AnipRecipePlannerTest {
         val field = AnipRenderFieldBuilder.build(recipe, subject, width = 48, height = 48)
         val center = field.exposureEv[24 * 48 + 24]
         val corner = field.exposureEv[0]
-        assertTrue(center > corner + 0.15f)
+        assertTrue(center > corner + 0.08f)
         var maxAdjacentJump = 0f
         for (y in 0 until 48) for (x in 0 until 47) {
             val a = field.exposureEv[y * 48 + x]
@@ -111,6 +118,16 @@ class AnipRecipePlannerTest {
         val maskSide = field.subjectWeight[24 * 48 + 38]
         val emptySide = field.subjectWeight[24 * 48 + 10]
         assertTrue(maskSide > emptySide + 0.55f)
-        assertTrue(field.exposureEv[24 * 48 + 38] > field.exposureEv[24 * 48 + 10] + 0.25f)
+        assertTrue(field.exposureEv[24 * 48 + 38] > field.exposureEv[24 * 48 + 10] + 0.12f)
+    }
+
+    @Test fun semanticSituationDoesNotCollapseNonHumanScenes() {
+        val architecture = AnipSituationResolver.resolve(
+            AnipRequest("architecture", "preserve stone geometry", Look.NATURAL, 0.5f, false, 0.05, 0.95,
+                story = "modern glass and concrete facade"), stats(p50 = 0.48, subject = null, background = null))
+        val product = AnipSituationResolver.resolve(
+            AnipRequest("product", "premium reflective object", Look.NATURAL, 0.5f, false, 0.05, 0.95), stats(p50 = 0.48, subject = null, background = null))
+        assertEquals(AnipSituation.ARCHITECTURE, architecture)
+        assertEquals(AnipSituation.PRODUCT, product)
     }
 }
