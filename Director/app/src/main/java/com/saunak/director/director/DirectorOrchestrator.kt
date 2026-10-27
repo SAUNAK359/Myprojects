@@ -1,6 +1,7 @@
 package com.saunak.director.director
 
 import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.net.Uri
 import com.saunak.director.ai.VlmRuntime
 import com.saunak.director.camera.CameraEngine
@@ -293,17 +294,25 @@ class DirectorOrchestrator(
         if (state.mode != SierraMode.AI || !cloudEnabled || !vlm.isReady() || !vlm.supportsFinalReview()) {
             return ReviewResult(null, "Sierra local critic passed")
         }
-        var scaled: Bitmap? = null
+        var evidence: Bitmap? = null
         var rendered: Bitmap? = null
+        var comparison: Bitmap? = null
         return try {
             val longest = max(source.width, source.height)
-            scaled = if (longest > FINAL_REVIEW_EDGE) {
-                val scale = FINAL_REVIEW_EDGE.toFloat() / longest
+            evidence = if (longest > FINAL_REVIEW_SIDE_EDGE) {
+                val scale = FINAL_REVIEW_SIDE_EDGE.toFloat() / longest
                 Bitmap.createScaledBitmap(source, maxOf(1, (source.width * scale).toInt()), maxOf(1, (source.height * scale).toInt()), true)
             } else source
-            rendered = AnipPhotoFinish.render(checkNotNull(scaled), state.look, state.plan.scene, state.plan.objective, 0.88, state.plan.photographicDirection).bitmap
+            rendered = AnipPhotoFinish.render(checkNotNull(evidence), state.look, state.plan.scene, state.plan.objective,
+                0.88, state.plan.photographicDirection).bitmap
+
+            // One visual packet, one network request: LEFT is faithful evidence; RIGHT is ANIP output.
+            // Both originate from the exact selected capture/P-RIF reconstruction, so Sierra can reject
+            // lost blacks, identity, material texture, text, geometry or luminous-source character.
+            comparison = buildSameCaptureComparison(checkNotNull(evidence), checkNotNull(rendered))
+            vlm.setMaxImageDimension(FINAL_REVIEW_UPLOAD_EDGE)
             val result = withTimeoutOrNull(FINAL_REVIEW_BUDGET_MS) {
-                vlm.evaluate(checkNotNull(rendered), state.plan.objective, 1, camera.snapshot(), emptyList(),
+                vlm.evaluate(checkNotNull(comparison), state.plan.objective, 1, camera.snapshot(), emptyList(),
                     skills.evaluationContext(state.plan.skillBranch), camera.capabilities())
             }
             if (result == null) return ReviewResult(null, "Sierra local critic passed • semantic review deadline")
@@ -314,13 +323,24 @@ class DirectorOrchestrator(
                 else -> ReviewResult(review.renderAdjustment, "Sierra refined • ${review.issues.firstOrNull() ?: "intent alignment"}")
             }
         } finally {
-            rendered?.let { if (it !== scaled && !it.isRecycled) it.recycle() }
-            scaled?.let { if (it !== source && !it.isRecycled) it.recycle() }
+            comparison?.let { if (!it.isRecycled) it.recycle() }
+            rendered?.let { if (it !== evidence && !it.isRecycled) it.recycle() }
+            evidence?.let { if (it !== source && !it.isRecycled) it.recycle() }
         }
     }
 
+    private fun buildSameCaptureComparison(evidence: Bitmap, rendered: Bitmap): Bitmap {
+        val height = max(evidence.height, rendered.height)
+        val output = Bitmap.createBitmap(evidence.width + rendered.width, height, Bitmap.Config.ARGB_8888)
+        Canvas(output).apply {
+            drawBitmap(evidence, 0f, 0f, null)
+            drawBitmap(rendered, evidence.width.toFloat(), 0f, null)
+        }
+        return output
+    }
+
     private suspend fun reviewFile(file: File, state: ApprovedState): ReviewResult {
-        val bitmap = storage.decodeOriented(file, FINAL_REVIEW_EDGE)
+        val bitmap = storage.decodeOriented(file, FINAL_REVIEW_SIDE_EDGE)
         return try { reviewFinal(bitmap, state) } finally { if (!bitmap.isRecycled) bitmap.recycle() }
     }
 
@@ -449,7 +469,8 @@ class DirectorOrchestrator(
         private const val LOCAL_PERCEPTION_BUDGET_MS = 520L
         private const val COGNITION_BUDGET_MS = 900L
         private const val CAPTURE_PLAN_BUDGET_MS = 550L
-        private const val FINAL_REVIEW_BUDGET_MS = 1_650L
-        private const val FINAL_REVIEW_EDGE = 640
+        private const val FINAL_REVIEW_BUDGET_MS = 2_200L
+        private const val FINAL_REVIEW_SIDE_EDGE = 448
+        private const val FINAL_REVIEW_UPLOAD_EDGE = 896
     }
 }
