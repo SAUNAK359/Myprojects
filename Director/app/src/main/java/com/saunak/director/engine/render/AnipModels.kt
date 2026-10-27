@@ -4,6 +4,25 @@ import com.saunak.director.engine.subject.NormalizedRect
 import com.saunak.director.processing.Look
 import kotlin.math.max
 
+enum class AnipSituation {
+    SELFIE,
+    SELFIE_LOW_LIGHT,
+    PORTRAIT,
+    PORTRAIT_LOW_LIGHT,
+    NIGHT,
+    NIGHT_NEON,
+    SUNSET,
+    STAGE,
+    INTERIOR,
+    LANDSCAPE,
+    ARCHITECTURE,
+    FOOD,
+    PRODUCT,
+    MACRO,
+    DOCUMENT,
+    GENERAL
+}
+
 data class AnipRequest(
     val sceneLabel: String,
     val objective: String,
@@ -11,13 +30,43 @@ data class AnipRequest(
     val lookStrength: Float,
     val subjectPresent: Boolean,
     val motionRisk: Double,
-    val reconstructionIntegrity: Double = 1.0
+    val reconstructionIntegrity: Double = 1.0,
+    val story: String = "",
+    val mood: String = "",
+    val primarySubject: String = "",
+    val narrativeRole: String = "",
+    val atmospherePriority: Double = 0.5,
+    val skinNaturalness: Double = 0.8,
+    val highlightProtectionIntent: Double = 0.6,
+    val shadowDepthIntent: Double = 0.5,
+    val midtoneContrastIntent: Double = 0.5,
+    val localContrastIntent: Double = 0.5,
+    val colorIntensityIntent: Double = 0.5,
+    val warmthBiasIntent: Double = 0.0,
+    val subjectRelightIntentEv: Double = 0.0,
+    val backgroundSuppressionIntentEv: Double = 0.0,
+    val directionConfidence: Double = 0.0
 ) {
     init {
         require(lookStrength in 0f..1f)
         require(motionRisk in 0.0..1.0)
         require(reconstructionIntegrity in 0.0..1.0)
+        require(atmospherePriority in 0.0..1.0)
+        require(skinNaturalness in 0.0..1.0)
+        require(highlightProtectionIntent in 0.0..1.0)
+        require(shadowDepthIntent in 0.0..1.0)
+        require(midtoneContrastIntent in 0.0..1.0)
+        require(localContrastIntent in 0.0..1.0)
+        require(colorIntensityIntent in 0.0..1.0)
+        require(warmthBiasIntent in -0.25..0.25)
+        require(subjectRelightIntentEv in -0.4..0.8)
+        require(backgroundSuppressionIntentEv in -0.6..0.1)
+        require(directionConfidence in 0.0..1.0)
     }
+
+    fun semanticText(): String = listOf(sceneLabel, objective, story, mood, primarySubject, narrativeRole)
+        .joinToString(" ")
+        .lowercase()
 }
 
 data class AnipSubjectContext(
@@ -90,7 +139,13 @@ data class RenderRecipe(
     val vignette: Double,
     val grain: Double,
     val routing: RestorationRouting,
-    val impact: Double
+    val impact: Double,
+    val situation: AnipSituation = AnipSituation.GENERAL,
+    val blackAnchor: Double = 0.55,
+    val toeStrength: Double = 0.35,
+    val highlightGlowPreservation: Double = 0.45,
+    val textureProtection: Double = 0.50,
+    val skinProtection: Double = 0.50
 ) {
     init {
         require(globalExposureEv in -1.0..1.0)
@@ -100,12 +155,17 @@ data class RenderRecipe(
         require(saturation in 0.0..1.45)
         require(warmth in -0.25..0.25)
         require(coolShadowBias in 0.0..0.30)
-        require(subjectRelightEv in 0.0..0.85)
+        require(subjectRelightEv in -0.40..0.85)
         require(backgroundSuppressionEv in -0.60..0.10)
         require(dehaze in 0.0..0.65)
         require(vignette in 0.0..0.45)
         require(grain in 0.0..0.20)
         require(impact in 0.65..1.45)
+        require(blackAnchor in 0.0..1.0)
+        require(toeStrength in 0.0..1.0)
+        require(highlightGlowPreservation in 0.0..1.0)
+        require(textureProtection in 0.0..1.0)
+        require(skinProtection in 0.0..1.0)
     }
 
     fun scaled(factor: Double, styleOverride: AnipStyle = style): RenderRecipe {
@@ -120,7 +180,7 @@ data class RenderRecipe(
             saturation = scaledSaturation.coerceIn(0.0, 1.45),
             warmth = (warmth * f).coerceIn(-0.25, 0.25),
             coolShadowBias = (coolShadowBias * f).coerceIn(0.0, 0.30),
-            subjectRelightEv = (subjectRelightEv * f).coerceIn(0.0, 0.85),
+            subjectRelightEv = (subjectRelightEv * f).coerceIn(-0.40, 0.85),
             backgroundSuppressionEv = (backgroundSuppressionEv * f).coerceIn(-0.60, 0.10),
             dehaze = (dehaze * f).coerceIn(0.0, 0.65),
             vignette = (vignette * f).coerceIn(0.0, 0.45),
