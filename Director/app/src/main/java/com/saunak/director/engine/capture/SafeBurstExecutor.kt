@@ -1,6 +1,7 @@
 package com.saunak.director.engine.capture
 
 import com.saunak.director.camera.CameraEngine
+import com.saunak.director.camera.StillFlashMode
 import com.saunak.director.processing.PhotoQuality
 import com.saunak.director.processing.TechnicalQuality
 import com.saunak.director.storage.PhotoRepository
@@ -8,9 +9,10 @@ import java.io.File
 import kotlin.math.max
 
 /**
- * Production-safe multi-frame executor built entirely on the already-certified CameraX JPEG path.
+ * Production-safe multi-frame executor built entirely on the certified CameraX JPEG path.
  * The first successfully captured still is written to the recoverable no-backup pending directory;
- * later burst frames are disposable cache. This path is smart frame selection, not RAW/HDR fusion.
+ * later burst frames are disposable cache. Flash AUTO/ON is intentionally single-shot: repeated
+ * flash frames are slow, uncomfortable, thermally expensive and highly vulnerable to subject motion.
  */
 class SafeBurstExecutor(
     private val camera: CameraEngine,
@@ -55,7 +57,8 @@ class SafeBurstExecutor(
     ): Result {
         require(maxFrames in 1..MAX_ALLOWED_FRAMES)
         val requested = program?.frames?.size?.coerceAtLeast(1) ?: 1
-        val count = requested.coerceAtMost(maxFrames)
+        val flashArmed = camera.snapshot().flashMode != StillFlashMode.OFF
+        val count = if (flashArmed) 1 else requested.coerceAtMost(maxFrames)
         require(storage.hasWorkingSpace(requiredWorkingBytes(count))) {
             "Insufficient working storage for Sierra burst"
         }
@@ -79,8 +82,6 @@ class SafeBurstExecutor(
                 break
             }
 
-            // A successful camera file is evidence even if our thumbnail decoder/quality analyser fails.
-            // Mark that frame as technically rejected rather than deleting a recoverable photograph.
             val quality = runCatching {
                 val preview = storage.decodeOriented(file, QUALITY_DECODE_MAX_DIMENSION)
                 try {
@@ -102,9 +103,11 @@ class SafeBurstExecutor(
         val valid = captured.filterNot { it.quality.catastrophic }
         val allCatastrophic = valid.isEmpty()
         val pool = if (valid.isNotEmpty()) valid else captured
+        val center = (captured.size - 1) / 2.0
         val selected = pool.maxWithOrNull(
             compareBy<CapturedFrame> { it.score }
-                .thenByDescending { -kotlin.math.abs(it.index - (captured.size - 1) / 2.0) }
+                .thenBy { -kotlin.math.abs(it.index - center) }
+                .thenBy { -it.index }
         ) ?: error("Sierra burst produced no frames")
 
         return Result(
@@ -117,6 +120,7 @@ class SafeBurstExecutor(
             allCatastrophic = allCatastrophic,
             rationale = when {
                 allCatastrophic -> "all captured frames failed the technical quality gate; preserve an untouched fallback"
+                flashArmed -> "flash capture constrained to one certified CameraX evidence frame"
                 truncated -> "burst stopped after a later capture failure; best valid earlier evidence retained"
                 captured.size == 1 -> "single certified CameraX evidence frame"
                 else -> "best-evidence selection across ${captured.size} serialized CameraX frames"
