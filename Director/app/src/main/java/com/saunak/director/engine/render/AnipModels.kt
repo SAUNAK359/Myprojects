@@ -20,6 +20,7 @@ enum class AnipSituation {
     PRODUCT,
     MACRO,
     DOCUMENT,
+    CINEMATIC_COMPAT,
     GENERAL
 }
 
