@@ -39,7 +39,7 @@ workflows:
           "$ZIPALIGN" -c -P 16 -v 4 "$APK" >/dev/null
           unzip -t "$APK" >/dev/null
           unzip -l "$APK" | grep -qE '(^|[[:space:]])classes\.dex$'
-          sha256sum "$APK" | tee "$APK.sha256"
+          shasum -a 256 "$APK" | tee "$APK.sha256"
           echo "Verified demo APK: $APK"
           ls -lh "$APK" "$APK.sha256"
     artifacts:
@@ -107,7 +107,7 @@ workflows:
           "$ZIPALIGN" -c -P 16 -v 4 "$APK" >/dev/null
           unzip -t "$APK" >/dev/null
           unzip -t "$AAB" >/dev/null
-          sha256sum "$APK" "$AAB" | tee app/build/outputs/sierra-release.sha256
+          shasum -a 256 "$APK" "$AAB" | tee app/build/outputs/sierra-release.sha256
           echo "Verified release APK: $APK"
           echo "Verified release AAB: $AAB"
           ls -lh "$APK" "$AAB" app/build/outputs/sierra-release.sha256
