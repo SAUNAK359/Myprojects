@@ -24,7 +24,12 @@ class ToolExecutor(private val camera: CameraEngine, private val validator: Tool
     )
     private val mutationMutex = Mutex()
 
-    suspend fun apply(calls: List<ToolCall>, capabilities: CapabilityRegistry, currentLook: LookSpec = LookSpec()): Result = mutationMutex.withLock {
+    suspend fun apply(
+        calls: List<ToolCall>,
+        capabilities: CapabilityRegistry,
+        currentLook: LookSpec = LookSpec(),
+        allowPredictiveRetarget: Boolean = true
+    ): Result = mutationMutex.withLock {
         val effectiveCaps = capabilities.copy(activeExtension = camera.snapshot().extension)
         val validated = validator.validate(calls, effectiveCaps)
         val applied = mutableListOf<ToolCall>()
@@ -34,8 +39,6 @@ class ToolExecutor(private val camera: CameraEngine, private val validator: Tool
         }
         var look = currentLook
 
-        // Sierra/Gemini is the photographic authority. If it asks for any direct camera mutation,
-        // leave an active OEM extension first instead of rejecting the request.
         val wantsDirectCameraControl = validated.accepted.any { it.id in ToolIds.CAMERA_IDS && it.id != ToolIds.EXTENSION }
         if (wantsDirectCameraControl && camera.snapshot().extension != DirectorExtension.NONE) {
             runCatching { camera.aiSetExtension(DirectorExtension.NONE) }
@@ -57,12 +60,13 @@ class ToolExecutor(private val camera: CameraEngine, private val validator: Tool
             val requested = calls.firstOrNull { it.id == call.id } ?: call
             runCatching {
                 when (call.id) {
-                    ToolIds.FOCUS -> camera.aiFocusNormalized(call.x!!.toFloat(), call.y!!.toFloat())
-                    ToolIds.ZOOM -> camera.aiSetZoom(call.value!!.toFloat())
-                    ToolIds.EXPOSURE_EV -> camera.aiSetExposureEv(call.value!!.toFloat())
+                    ToolIds.FOCUS -> camera.aiFocusNormalized(checkNotNull(call.x).toFloat(), checkNotNull(call.y).toFloat())
+                    ToolIds.ZOOM -> camera.aiSetZoom(checkNotNull(call.value).toFloat())
+                    ToolIds.EXPOSURE_EV -> camera.aiSetExposureEv(checkNotNull(call.value).toFloat())
                     ToolIds.TORCH -> {
-                        if (call.value!! >= 0.5) camera.aiSetFlash(StillFlashMode.OFF)
-                        camera.aiSetTorch(call.value >= 0.5)
+                        val enabled = checkNotNull(call.value) >= 0.5
+                        if (enabled) camera.aiSetFlash(StillFlashMode.OFF)
+                        camera.aiSetTorch(enabled)
                     }
                     ToolIds.FLASH -> {
                         val mode = checkNotNull(StillFlashMode.fromWire(call.stringValue))
@@ -100,7 +104,7 @@ class ToolExecutor(private val camera: CameraEngine, private val validator: Tool
 
         val explicitFocusApplied = applied.any { it.id == ToolIds.FOCUS }
         val extensionActive = camera.snapshot().extension != DirectorExtension.NONE
-        val predictiveRetargeted = if (!explicitFocusApplied && !extensionActive && effectiveCaps.focusMeteringSupported) {
+        val predictiveRetargeted = if (allowPredictiveRetarget && !explicitFocusApplied && !extensionActive && effectiveCaps.focusMeteringSupported) {
             val track = SierraEngine.getOrNull()?.subjects?.latest()
             val directive = track?.let(PredictiveSubjectPolicy::evaluate)
             if (directive != null && directive.shouldRetargetThreeA) {
