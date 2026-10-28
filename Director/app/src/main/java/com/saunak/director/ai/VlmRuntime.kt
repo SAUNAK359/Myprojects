@@ -14,6 +14,7 @@ data class VlmDiagnostics(
 
 interface VlmRuntime {
     suspend fun load(modelPath: String, projectorPath: String): Result<Unit>
+    suspend fun syncDeviceFoundation(profile: DeviceFoundationProfile): Result<Unit> = Result.success(Unit)
     suspend fun plan(image: Bitmap, capabilities: CapabilityRegistry, camera: CameraSnapshot, skillContext: String): Result<PlanOutput>
     suspend fun evaluate(image: Bitmap, objective: String, attempt: Int, camera: CameraSnapshot, previousIssues: List<String>, evaluationContext: String, capabilities: CapabilityRegistry): Result<EvaluationOutput>
     fun setMaxImageDimension(pixels: Int)
