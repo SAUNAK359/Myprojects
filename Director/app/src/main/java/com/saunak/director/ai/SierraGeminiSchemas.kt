@@ -13,8 +13,14 @@ internal object SierraGeminiSchemas {
         .put("type", "object")
         .put("required", JSONArray(required))
         .put("properties", JSONObject(properties))
+        .put("additionalProperties", false)
 
+    /**
+     * The exact same capability-aware Director contract used by the runtime is embedded into Gemini's
+     * structured response schema. This eliminates prompt/schema/runtime drift.
+     */
     fun plan(): JSONObject {
+        val directorContract = DirectorSchemaCompiler().compile()
         val nullableNumber = JSONObject().put("type", JSONArray(listOf("number", "null")))
         val nullableString = JSONObject().put("type", JSONArray(listOf("string", "null")))
         val call = obj(listOf("id","v","x","y","s"), mapOf("id" to integer(), "v" to nullableNumber, "x" to nullableNumber, "y" to nullableNumber, "s" to nullableString))
@@ -27,11 +33,11 @@ internal object SierraGeminiSchemas {
             "local_contrast" to number(), "color_intensity" to number(), "warmth_bias" to number(), "subject_relight_ev" to number(),
             "background_suppression_ev" to number(), "grain" to number(), "vignette" to number(), "abstain" to bool(), "reason_codes" to array(string(), 8)
         ))
-        val keys = listOf("scene","objective","branch","reference_score","reference_accept","calls","recapture","aspect_ratio","crop_center_x","crop_center_y","photographic_direction","planner")
+        val keys = listOf("scene","objective","branch","reference_score","reference_accept","calls","recapture","aspect_ratio","crop_center_x","crop_center_y","photographic_direction","director_spec","planner")
         return obj(keys, mapOf(
             "scene" to string(), "objective" to string(), "branch" to string(), "reference_score" to number(), "reference_accept" to bool(),
             "calls" to array(call, 8), "recapture" to bool(), "aspect_ratio" to string(), "crop_center_x" to number(), "crop_center_y" to number(),
-            "photographic_direction" to direction, "planner" to string()
+            "photographic_direction" to direction, "director_spec" to directorContract.jsonSchema, "planner" to string()
         ))
     }
 
