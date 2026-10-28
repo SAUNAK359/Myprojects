@@ -45,6 +45,10 @@ class SierraServerVlmRuntime(
     override suspend fun load(modelPath: String, projectorPath: String): Result<Unit> =
         if (isReady()) Result.success(Unit) else Result.failure(IllegalStateException("Add a Gemini API key in Sierra or sign in to Sierra Vision"))
 
+    override suspend fun syncDeviceFoundation(profile: DeviceFoundationProfile): Result<Unit> {
+        return if (geminiKeyStore.isConfigured()) directGemini.syncDeviceFoundation(profile) else Result.success(Unit)
+    }
+
     override suspend fun plan(image: Bitmap, capabilities: CapabilityRegistry, camera: CameraSnapshot, skillContext: String): Result<PlanOutput> {
         if (geminiKeyStore.isConfigured()) {
             directGemini.setMaxImageDimension(maxImageDimension)
