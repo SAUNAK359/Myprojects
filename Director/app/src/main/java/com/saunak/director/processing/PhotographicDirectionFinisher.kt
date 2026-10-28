@@ -54,12 +54,14 @@ object PhotographicDirectionFinisher {
         val subjectEv = (safe.subjectRelightDeltaEv * trust).coerceIn(-0.18, 0.18)
         val backgroundEv = (safe.backgroundSuppressionDeltaEv * trust).coerceIn(-0.14, 0.10)
 
-        val target = if (source.isMutable) source else source.copy(Bitmap.Config.ARGB_8888, true)
+        // Preserve the v10 tonal pivot. This analysis does not create another full-resolution bitmap.
+        val pivot = runCatching { (PhotoQuality.analyze(source).medianLuma / 255.0).coerceIn(0.24, 0.72) }
+            .getOrDefault(0.46)
+
+        val target = if (source.isMutable) source
+        else source.copy(Bitmap.Config.ARGB_8888, true) ?: error("Could not create mutable Sierra finishing bitmap")
         require(!target.isRecycled && target.width > 0 && target.height > 0) { "Invalid Sierra finishing bitmap" }
 
-        // A stable photographic pivot is sufficient for the residual correction and avoids another
-        // full-frame analysis/allocation before the in-place pass.
-        val pivot = 0.46
         val stripeHeight = 72
         var y0 = 0
         while (y0 < target.height) {
