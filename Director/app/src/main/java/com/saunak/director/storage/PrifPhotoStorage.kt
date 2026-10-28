@@ -44,8 +44,16 @@ suspend fun PhotoRepository.savePrifReconstruction(
                 val scale = maxDimension.toFloat() / longest
                 Bitmap.createScaledBitmap(bitmap, maxOf(1, (bitmap.width * scale).toInt()), maxOf(1, (bitmap.height * scale).toInt()), true)
             } else bitmap
+
             val ratio = SierraCropPolicy.ratioOrNull(aspectRatio)
             cropped = if (ratio == null) working else cropAnipBitmap(checkNotNull(working), ratio.first, ratio.second, cropCenterX, cropCenterY)
+
+            // Once crop owns an independent bitmap, the temporary scaled working copy is dead.
+            if (cropped !== working && working !== bitmap) {
+                working?.let { if (!it.isRecycled) it.recycle() }
+                working = null
+            }
+
             val output = AnipPhotoFinish.render(
                 source = checkNotNull(cropped),
                 look = look,
@@ -56,6 +64,14 @@ suspend fun PhotoRepository.savePrifReconstruction(
                 adjustment = adjustment
             )
             renderedBitmap = output.bitmap
+
+            // ANIP now owns the visual result. Release any temporary crop/scale bitmap immediately;
+            // the caller-owned reconstruction bitmap is never recycled here.
+            if (renderedBitmap !== cropped && cropped !== bitmap) {
+                cropped?.let { if (!it.isRecycled) it.recycle() }
+                if (cropped === working) working = null
+                cropped = null
+            }
             output.bitmap
         }
         saveProcessed(rendered, sourceJpeg)
@@ -63,9 +79,9 @@ suspend fun PhotoRepository.savePrifReconstruction(
         transactionIds.forEach(evidenceLedger::remove)
         throw t
     } finally {
-        renderedBitmap?.let { if (it !== cropped && !it.isRecycled) it.recycle() }
-        cropped?.let { if (it !== working && it !== bitmap && !it.isRecycled) it.recycle() }
-        working?.let { if (it !== bitmap && !it.isRecycled) it.recycle() }
+        renderedBitmap?.let { if (it !== bitmap && !it.isRecycled) it.recycle() }
+        cropped?.let { if (it !== bitmap && it !== renderedBitmap && !it.isRecycled) it.recycle() }
+        working?.let { if (it !== bitmap && it !== cropped && it !== renderedBitmap && !it.isRecycled) it.recycle() }
     }
 }
 
