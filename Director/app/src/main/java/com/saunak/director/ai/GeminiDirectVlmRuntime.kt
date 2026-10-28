@@ -7,6 +7,8 @@ import com.saunak.director.camera.CameraSnapshot
 import com.saunak.director.camera.CapabilityRegistry
 import com.saunak.director.director.EvaluationOutput
 import com.saunak.director.director.PlanOutput
+import com.saunak.director.director.live.LiveDirectorValidator
+import com.saunak.director.director.live.SierraDirectorSpec
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import kotlin.math.max
@@ -44,6 +46,7 @@ class GeminiDirectVlmRuntime(
     @Volatile private var lastFoundationProfile: DeviceFoundationProfile? = null
     @Volatile private var progressListener: ((VlmStreamProgress) -> Unit)? = null
     @Volatile private var lastPlanInteractionId: String? = null
+    @Volatile private var latestDirectorSpec: SierraDirectorSpec? = null
 
     override suspend fun load(modelPath: String, projectorPath: String): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
@@ -98,6 +101,7 @@ class GeminiDirectVlmRuntime(
                     foundationPrefs.edit().putString(KEY_FOUNDATION_ID, id).putString(KEY_FOUNDATION_DIGEST, profile.digest)
                         .putLong(KEY_FOUNDATION_AT, System.currentTimeMillis()).apply()
                     lastPlanInteractionId = null
+                    latestDirectorSpec = null
                 }
             } finally { if (activeCall === call) activeCall = null }
         }.onSuccess {
@@ -108,11 +112,22 @@ class GeminiDirectVlmRuntime(
     }
 
     override suspend fun plan(image: Bitmap, capabilities: CapabilityRegistry, camera: CameraSnapshot, skillContext: String): Result<PlanOutput> {
-        suspend fun execute(): Result<PlanOutput> = streamRequest(
-            promptBuilder.planPrompt(capabilities, camera, skillContext, themeCatalog.compactDescription()), image,
-            SierraGeminiSchemas.plan(), currentFoundationId(),
-            onInteractionCompleted = { lastPlanInteractionId = it }
-        ) { raw -> VlmContractValidator.plan(json.decodeFromString<PlanOutput>(raw)).also(::validateThemeReferences) }
+        latestDirectorSpec = null
+        val directorContract = DirectorSchemaCompiler().compile()
+        suspend fun execute(): Result<PlanOutput> {
+            val result = streamRequest(
+                promptBuilder.planPrompt(capabilities, camera, skillContext, themeCatalog.compactDescription()), image,
+                SierraGeminiSchemas.plan(), currentFoundationId(),
+                onInteractionCompleted = { lastPlanInteractionId = it }
+            ) { raw ->
+                val decoded = VlmContractValidator.plan(json.decodeFromString<PlanOutput>(raw))
+                val director = requireNotNull(decoded.directorSpec) { "Sierra omitted required Director spec" }
+                val validatedDirector = LiveDirectorValidator.validate(director, directorContract)
+                decoded.copy(directorSpec = validatedDirector).also(::validateThemeReferences)
+            }
+            result.onSuccess { latestDirectorSpec = it.directorSpec }
+            return result
+        }
 
         val first = execute()
         if (first.isSuccess || !foundationContextFailure(first.exceptionOrNull())) return first
@@ -210,11 +225,16 @@ class GeminiDirectVlmRuntime(
 
     override fun setMaxImageDimension(pixels: Int) { maxImageDimension = pixels.coerceIn(384, 896) }
     override fun setStreamProgressListener(listener: ((VlmStreamProgress) -> Unit)?) { progressListener = listener }
-    override fun cancel() { activeCall?.cancel(); activeCall = null }
+    override fun cancel() {
+        activeCall?.cancel()
+        activeCall = null
+        latestDirectorSpec = null
+    }
     override fun isReady(): Boolean = keyStore.isConfigured()
     override fun waitForSemanticPlan(): Boolean = true
     override fun supportsFinalReview(): Boolean = true
     override fun diagnostics(): VlmDiagnostics = lastDiagnostics
+    override fun lastDirectorSpec(): SierraDirectorSpec? = latestDirectorSpec
     override fun unload() = cancel()
     override fun close() { progressListener = null; cancel() }
 
@@ -222,6 +242,7 @@ class GeminiDirectVlmRuntime(
     private fun clearFoundation() {
         foundationPrefs.edit().remove(KEY_FOUNDATION_ID).remove(KEY_FOUNDATION_DIGEST).remove(KEY_FOUNDATION_AT).apply()
         lastPlanInteractionId = null
+        latestDirectorSpec = null
     }
     private fun foundationContextFailure(t: Throwable?): Boolean {
         val m = t?.message?.lowercase().orEmpty()
