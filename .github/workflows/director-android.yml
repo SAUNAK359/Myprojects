@@ -56,6 +56,9 @@ jobs:
             Director/gradle.properties
             Director/settings.gradle.kts
 
+      - name: Set up Android command-line tools
+        uses: android-actions/setup-android@v3
+
       - name: Install Android SDK 36
         shell: bash
         run: |
@@ -72,6 +75,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          command -v sdkmanager
           java -version
           ./gradlew --version
           test -d "$ANDROID_SDK_ROOT/platforms/android-36"
