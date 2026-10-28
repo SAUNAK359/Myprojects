@@ -15,12 +15,7 @@ internal object SierraGeminiSchemas {
         .put("properties", JSONObject(properties))
         .put("additionalProperties", false)
 
-    /**
-     * The exact same capability-aware Director contract used by the runtime is embedded into Gemini's
-     * structured response schema. This eliminates prompt/schema/runtime drift.
-     */
-    fun plan(): JSONObject {
-        val directorContract = DirectorSchemaCompiler().compile()
+    fun plan(directorContract: DirectorSchemaCompiler.Contract): JSONObject {
         val nullableNumber = JSONObject().put("type", JSONArray(listOf("number", "null")))
         val nullableString = JSONObject().put("type", JSONArray(listOf("string", "null")))
         val call = obj(listOf("id","v","x","y","s"), mapOf("id" to integer(), "v" to nullableNumber, "x" to nullableNumber, "y" to nullableNumber, "s" to nullableString))
