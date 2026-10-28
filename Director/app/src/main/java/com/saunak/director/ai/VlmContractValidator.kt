@@ -5,6 +5,7 @@ import com.saunak.director.director.FinalRenderAdjustment
 import com.saunak.director.director.PhotographicDirection
 import com.saunak.director.director.PlanOutput
 import com.saunak.director.director.ThemeBlendComponent
+import com.saunak.director.tools.ToolIds
 
 object VlmContractValidator {
     fun plan(value: PlanOutput): PlanOutput {
@@ -16,12 +17,30 @@ object VlmContractValidator {
         require(branch.isNotBlank()) { "Invalid branch" }
         require(value.referenceScore.isFinite()) { "Invalid reference score" }
 
+        val calls = value.toolCalls.take(8)
+        val cameraCalls = calls.filter { it.id in ToolIds.CAMERA_IDS }
+        require(cameraCalls.map { it.id }.distinct().size == cameraCalls.size) {
+            "Sierra plan is ambiguous: duplicate camera control"
+        }
+        require(calls.count { it.id in ToolIds.LOOK_IDS } <= 1) {
+            "Sierra plan is ambiguous: multiple final looks"
+        }
+        val extension = calls.firstOrNull { it.id == ToolIds.EXTENSION }
+        if (extension != null && extension.stringValue?.lowercase() != "none") {
+            require(cameraCalls.none { it.id != ToolIds.EXTENSION }) {
+                "Sierra plan is ambiguous: OEM extension and direct camera controls requested together"
+            }
+        }
+        val flashOn = calls.any { it.id == ToolIds.FLASH && it.stringValue?.lowercase() != "off" }
+        val torchOn = calls.any { it.id == ToolIds.TORCH && (it.value ?: 0.0) >= 0.5 }
+        require(!(flashOn && torchOn)) { "Sierra plan is ambiguous: flash and torch requested together" }
+
         return value.copy(
             scene = scene.take(64),
             objective = objective.take(180),
             skillBranch = branch.take(48),
             referenceScore = value.referenceScore.coerceIn(0.0, 1.0),
-            toolCalls = value.toolCalls.take(8),
+            toolCalls = calls,
             cropCenterX = value.cropCenterX.coerceIn(0.0, 1.0),
             cropCenterY = value.cropCenterY.coerceIn(0.0, 1.0),
             photographicDirection = sanitizeDirection(value.photographicDirection)
