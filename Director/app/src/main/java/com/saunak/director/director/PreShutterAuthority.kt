@@ -51,10 +51,12 @@ class PreShutterAuthority(
         var cameraReport = cameraVerifier.verify(originalPlan.toolCalls, caps)
 
         // One fast local repair pass for controls that did not settle at the resolved target.
-        if (cameraReport.retryCalls.isNotEmpty()) {
-            val retry = tools.apply(cameraReport.retryCalls, caps, allowPredictiveRetarget = false)
-            receipts += retry.receipts
-            cameraReport = cameraVerifier.verify(retry.applied.ifEmpty { originalPlan.toolCalls }, camera.capabilities())
+        if (cameraReport.retryCalls.isNotEmpty() || !cameraReport.settled) {
+            if (cameraReport.retryCalls.isNotEmpty()) {
+                val retry = tools.apply(cameraReport.retryCalls, caps, allowPredictiveRetarget = false)
+                receipts += retry.receipts
+            }
+            cameraReport = cameraVerifier.verify(originalPlan.toolCalls, camera.capabilities(), RETRY_SETTLE_MS)
         }
         if (cameraReport.hardFailure) {
             return Result(false, originalPlan, receipts, liveDirector.latest(), false,
@@ -73,6 +75,12 @@ class PreShutterAuthority(
             }
 
             if (validation.accept) {
+                // Gemini has accepted semantics. The camera still must be physically settled now.
+                val finalPhysical = cameraVerifier.verify(originalPlan.toolCalls, camera.capabilities(), FINAL_SETTLE_MS)
+                if (!finalPhysical.verified || !finalPhysical.settled) {
+                    return Result(false, originalPlan, receipts, liveDirector.latest(), false,
+                        "Camera state is still settling", "three_a_not_settled")
+                }
                 return Result(
                     true, originalPlan, receipts, liveDirector.latest(), false,
                     "Sierra validated the final scene • ${fmt(validation.intentMatch)} intent match"
@@ -97,10 +105,12 @@ class PreShutterAuthority(
                 directorSpec = validation.correctedDirectorSpec ?: originalPlan.directorSpec
             )
 
-            val postCorrectionReport = cameraVerifier.verify(
-                correctionExecution?.applied?.ifEmpty { correctedPlan.toolCalls } ?: correctedPlan.toolCalls,
-                camera.capabilities()
-            )
+            var postCorrectionReport = cameraVerifier.verify(correctedPlan.toolCalls, camera.capabilities(), RETRY_SETTLE_MS)
+            if (postCorrectionReport.retryCalls.isNotEmpty()) {
+                val repair = tools.apply(postCorrectionReport.retryCalls, camera.capabilities(), allowPredictiveRetarget = false)
+                receipts += repair.receipts
+                postCorrectionReport = cameraVerifier.verify(correctedPlan.toolCalls, camera.capabilities(), RETRY_SETTLE_MS)
+            }
             if (postCorrectionReport.hardFailure) {
                 return Result(false, correctedPlan, receipts, liveDirector.latest(), true,
                     "Corrected camera state could not be verified", "corrected_camera_state_failed")
@@ -128,10 +138,10 @@ class PreShutterAuthority(
             // Final local freshness/camera check only. Never call Gemini again.
             val fresh = liveDirector.reverify(thermalPressure, isCurrent, onLiveUpdate)
             val finalReport = cameraVerifier.verify(correctedPlan.toolCalls, camera.capabilities(), FINAL_SETTLE_MS)
-            if (!fresh.ready || finalReport.hardFailure) {
+            if (!fresh.ready || !finalReport.verified || !finalReport.settled) {
                 return Result(false, correctedPlan, receipts, fresh.state, true,
                     "Final corrected scene moved outside capture tolerance",
-                    fresh.reason ?: "final_camera_verification_failed")
+                    fresh.reason ?: "final_camera_or_three_a_verification_failed")
             }
 
             Result(
@@ -179,6 +189,7 @@ class PreShutterAuthority(
         private const val VALIDATION_FRAME_TIMEOUT_MS = 620L
         private const val CORRECTION_FRAME_TIMEOUT_MS = 620L
         private const val VALIDATION_UPLOAD_EDGE = 704
-        private const val FINAL_SETTLE_MS = 420L
+        private const val RETRY_SETTLE_MS = 520L
+        private const val FINAL_SETTLE_MS = 520L
     }
 }
