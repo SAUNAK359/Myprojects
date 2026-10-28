@@ -6,9 +6,13 @@ import com.saunak.director.engine.SierraEngine
 import com.saunak.director.engine.subject.PredictiveSubjectPolicy
 import com.saunak.director.tools.ToolIds
 
-/** Local finishing intelligence for the post-ready straight-from-camera path. */
+/** Local finishing intelligence for Sierra beta plans only. */
 object InstantFinishEngine {
     fun enrich(plan: PlanOutput, quality: TechnicalQuality): PlanOutput {
+        // Gemini/Sierra is the photographic authority. Never adapt its crop, look strength, or add
+        // a local look after it has returned a valid authoritative plan.
+        if (plan.planner.startsWith("sierra_ai")) return plan
+
         val framedPlan = applyPredictiveFraming(plan)
         val calls = framedPlan.toolCalls.toMutableList()
         val existingLookIndex = calls.indexOfLast { it.id in ToolIds.LOOK_IDS }
@@ -46,7 +50,6 @@ object InstantFinishEngine {
 
     private fun applyPredictiveFraming(plan: PlanOutput): PlanOutput {
         val branch = plan.skillBranch.lowercase()
-        // A single primary-subject lead-room crop is inappropriate for group scenes.
         if (branch != "portrait" && branch != "selfie") return plan
         val track = SierraEngine.getOrNull()?.subjects?.latest() ?: return plan
         val directive = PredictiveSubjectPolicy.evaluate(track)
