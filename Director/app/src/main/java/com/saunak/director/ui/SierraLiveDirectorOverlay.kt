@@ -13,7 +13,6 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import com.saunak.director.director.DirectorUiState
 import com.saunak.director.director.live.DirectorGoalTypes
 import com.saunak.director.director.live.DirectorRect
-import com.saunak.director.director.live.GoalState
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.cos
@@ -64,7 +63,7 @@ internal fun SierraLiveDirectorOverlay(ui: DirectorUiState, modifier: Modifier =
             )
         }
 
-        val confidenceAlpha = (0.30f + 0.70f * overlay.confidence.toFloat().coerceIn(0f, 1f))
+        val confidenceAlpha = 0.30f + 0.70f * overlay.confidence.toFloat().coerceIn(0f, 1f)
         overlay.targetBox?.let { target ->
             val r = rect(target)
             drawRect(
@@ -90,17 +89,13 @@ internal fun SierraLiveDirectorOverlay(ui: DirectorUiState, modifier: Modifier =
             drawCircle(currentColor, radius = 4f, center = r.center)
         }
 
-        if (overlay.targetKeypoints.isNotEmpty()) {
-            overlay.targetKeypoints.forEach { kp ->
-                val p = point(kp.x, kp.y)
-                drawCircle(DirectorGold.copy(alpha = .72f), 9f, p, style = Stroke(width = 2f))
-                drawCircle(DirectorGold.copy(alpha = .32f), 3f, p)
-            }
+        overlay.targetKeypoints.forEach { kp ->
+            val p = point(kp.x, kp.y)
+            drawCircle(DirectorGold.copy(alpha = .72f), 9f, p, style = Stroke(width = 2f))
+            drawCircle(DirectorGold.copy(alpha = .32f), 3f, p)
         }
-        if (overlay.currentKeypoints.isNotEmpty()) {
-            overlay.currentKeypoints.forEach { kp ->
-                drawCircle(DirectorCurrent.copy(alpha = confidenceAlpha), 4.5f, point(kp.x, kp.y))
-            }
+        overlay.currentKeypoints.forEach { kp ->
+            drawCircle(DirectorCurrent.copy(alpha = confidenceAlpha), 4.5f, point(kp.x, kp.y))
         }
 
         val instruction = live.instruction
@@ -109,17 +104,15 @@ internal fun SierraLiveDirectorOverlay(ui: DirectorUiState, modifier: Modifier =
             val dy = instruction.directionY
             val magnitude = sqrt(dx * dx + dy * dy)
             if (magnitude > 0.008) {
-                // directionX/Y describe the actor's physical correction. Mirror the horizontal
-                // visual cue with the preview so arrow and visible scene movement remain intuitive.
                 val visualDx = if (mirror) -dx else dx
                 val norm = sqrt(visualDx * visualDx + dy * dy).coerceAtLeast(1e-6)
-                val center = overlay.currentBox?.let { rect(it).center } ?: center
-                val length = (70f + instruction.urgency.toFloat().coerceIn(0f, 1f) * 55f)
+                val origin = overlay.currentBox?.let { rect(it).center } ?: Offset(size.width * 0.5f, size.height * 0.5f)
+                val length = 70f + instruction.urgency.toFloat().coerceIn(0f, 1f) * 55f
                 val end = Offset(
-                    center.x + (visualDx / norm).toFloat() * length,
-                    center.y + (dy / norm).toFloat() * length
+                    origin.x + (visualDx / norm).toFloat() * length,
+                    origin.y + (dy / norm).toFloat() * length
                 )
-                drawArrow(center, end, DirectorGold)
+                drawArrow(origin, end, DirectorGold)
             }
         }
 
@@ -139,7 +132,7 @@ internal fun SierraLiveDirectorOverlay(ui: DirectorUiState, modifier: Modifier =
                     val desiredRight = target > 0.0
                     val visualRight = if (mirror) !desiredRight else desiredRight
                     val x = if (visualRight) box.right + 24f else box.left - 24f
-                    val marker = Offset(x.coerceIn(20f, size.width - 20f), box.center.y)
+                    val marker = Offset(x.coerceIn(20f, size.width - 20f), box.center.y.coerceIn(20f, size.height - 20f))
                     drawCircle(DirectorGold.copy(alpha = .25f), 22f, marker)
                     drawCircle(DirectorGold, 8f, marker)
                     drawLine(DirectorGold, marker, box.center, 2f, StrokeCap.Round)
@@ -148,8 +141,9 @@ internal fun SierraLiveDirectorOverlay(ui: DirectorUiState, modifier: Modifier =
         }
 
         if (live.captureReady) {
-            drawCircle(DirectorReady.copy(alpha = .12f), radius = 50f, center = center)
-            drawCircle(DirectorReady.copy(alpha = .78f), radius = 18f, center = center, style = Stroke(width = 3f))
+            val c = Offset(size.width * 0.5f, size.height * 0.5f)
+            drawCircle(DirectorReady.copy(alpha = .12f), radius = 50f, center = c)
+            drawCircle(DirectorReady.copy(alpha = .78f), radius = 18f, center = c, style = Stroke(width = 3f))
         }
     }
 }
