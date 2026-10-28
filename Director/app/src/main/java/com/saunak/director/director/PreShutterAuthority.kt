@@ -50,7 +50,6 @@ class PreShutterAuthority(
         var receipts = existingReceipts.toMutableList()
         var cameraReport = cameraVerifier.verify(originalPlan.toolCalls, caps)
 
-        // One fast local repair pass for controls that did not settle at the resolved target.
         if (cameraReport.retryCalls.isNotEmpty() || !cameraReport.settled) {
             if (cameraReport.retryCalls.isNotEmpty()) {
                 val retry = tools.apply(cameraReport.retryCalls, caps, allowPredictiveRetarget = false)
@@ -75,14 +74,24 @@ class PreShutterAuthority(
             }
 
             if (validation.accept) {
-                // Gemini has accepted semantics. The camera still must be physically settled now.
-                val finalPhysical = cameraVerifier.verify(originalPlan.toolCalls, camera.capabilities(), FINAL_SETTLE_MS)
-                if (!finalPhysical.verified || !finalPhysical.settled) {
+                // A physically constrained graph that never reached READY must be corrected into an
+                // executable closest-achievable graph; accepting it outright would bypass deterministic readiness.
+                if (sceneConstraintSuspected) {
                     return Result(false, originalPlan, receipts, liveDirector.latest(), false,
-                        "Camera state is still settling", "three_a_not_settled")
+                        "Sierra must provide an executable closest-achievable correction", "constraint_accept_without_correction")
+                }
+
+                // Gemini judged the frame captured before network latency. Re-sample reality now so
+                // subject motion during the model response cannot create a stale semantic approval.
+                val freshScene = liveDirector.reverify(thermalPressure, isCurrent, onLiveUpdate)
+                val finalPhysical = cameraVerifier.verify(originalPlan.toolCalls, camera.capabilities(), FINAL_SETTLE_MS)
+                if (!freshScene.ready || !finalPhysical.verified || !finalPhysical.settled) {
+                    return Result(false, originalPlan, receipts, freshScene.state, false,
+                        "Scene changed while Sierra validated • re-locking required",
+                        freshScene.reason ?: "post_validation_freshness_failed")
                 }
                 return Result(
-                    true, originalPlan, receipts, liveDirector.latest(), false,
+                    true, originalPlan, receipts, freshScene.state, false,
                     "Sierra validated the final scene • ${fmt(validation.intentMatch)} intent match"
                 )
             }
@@ -135,7 +144,6 @@ class PreShutterAuthority(
                     "One final correction did not reach capture tolerance", guidance.reason)
             }
 
-            // Final local freshness/camera check only. Never call Gemini again.
             val fresh = liveDirector.reverify(thermalPressure, isCurrent, onLiveUpdate)
             val finalReport = cameraVerifier.verify(correctedPlan.toolCalls, camera.capabilities(), FINAL_SETTLE_MS)
             if (!fresh.ready || !finalReport.verified || !finalReport.settled) {
