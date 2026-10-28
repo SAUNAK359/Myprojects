@@ -18,7 +18,7 @@ suspend fun PhotoRepository.saveSierraRenderFinal(
     cropCenterY: Double
 ): Uri {
     stageComparisonPreview(file)
-    var source: Bitmap? = decodeOriented(file, renderSpec.execution.workingLongEdge.coerceIn(1024, PROCESSED_MAX_DIMENSION))
+    var source: Bitmap? = decodeOriented(file, renderSpec.execution.workingLongEdge.coerceIn(1024, PhotoRepository.PROCESSED_MAX_DIMENSION))
     var cropped: Bitmap? = null
     var rendered: Bitmap? = null
     return try {
