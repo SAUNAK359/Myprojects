@@ -81,7 +81,7 @@ class GeminiDirectVlmRuntime(
                     Sierra beta may enforce physical feasibility but must not creatively replace Sierra's valid decisions.
                     Device limits change execution, not photographic intent. Never invent unsupported camera or render capabilities.
                     Preserve identity, geometry, text, material truth and scene evidence.
-                
+
                     ${profile.payload}
                 """.trimIndent())
                 .put("generation_config", JSONObject().put("thinking_level", provider.thinkingLevel).put("max_output_tokens", 128))
@@ -112,6 +112,10 @@ class GeminiDirectVlmRuntime(
         val directorContract = withContext(Dispatchers.IO) { DirectorSchemaCompiler().compile() }
         lastDirectorContract = directorContract
         suspend fun execute(): Result<PlanOutput> {
+            // createFoundation() intentionally clears cached call-specific state. Rebind this exact
+            // capability contract before every planning attempt so a retry cannot validate call #2
+            // against a newly provisioned/different schema.
+            lastDirectorContract = directorContract
             val result = streamRequest(
                 promptBuilder.planPrompt(capabilities, camera, skillContext, themeCatalog.compactDescription(), directorContract),
                 image,
@@ -239,7 +243,13 @@ class GeminiDirectVlmRuntime(
 
     override fun setMaxImageDimension(pixels: Int) { maxImageDimension = pixels.coerceIn(384, 896) }
     override fun setStreamProgressListener(listener: ((VlmStreamProgress) -> Unit)?) { progressListener = listener }
-    override fun cancel() { activeCall?.cancel(); activeCall = null; latestDirectorSpec = null }
+    override fun cancel() {
+        activeCall?.cancel()
+        activeCall = null
+        latestDirectorSpec = null
+        lastPlanInteractionId = null
+        lastDirectorContract = null
+    }
     override fun isReady(): Boolean = keyStore.isConfigured()
     override fun waitForSemanticPlan(): Boolean = true
     override fun supportsPreShutterValidation(): Boolean = true
