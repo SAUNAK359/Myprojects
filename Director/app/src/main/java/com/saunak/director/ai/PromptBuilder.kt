@@ -97,9 +97,9 @@ class PromptBuilder {
         - Do NOT invent a new photographic concept.
         - Compare current reality against the ORIGINAL intent: primary entity, pose where measurable, framing, scale, lighting direction, background, camera state, motion and technical readiness.
         - Camera/device execution telemetry below is authoritative. Values may have been normalized to the closest physically executable state.
-        - If the original result is photographically acceptable, accept=true and return NO correction calls and corrected_director_spec=null.
-        - If one correction is materially necessary, accept=false and return at most ONE correction package: up to 8 executable camera calls plus OPTIONAL corrected_director_spec.
-        - A corrected_director_spec may only move the original target to the closest achievable version of the SAME photographic concept. It must use schema version/hash below and allowed goal types only.
+        - If the original result is photographically acceptable, accept=true, correction_calls MUST be empty, and corrected_director_spec MUST echo the original Director graph unchanged. The runtime discards that echo.
+        - If one correction is materially necessary, accept=false and return at most ONE correction package: up to 8 executable camera calls plus the corrected_director_spec.
+        - corrected_director_spec may only move the original target to the closest achievable version of the SAME photographic concept. It must use the schema version/hash below and allowed goal types only.
         - There will be NO THIRD GEMINI CALL. Sierra beta executes this correction once, verifies it locally, then captures.
         - Do not request unsupported controls. Do not create alternate concepts. Do not use novelty as a reason to change the shot.
         - If a scene constraint makes an ideal target unreachable, prefer the closest acceptable target rather than endless coaching.
