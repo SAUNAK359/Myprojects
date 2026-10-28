@@ -1,6 +1,8 @@
 package com.saunak.director.director.live
 
 import com.saunak.director.ai.DirectorSchemaCompiler
+import com.saunak.director.director.DirectorStrategy
+import com.saunak.director.director.InterventionPolicy
 
 /** Fail-closed validation for Gemini-authored executable Director graphs. */
 object LiveDirectorValidator {
@@ -37,9 +39,32 @@ object LiveDirectorValidator {
         require(spec.readiness.maxStabilityMs >= spec.readiness.baseStabilityMs) { "Invalid Director stability policy" }
         require(spec.goals.filter { it.priority != GoalPriority.PREFERENCE }.all { it.stabilityMs <= spec.readiness.maxStabilityMs }) { "Director goal stability exceeds readiness maximum" }
 
+        validateInterventionPolicy(spec)
         detectDependencyCycle(spec.goals)
         validateInvalidationSafety(spec.goals)
         return spec
+    }
+
+    private fun validateInterventionPolicy(spec: SierraDirectorSpec) {
+        if (spec.strategy == DirectorStrategy.CANDID || spec.interventionPolicy in setOf(InterventionPolicy.OBSERVE, InterventionPolicy.MINIMAL)) {
+            spec.goals.forEach { node ->
+                if (node.type == DirectorGoalTypes.POSE_KEYPOINT_ALIGNMENT) {
+                    require(!node.required && node.priority == GoalPriority.PREFERENCE) {
+                        "Candid/minimal Director strategy cannot make posing capture-blocking"
+                    }
+                }
+                if (node.actor == DirectorActor.SUBJECT && node.type == DirectorGoalTypes.ENTITY_PLACEMENT) {
+                    require(!node.required && node.priority != GoalPriority.HARD) {
+                        "Candid/minimal Director strategy cannot require subject repositioning"
+                    }
+                }
+            }
+        }
+        if (spec.interventionPolicy == InterventionPolicy.OBSERVE) {
+            require(spec.goals.none { it.actor == DirectorActor.SUBJECT && it.priority != GoalPriority.PREFERENCE }) {
+                "Observe-only strategy cannot issue blocking subject instructions"
+            }
+        }
     }
 
     private fun validateGoalSemantics(node: DirectorGoalNode, spec: SierraDirectorSpec) {
@@ -61,8 +86,13 @@ object LiveDirectorValidator {
                 requireEntity(); requireTarget(); range(0.0, 1.0)
                 node.targetMin?.let { require(it + 1e-9 >= spec.primaryEntity.visibilityMin) { "Visibility target cannot weaken primary-entity visibility requirement" } }
             }
-            DirectorGoalTypes.SUBJECT_LUMINANCE -> { requireTarget(); range(0.0, 1.0) }
-            DirectorGoalTypes.LIGHT_BALANCE_X -> { requireTarget(); range(-1.0, 1.0) }
+            DirectorGoalTypes.SUBJECT_LUMINANCE -> { requireEntity(); requireTarget(); range(0.0, 1.0) }
+            DirectorGoalTypes.LIGHT_BALANCE_X -> { requireEntity(); requireTarget(); range(-1.0, 1.0) }
+            DirectorGoalTypes.SUBJECT_BACKGROUND_EV -> { requireEntity(); requireTarget(); range(-3.0, 3.0) }
+            DirectorGoalTypes.BACKGROUND_DISTRACTION -> {
+                requireTarget(); range(0.0, 1.0)
+                require(node.targetMax != null) { "Background distraction requires a maximum acceptable clutter score" }
+            }
             DirectorGoalTypes.MOTION_STABILITY -> {
                 require(node.targetMax != null) { "Motion stability requires a maximum motion target" }
                 range(0.0, 1.0)
