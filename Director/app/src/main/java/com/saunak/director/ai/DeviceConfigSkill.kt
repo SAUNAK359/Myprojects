@@ -62,6 +62,44 @@ class DeviceConfigSkill(private val context: Context) {
         return text
     }
 
+    /**
+     * Full capability foundation sent as its own Gemini interaction. It intentionally excludes
+     * volatile per-frame camera state so its digest changes only when the camera/device contract
+     * changes. Normal image requests reference the stored foundation interaction.
+     */
+    fun foundationProfile(capabilities: CapabilityRegistry): DeviceFoundationProfile {
+        val inventory = inventoryCache ?: scanner.scan().also { inventoryCache = it }
+        val payload = buildString {
+            appendLine("SIERRA DEVICE FOUNDATION PROFILE")
+            appendLine("device=${Build.MANUFACTURER} ${Build.MODEL}")
+            appendLine("androidSdk=${Build.VERSION.SDK_INT}")
+            appendLine()
+            appendLine(inventory)
+            appendLine("## Director executable contract for active lens family")
+            appendLine("lensFacing=${capabilities.lensFacing}")
+            appendLine("zoom=${capabilities.minZoom}..${capabilities.maxZoom}")
+            appendLine("exposureEv=${capabilities.minExposureEv}..${capabilities.maxExposureEv}; step=${capabilities.exposureStepEv}")
+            appendLine("iso=${capabilities.isoMin ?: "unsupported"}..${capabilities.isoMax ?: "unsupported"}")
+            appendLine("exposureTimeNs=${capabilities.exposureTimeMinNs ?: "unsupported"}..${capabilities.exposureTimeMaxNs ?: "unsupported"}")
+            appendLine("minimumFocusDistance=${capabilities.minimumFocusDistance ?: "unknown"}")
+            appendLine("focalLengthsMm=${capabilities.focalLengthsMm.joinToString()}")
+            appendLine("manualSensor=${capabilities.manualSensorSupported}; raw=${capabilities.rawSupported}")
+            appendLine("flash=${capabilities.hasFlash}; torch=${capabilities.torchSupported}; focusMetering=${capabilities.focusMeteringSupported}")
+            appendLine("extensions=${capabilities.extensions.joinToString { it.wireName }}")
+            appendLine("opticalStabilizationModes=${capabilities.opticalStabilizationModes.joinToString()}")
+            appendLine("videoStabilizationModes=${capabilities.videoStabilizationModes.joinToString()}")
+            appendLine("allowedToolIds=${capabilities.allowedToolIds.sorted().joinToString()}")
+            appendLine()
+            appendLine("AUTHORITY CONTRACT")
+            appendLine("- Sierra/Gemini is the photographic authority.")
+            appendLine("- Sierra beta may enforce physical/API feasibility but must not replace a valid creative decision.")
+            appendLine("- If a current OEM extension conflicts with a direct Sierra command, exit the extension and execute Sierra through the normal camera session.")
+            appendLine("- Never request controls outside these physical/API capabilities.")
+            appendLine("- Return one unambiguous final state per camera control and one final look; never emit contradictory alternatives.")
+        }
+        return DeviceFoundationProfile.create(payload)
+    }
+
     private fun writeMachineSnapshot(capabilities: CapabilityRegistry, snapshot: CameraSnapshot, inventory: String) {
         val active = JSONObject().apply {
             put("lensFacing", capabilities.lensFacing)
