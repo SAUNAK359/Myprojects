@@ -48,6 +48,33 @@ class RecipeMemory(context: Context) {
         }
     }
 
+    /**
+     * Small recency context for Gemini. This is explicitly NOT a novelty scorer: repeated treatment
+     * is allowed when it is still the strongest photographic choice. It only prevents repetition by habit.
+     */
+    fun recentCreativeContext(limit: Int = 6): String {
+        val items = load().sortedByDescending { it.createdAtMs }.take(limit.coerceIn(1, 10))
+        if (items.isEmpty()) return "RECENT PHOTO MEMORY: none."
+        return buildString {
+            appendLine("RECENT PHOTO MEMORY (context only; never force novelty):")
+            items.forEachIndexed { index, recipe ->
+                val p = recipe.plan
+                val d = p.photographicDirection
+                val box = p.directorSpec?.primaryEntity?.targetBox
+                append(index + 1).append(". scene=").append(recipe.scene.take(42))
+                append("; objective=").append(recipe.objective.take(72))
+                append("; ratio=").append(p.aspectRatio)
+                append("; crop=").append(String.format(Locale.US, "%.2f,%.2f", p.cropCenterX, p.cropCenterY))
+                if (box != null) append("; entity_box=").append(String.format(Locale.US, "%.2f,%.2f,%.2f,%.2f", box.left, box.top, box.right, box.bottom))
+                if (d.selectedThemeId.isNotBlank()) append("; theme=").append(d.selectedThemeId.take(40))
+                if (d.mood.isNotBlank()) append("; mood=").append(d.mood.take(52))
+                p.renderSpec?.intentSummary?.takeIf(String::isNotBlank)?.let { append("; render=").append(it.take(72)) }
+                appendLine()
+            }
+            append("Do not repeat these merely from habit. If the current scene genuinely benefits from the same treatment, use it again without penalty.")
+        }
+    }
+
     fun count(): Int = load().size
 
     @Synchronized
