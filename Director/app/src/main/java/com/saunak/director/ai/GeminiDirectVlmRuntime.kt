@@ -2,7 +2,6 @@ package com.saunak.director.ai
 
 import android.content.Context
 import android.graphics.Bitmap
-import android.util.Base64
 import com.saunak.director.camera.CameraSnapshot
 import com.saunak.director.camera.CapabilityRegistry
 import com.saunak.director.director.EvaluationOutput
@@ -10,9 +9,7 @@ import com.saunak.director.director.PlanOutput
 import com.saunak.director.director.PreShutterValidationOutput
 import com.saunak.director.director.live.LiveDirectorValidator
 import com.saunak.director.director.live.SierraDirectorSpec
-import java.io.ByteArrayOutputStream
 import java.io.IOException
-import kotlin.math.max
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -23,7 +20,6 @@ import okhttp3.Call
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-import org.json.JSONArray
 import org.json.JSONObject
 
 class GeminiDirectVlmRuntime(
@@ -81,7 +77,6 @@ class GeminiDirectVlmRuntime(
                     Sierra beta may enforce physical feasibility but must not creatively replace Sierra's valid decisions.
                     Device limits change execution, not photographic intent. Never invent unsupported camera or render capabilities.
                     Preserve identity, geometry, text, material truth and scene evidence.
-
                     ${profile.payload}
                 """.trimIndent())
                 .put("generation_config", JSONObject().put("thinking_level", provider.thinkingLevel).put("max_output_tokens", 128))
@@ -112,9 +107,6 @@ class GeminiDirectVlmRuntime(
         val directorContract = withContext(Dispatchers.IO) { DirectorSchemaCompiler().compile() }
         lastDirectorContract = directorContract
         suspend fun execute(): Result<PlanOutput> {
-            // createFoundation() intentionally clears cached call-specific state. Rebind this exact
-            // capability contract before every planning attempt so a retry cannot validate call #2
-            // against a newly provisioned/different schema.
             lastDirectorContract = directorContract
             val result = streamRequest(
                 promptBuilder.planPrompt(capabilities, camera, skillContext, themeCatalog.compactDescription(), directorContract),
@@ -128,7 +120,10 @@ class GeminiDirectVlmRuntime(
                 val render = requireNotNull(decoded.renderSpec) { "Sierra omitted required Render spec" }
                 val validatedDirector = LiveDirectorValidator.validate(director, directorContract)
                 val validatedRender = VlmContractValidator.renderSpec(render)
-                decoded.copy(directorSpec = validatedDirector, renderSpec = validatedRender).also(::validateThemeReferences)
+                // Themes are optional descriptive priors in v11 production. RenderSpec is the
+                // actual creative contract, so an unknown/custom/blank theme must never reject an
+                // otherwise valid photograph.
+                decoded.copy(directorSpec = validatedDirector, renderSpec = validatedRender)
             }
             result.onSuccess { latestDirectorSpec = it.directorSpec }
             return result
@@ -149,18 +144,15 @@ class GeminiDirectVlmRuntime(
         validationContext: String,
         capabilities: CapabilityRegistry
     ): Result<PreShutterValidationOutput> {
-        val interaction = lastPlanInteractionId
-            ?: return Result.failure(IllegalStateException("No validated Sierra planning interaction for pre-shutter call"))
-        val contract = lastDirectorContract
-            ?: return Result.failure(IllegalStateException("Director capability contract unavailable"))
+        val interaction = lastPlanInteractionId ?: return Result.failure(IllegalStateException("No validated Sierra planning interaction for pre-shutter call"))
+        val contract = lastDirectorContract ?: return Result.failure(IllegalStateException("Director capability contract unavailable"))
         return streamRequest(
             promptBuilder.preShutterValidationPrompt(originalPlan, camera, validationContext, capabilities, contract),
             image,
             SierraGeminiSchemas.preShutterValidation(contract),
             interaction
         ) { raw ->
-            val decoded = json.decodeFromString<PreShutterValidationOutput>(raw)
-            PreShutterValidator.validate(decoded, capabilities, contract)
+            PreShutterValidator.validate(json.decodeFromString<PreShutterValidationOutput>(raw), capabilities, contract)
         }
     }
 
@@ -172,9 +164,7 @@ class GeminiDirectVlmRuntime(
         previousIssues: List<String>,
         evaluationContext: String,
         capabilities: CapabilityRegistry
-    ): Result<EvaluationOutput> = Result.failure(
-        UnsupportedOperationException("Post-capture Gemini evaluation disabled; Render Spec is authored in call #1")
-    )
+    ): Result<EvaluationOutput> = Result.failure(UnsupportedOperationException("Post-capture Gemini evaluation disabled; Render Spec is authored in call #1"))
 
     private suspend fun <T> streamRequest(
         prompt: String,
@@ -183,14 +173,24 @@ class GeminiDirectVlmRuntime(
         previousInteractionId: String?,
         onInteractionCompleted: (String?) -> Unit = {},
         decode: (String) -> T
-    ): Result<T> = withContext(Dispatchers.IO) {
+    ): Result<T> {
         val started = android.os.SystemClock.elapsedRealtime()
         var resolvedModel = "sierra-unresolved"
-        runCatching {
+        return runCatching {
             val key = keyStore.read().takeIf(String::isNotBlank) ?: error("Sierra Intelligence API key is not configured")
-            resolvedModel = modelResolver.resolve(key)
-            val body = buildInteractionBody(resolvedModel, prompt, encode(image), schema, previousInteractionId).put("stream", true)
-            val request = baseRequest(key).header("Accept", "text/event-stream").post(body.toString().toRequestBody(JSON_MEDIA)).build()
+            resolvedModel = withContext(Dispatchers.IO) { modelResolver.resolve(key) }
+            val requestBody = StreamingGeminiRequestBody(
+                model = resolvedModel,
+                prompt = prompt,
+                image = image,
+                maxImageDimension = maxImageDimension,
+                schema = schema,
+                previousInteractionId = previousInteractionId,
+                thinkingLevel = provider.thinkingLevel,
+                maxOutputTokens = provider.maxOutputTokens,
+                mediaType = JSON_MEDIA
+            )
+            val request = baseRequest(key).header("Accept", "text/event-stream").post(requestBody).build()
             val streamer = GeminiInteractionStreamer(client, { progressListener?.invoke(it) }, { call -> activeCall = call })
             try {
                 val streamed = streamer.execute(request)
@@ -210,36 +210,7 @@ class GeminiDirectVlmRuntime(
         }
     }
 
-    private fun validateThemeReferences(plan: PlanOutput) {
-        val direction = plan.photographicDirection
-        if (!direction.abstain) {
-            require(direction.selectedThemeId.isNotBlank()) { "Sierra omitted the theme id" }
-            themeCatalog.requireInstalled(direction.selectedThemeId)
-        } else if (direction.selectedThemeId.isNotBlank()) themeCatalog.requireInstalled(direction.selectedThemeId)
-        direction.themeBlend.forEach { themeCatalog.requireInstalled(it.themeId) }
-    }
-
     private fun baseRequest(key: String): Request.Builder = Request.Builder().url(provider.interactionsUrl).header("x-goog-api-key", key).header("Content-Type", "application/json")
-
-    private fun buildInteractionBody(model: String, prompt: String, image: ByteArray, schema: JSONObject, previousInteractionId: String?): JSONObject {
-        val input = JSONArray()
-            .put(JSONObject().put("type", "text").put("text", prompt))
-            .put(JSONObject().put("type", "image").put("data", Base64.encodeToString(image, Base64.NO_WRAP)).put("mime_type", "image/jpeg").put("resolution", "medium"))
-        return JSONObject().put("model", model).put("input", input).put("store", true)
-            .apply { previousInteractionId?.let { put("previous_interaction_id", it) } }
-            .put("generation_config", JSONObject().put("thinking_level", provider.thinkingLevel).put("max_output_tokens", provider.maxOutputTokens))
-            .put("response_format", JSONObject().put("type", "text").put("mime_type", "application/json").put("schema", schema))
-    }
-
-    private fun encode(source: Bitmap): ByteArray {
-        val longest = max(source.width, source.height)
-        val output = if (longest > maxImageDimension) {
-            val scale = maxImageDimension.toFloat() / longest
-            Bitmap.createScaledBitmap(source, (source.width * scale).toInt().coerceAtLeast(1), (source.height * scale).toInt().coerceAtLeast(1), true)
-        } else source
-        return try { ByteArrayOutputStream().use { stream -> check(output.compress(Bitmap.CompressFormat.JPEG, 80, stream)); stream.toByteArray() } }
-        finally { if (output !== source && !output.isRecycled) output.recycle() }
-    }
 
     override fun setMaxImageDimension(pixels: Int) { maxImageDimension = pixels.coerceIn(384, 896) }
     override fun setStreamProgressListener(listener: ((VlmStreamProgress) -> Unit)?) { progressListener = listener }
