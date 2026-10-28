@@ -46,6 +46,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
+import kotlin.math.abs
 
 @OptIn(ExperimentalCamera2Interop::class)
 class CameraEngine(private val context: Context) : AutoCloseable {
@@ -60,6 +61,7 @@ class CameraEngine(private val context: Context) : AutoCloseable {
     private var lensFacing = CameraSelector.LENS_FACING_BACK
     private var currentExtension = DirectorExtension.NONE
     private val captureMutex = Mutex()
+    private val sessionMutex = Mutex()
 
     private val analysisExecutor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "director-analysis-frame").apply { priority = Thread.NORM_PRIORITY - 1 }
@@ -106,13 +108,19 @@ class CameraEngine(private val context: Context) : AutoCloseable {
         }
     }
 
-    suspend fun bind(owner: LifecycleOwner, view: PreviewView) {
+    /**
+     * Director always acquires a normal CameraX/Camera2 session first. OEM extensions are opt-in
+     * tools selected later by Sierra, never inherited as the authority over a new Director session.
+     */
+    suspend fun bind(owner: LifecycleOwner, view: PreviewView) = sessionMutex.withLock {
         val p = ProcessCameraProvider.getInstance(context).await()
         provider = p
         this.owner = owner
         boundView = view
         extensionsManager = runCatching { ExtensionsManager.getInstanceAsync(context, p).await() }.getOrNull()
-        bindInternal(currentExtension)
+        currentExtension = DirectorExtension.NONE
+        userExtension = DirectorExtension.NONE
+        bindInternal(DirectorExtension.NONE)
         rememberCurrentAsUserState()
     }
 
@@ -315,8 +323,9 @@ class CameraEngine(private val context: Context) : AutoCloseable {
     }
 
     suspend fun aiFocusNormalized(x: Float, y: Float) {
-        val view = boundView ?: return
-        if (view.width <= 0 || view.height <= 0) return
+        val view = checkNotNull(boundView) { "Camera preview unavailable" }
+        check(view.width > 0 && view.height > 0) { "Camera preview not laid out" }
+        val c = checkNotNull(camera) { "Camera session unavailable" }
         val point = view.meteringPointFactory.createPoint(
             x.coerceIn(0f, 1f) * view.width,
             y.coerceIn(0f, 1f) * view.height
@@ -324,11 +333,8 @@ class CameraEngine(private val context: Context) : AutoCloseable {
         val action = FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE or FocusMeteringAction.FLAG_AWB)
             .setAutoCancelDuration(3, TimeUnit.SECONDS)
             .build()
-        camera?.cameraControl?.startFocusAndMetereringSafe(action)
-    }
-
-    private suspend fun androidx.camera.core.CameraControl.startFocusAndMetereringSafe(action: FocusMeteringAction) {
-        startFocusAndMetering(action).await()
+        check(c.cameraInfo.isFocusMeteringSupported(action)) { "Focus metering unsupported" }
+        c.cameraControl.startFocusAndMetering(action).await()
     }
 
     fun userSetZoom(ratio: Float) {
@@ -337,7 +343,11 @@ class CameraEngine(private val context: Context) : AutoCloseable {
     }
 
     suspend fun aiSetZoom(ratio: Float) {
-        camera?.cameraControl?.setZoomRatio(clampZoom(ratio))?.await()
+        val c = checkNotNull(camera) { "Camera session unavailable" }
+        val target = clampZoom(ratio)
+        c.cameraControl.setZoomRatio(target).await()
+        val actual = c.cameraInfo.zoomState.value?.zoomRatio ?: error("Zoom state unavailable")
+        check(abs(actual - target) <= maxOf(0.02f, target * 0.015f)) { "Zoom verification failed: requested=$target actual=$actual" }
     }
 
     private fun clampZoom(ratio: Float): Float {
@@ -353,11 +363,15 @@ class CameraEngine(private val context: Context) : AutoCloseable {
     }
 
     suspend fun aiSetExposureEv(ev: Float) {
-        val e = camera?.cameraInfo?.exposureState ?: return
-        if (!e.isExposureCompensationSupported || e.exposureCompensationStep.toFloat() == 0f) return
+        val c = checkNotNull(camera) { "Camera session unavailable" }
+        val e = c.cameraInfo.exposureState
+        check(e.isExposureCompensationSupported && e.exposureCompensationStep.toFloat() != 0f) { "Exposure compensation unsupported" }
         val index = (ev / e.exposureCompensationStep.toFloat()).toInt()
             .coerceIn(e.exposureCompensationRange.lower, e.exposureCompensationRange.upper)
-        camera?.cameraControl?.setExposureCompensationIndex(index)?.await()
+        c.cameraControl.setExposureCompensationIndex(index).await()
+        check(c.cameraInfo.exposureState.exposureCompensationIndex == index) {
+            "Exposure verification failed: requestedIndex=$index actual=${c.cameraInfo.exposureState.exposureCompensationIndex}"
+        }
     }
 
     fun userSetTorch(enabled: Boolean) {
@@ -368,8 +382,11 @@ class CameraEngine(private val context: Context) : AutoCloseable {
     }
 
     suspend fun aiSetTorch(enabled: Boolean) {
-        val c = camera ?: return
-        if (c.cameraInfo.hasFlashUnit()) c.cameraControl.enableTorch(enabled).await()
+        val c = checkNotNull(camera) { "Camera session unavailable" }
+        check(c.cameraInfo.hasFlashUnit()) { "Torch unsupported" }
+        c.cameraControl.enableTorch(enabled).await()
+        val actual = c.cameraInfo.torchState.value == 1
+        check(actual == enabled) { "Torch verification failed: requested=$enabled actual=$actual" }
     }
 
     fun userSetFlash(mode: StillFlashMode) {
@@ -378,7 +395,9 @@ class CameraEngine(private val context: Context) : AutoCloseable {
     }
 
     fun aiSetFlash(mode: StillFlashMode) {
-        imageCapture?.flashMode = flashModeToCameraX(mode)
+        val capture = checkNotNull(imageCapture) { "Image capture unavailable" }
+        capture.flashMode = flashModeToCameraX(mode)
+        check(capture.flashMode == flashModeToCameraX(mode)) { "Flash mode verification failed" }
     }
 
     private fun flashModeToCameraX(mode: StillFlashMode): Int = when (mode) {
@@ -389,9 +408,13 @@ class CameraEngine(private val context: Context) : AutoCloseable {
 
     suspend fun aiSetExtension(extension: DirectorExtension) {
         if (extension != currentExtension) bindInternal(extension)
+        check(currentExtension == extension) {
+            "OEM extension verification failed: requested=${extension.wireName} actual=${currentExtension.wireName}"
+        }
     }
 
     suspend fun restoreUserState() {
+        if (camera == null) return
         if (currentExtension != userExtension) bindInternal(userExtension)
         aiSetZoom(userZoom)
         val e = camera?.cameraInfo?.exposureState
@@ -400,7 +423,7 @@ class CameraEngine(private val context: Context) : AutoCloseable {
                 userEvIndex.coerceIn(e.exposureCompensationRange.lower, e.exposureCompensationRange.upper)
             )?.await()
         }
-        aiSetTorch(userTorch)
+        if (camera?.cameraInfo?.hasFlashUnit() == true) aiSetTorch(userTorch)
         imageCapture?.flashMode = flashModeToCameraX(userFlash)
     }
 
@@ -411,6 +434,37 @@ class CameraEngine(private val context: Context) : AutoCloseable {
         userTorch = s.torchEnabled
         userFlash = s.flashMode
         userExtension = s.extension
+    }
+
+    /**
+     * Explicitly returns the camera lease to Android/the OEM camera stack. No Director extension,
+     * torch, flash, metering request, analyzer, or bound CameraX use case is left alive. This does
+     * not modify another camera app; releasing our session is what makes the native/OEM stack free
+     * to reacquire the hardware with its own defaults and extensions.
+     */
+    suspend fun releaseToSystem() = sessionMutex.withLock {
+        captureMutex.withLock {
+            val c = camera
+            runCatching { c?.cameraControl?.cancelFocusAndMetering()?.await() }
+            if (c?.cameraInfo?.hasFlashUnit() == true) {
+                runCatching { c.cameraControl.enableTorch(false).await() }
+            }
+            runCatching { imageCapture?.flashMode = ImageCapture.FLASH_MODE_OFF }
+
+            userZoom = 1f
+            userEvIndex = 0
+            userTorch = false
+            userFlash = StillFlashMode.OFF
+            userExtension = DirectorExtension.NONE
+
+            clearAnalysisUseCase()
+            provider?.unbindAll()
+            camera = null
+            imageCapture = null
+            preview = null
+            currentExtension = DirectorExtension.NONE
+            resetCaptureTelemetry()
+        }
     }
 
     suspend fun awaitSettledState(timeoutMs: Long = 900L) {
@@ -487,7 +541,8 @@ class CameraEngine(private val context: Context) : AutoCloseable {
             opticalStabilizationModes = opticalModes,
             videoStabilizationModes = videoModes,
             extensions = ext,
-            allowedToolIds = ids
+            allowedToolIds = ids,
+            activeExtension = currentExtension
         )
     }
 
@@ -780,6 +835,10 @@ class CameraEngine(private val context: Context) : AutoCloseable {
         analysisExecutor.shutdownNow()
         rawMetadataByTimestamp.clear()
         provider?.unbindAll()
+        camera = null
+        imageCapture = null
+        preview = null
+        currentExtension = DirectorExtension.NONE
     }
 
     companion object {
