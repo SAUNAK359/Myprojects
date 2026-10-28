@@ -45,19 +45,20 @@ class SierraLocalPlannerTest {
         val plan = SierraLocalPlanner.plan(quality(), 720, 1280)
         assertEquals("general", plan.skillBranch)
         assertEquals("4:5", plan.aspectRatio)
-        assertFalse(plan.toolCalls.any { it.id == ToolIds.LOOK_CLEAN_PORTRAIT || it.id == ToolIds.LOOK_SOFT_PORTRAIT })
+        assertTrue(plan.toolCalls.none { it.id in ToolIds.LOOK_IDS })
     }
 
-    @Test fun explicitPrimaryHumanSignalUsesPortraitStrategy() {
+    @Test fun explicitPrimaryHumanSignalUsesPortraitBranchWithoutLegacyLookTool() {
         val plan = SierraLocalPlanner.plan(
             quality(), 720, 1280,
             SierraSceneSignals("portrait", .95, faceCount = 1, faceCoverage = .12, primaryHumanSubject = true)
         )
         assertEquals("portrait", plan.skillBranch)
-        assertTrue(plan.toolCalls.any { it.id == ToolIds.LOOK_CLEAN_PORTRAIT })
+        assertEquals("4:5", plan.aspectRatio)
+        assertTrue(plan.toolCalls.none { it.id in ToolIds.LOOK_IDS })
     }
 
-    @Test fun brightUrbanSceneProtectsSkyAndUsesEnvironmentalFinish() {
+    @Test fun brightUrbanSceneProtectsSkyWithCameraExposureOnly() {
         val plan = SierraLocalPlanner.plan(
             quality(mean = 166.0, std = 52.0, p05 = 72.0, median = 182.0, p95 = 234.0, top = 204.0, bottom = 136.0, strongEdges = .29),
             1536, 1152,
@@ -65,11 +66,10 @@ class SierraLocalPlannerTest {
         )
         assertEquals("architecture", plan.skillBranch)
         assertTrue(plan.toolCalls.any { it.id == ToolIds.EXPOSURE_EV && it.value == -0.17 })
-        assertTrue(plan.toolCalls.any { it.id == ToolIds.LOOK_LANDSCAPE_VIVID })
-        assertFalse(plan.toolCalls.any { it.id == ToolIds.LOOK_CLEAN_PORTRAIT })
+        assertTrue(plan.toolCalls.none { it.id in ToolIds.LOOK_IDS })
     }
 
-    @Test fun lowLightAddsSafePositiveExposureAndNonPortraitFinish() {
+    @Test fun lowLightAddsSafePositiveExposureWithoutThemeBias() {
         val plan = SierraLocalPlanner.plan(
             quality(mean = 42.0, median = 38.0, p95 = 150.0),
             1280, 720,
@@ -77,7 +77,7 @@ class SierraLocalPlannerTest {
         )
         assertEquals("low_light", plan.skillBranch)
         assertTrue(plan.toolCalls.any { it.id == ToolIds.EXPOSURE_EV && it.value == 0.33 })
-        assertTrue(plan.toolCalls.any { it.id == ToolIds.LOOK_CINEMATIC_COOL })
+        assertTrue(plan.toolCalls.none { it.id in ToolIds.LOOK_IDS })
         assertTrue(plan.recapture)
     }
 
