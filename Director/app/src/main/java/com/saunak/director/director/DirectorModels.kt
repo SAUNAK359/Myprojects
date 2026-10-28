@@ -1,6 +1,8 @@
 package com.saunak.director.director
 
 import com.saunak.director.camera.CameraUiState
+import com.saunak.director.director.live.LiveDirectorState
+import com.saunak.director.director.live.SierraDirectorSpec
 import com.saunak.director.tools.ToolExecutionReceipt
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
@@ -63,6 +65,7 @@ data class PlanOutput(
     @SerialName("crop_center_x") val cropCenterX: Double = 0.5,
     @SerialName("crop_center_y") val cropCenterY: Double = 0.5,
     @SerialName("photographic_direction") val photographicDirection: PhotographicDirection = PhotographicDirection(),
+    @SerialName("director_spec") val directorSpec: SierraDirectorSpec? = null,
     @SerialName("planner") val planner: String = "sierra_ai"
 )
 
@@ -122,5 +125,6 @@ data class DirectorUiState(
     val aiFallbackReason: String? = null,
     val finalReviewStatus: String? = null,
     val aiStreamPhase: String? = null,
-    val executionReceipts: List<ToolExecutionReceipt> = emptyList()
+    val executionReceipts: List<ToolExecutionReceipt> = emptyList(),
+    val liveDirector: LiveDirectorState = LiveDirectorState()
 )
