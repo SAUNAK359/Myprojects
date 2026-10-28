@@ -28,17 +28,16 @@ class InstantFinishEngineTest {
         strongEdgeFraction = .12
     )
 
-    @Test fun portraitGetsCleanPortraitFinishWhenModelOmitsLook() {
+    @Test fun betaEnrichmentDoesNotInjectLegacyNamedLooks() {
         val plan = PlanOutput("single person", "clean flattering portrait", "portrait", .85, false, emptyList())
         val result = InstantFinishEngine.enrich(plan, cleanQuality)
-        assertEquals(ToolIds.LOOK_CLEAN_PORTRAIT, result.toolCalls.last().id)
+        assertTrue(result.toolCalls.none { it.id in ToolIds.LOOK_IDS })
     }
 
-    @Test fun explicitCinematicLookIsPreserved() {
+    @Test fun preexistingToolCallsAreNotReinterpretedByFinisher() {
         val plan = PlanOutput("street portrait", "cinematic frame", "portrait", .82, false, listOf(ToolCall(ToolIds.LOOK_CINEMATIC_COOL, .6)))
         val result = InstantFinishEngine.enrich(plan, cleanQuality)
-        assertEquals(1, result.toolCalls.size)
-        assertEquals(ToolIds.LOOK_CINEMATIC_COOL, result.toolCalls.first().id)
+        assertEquals(plan.toolCalls, result.toolCalls)
     }
 
     @Test fun generalSceneDoesNotGetArtificialSocialPopByDefault() {
@@ -47,11 +46,21 @@ class InstantFinishEngineTest {
         assertTrue(result.toolCalls.none { it.id == ToolIds.LOOK_SOCIAL_POP })
     }
 
-    @Test fun brightSkyReducesLandscapeFinishStrength() {
+    @Test fun brightSkyStillDoesNotInjectLegacyLandscapeLook() {
         val brightSky = cleanQuality.copy(highlightP95 = 235.0, topMeanLuma = 205.0, bottomMeanLuma = 130.0)
         val plan = PlanOutput("city skyline", "protect sky", "landscape", .8, false, emptyList())
         val result = InstantFinishEngine.enrich(plan, brightSky)
-        val strength = result.toolCalls.last().value ?: 1.0
-        assertTrue(strength < .38)
+        assertTrue(result.toolCalls.none { it.id in ToolIds.LOOK_IDS })
+    }
+
+    @Test fun aiPlanIsPassThrough() {
+        val plan = PlanOutput(
+            scene = "portrait",
+            objective = "authoritative ai plan",
+            skillBranch = "portrait",
+            toolCalls = listOf(ToolCall(ToolIds.EXPOSURE_EV, -.33)),
+            planner = "sierra_ai"
+        )
+        assertEquals(plan, InstantFinishEngine.enrich(plan, cleanQuality))
     }
 }
