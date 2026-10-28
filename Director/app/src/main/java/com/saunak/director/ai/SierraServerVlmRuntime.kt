@@ -8,6 +8,7 @@ import com.saunak.director.camera.CameraSnapshot
 import com.saunak.director.camera.CapabilityRegistry
 import com.saunak.director.director.EvaluationOutput
 import com.saunak.director.director.PlanOutput
+import com.saunak.director.director.PreShutterValidationOutput
 import com.saunak.director.director.ToolCall
 import com.saunak.director.director.live.LiveDirectorValidator
 import com.saunak.director.director.live.SierraDirectorSpec
@@ -69,11 +70,11 @@ class SierraServerVlmRuntime(
             ).getOrThrow()
             activeJobId = created.id
             val plan = VlmContractValidator.plan(toPlanOutput(awaitReady(created)))
-            val serverDirector = requireNotNull(plan.directorSpec) {
-                "Sierra Server omitted capability-aware Director spec"
-            }
-            val director = LiveDirectorValidator.validate(serverDirector, DirectorSchemaCompiler().compile())
-            val validated = plan.copy(directorSpec = director)
+            val serverDirector = requireNotNull(plan.directorSpec) { "Sierra Server omitted capability-aware Director spec" }
+            requireNotNull(plan.renderSpec) { "Sierra Server is not upgraded for pre-shutter Render Spec authority" }
+            val director = LiveDirectorValidator.validate(serverDirector, withContext(Dispatchers.IO) { DirectorSchemaCompiler().compile() })
+            val render = VlmContractValidator.renderSpec(plan.renderSpec)
+            val validated = plan.copy(directorSpec = director, renderSpec = render)
             latestDirectorSpec = director
             Result.success(validated)
         } catch (t: Throwable) {
@@ -84,6 +85,19 @@ class SierraServerVlmRuntime(
         }
     }
 
+    override suspend fun validatePreShutter(
+        image: Bitmap,
+        originalPlan: PlanOutput,
+        camera: CameraSnapshot,
+        validationContext: String,
+        capabilities: CapabilityRegistry
+    ): Result<PreShutterValidationOutput> = if (geminiKeyStore.isConfigured()) {
+        directGemini.setMaxImageDimension(maxImageDimension)
+        directGemini.validatePreShutter(image, originalPlan, camera, validationContext, capabilities)
+    } else Result.failure(UnsupportedOperationException(
+        "Connected Sierra Server does not expose v11 pre-shutter validation in this client; local beta must take over safely"
+    ))
+
     override suspend fun evaluate(
         image: Bitmap,
         objective: String,
@@ -92,10 +106,9 @@ class SierraServerVlmRuntime(
         previousIssues: List<String>,
         evaluationContext: String,
         capabilities: CapabilityRegistry
-    ): Result<EvaluationOutput> = if (geminiKeyStore.isConfigured()) {
-        directGemini.setMaxImageDimension(maxImageDimension)
-        directGemini.evaluate(image, objective, attempt, camera, previousIssues, evaluationContext, capabilities)
-    } else Result.failure(UnsupportedOperationException("Sierra Server final render authority is unavailable without direct Gemini"))
+    ): Result<EvaluationOutput> = Result.failure(
+        UnsupportedOperationException("Post-capture Gemini evaluation disabled in Sierra v11")
+    )
 
     override suspend fun completeFinalCapture(captureId: String): Result<Unit> {
         if (geminiKeyStore.isConfigured()) return Result.success(Unit)
@@ -137,7 +150,8 @@ class SierraServerVlmRuntime(
     override fun cancel() = cancelCloudJob()
     override fun isReady(): Boolean = geminiKeyStore.isConfigured() || (server.configured && server.authenticated)
     override fun waitForSemanticPlan(): Boolean = true
-    override fun supportsFinalReview(): Boolean = geminiKeyStore.isConfigured()
+    override fun supportsPreShutterValidation(): Boolean = geminiKeyStore.isConfigured()
+    override fun supportsFinalReview(): Boolean = false
     override fun diagnostics(): VlmDiagnostics = if (geminiKeyStore.isConfigured()) directGemini.diagnostics() else VlmDiagnostics("sierra_server")
     override fun lastDirectorSpec(): SierraDirectorSpec? = if (geminiKeyStore.isConfigured()) directGemini.lastDirectorSpec() else latestDirectorSpec
     override fun unload() = cancelCloudJob()
@@ -169,6 +183,7 @@ class SierraServerVlmRuntime(
         val director = DirectorSchemaCompiler().compile()
         put("director_schema_version", director.version); put("director_schema_hash", director.hash)
         put("director_goal_types", director.allowedGoalTypes.sorted().joinToString(","))
+        put("required_authority_stage", "pre_shutter_validation_v1")
     }.toString()
 
     private suspend fun awaitReady(created: SierraJobDto): SierraJobDto {
@@ -193,7 +208,7 @@ class SierraServerVlmRuntime(
             toolCalls = dto.calls.map { ToolCall(id = it.id, value = it.value, x = it.x, y = it.y, stringValue = it.stringValue) },
             recapture = dto.recapture, aspectRatio = dto.aspect_ratio,
             cropCenterX = dto.crop_center_x, cropCenterY = dto.crop_center_y,
-            directorSpec = dto.director_spec, planner = "sierra_ai_server"
+            directorSpec = dto.director_spec, renderSpec = null, planner = "sierra_ai_server"
         )
     }
 

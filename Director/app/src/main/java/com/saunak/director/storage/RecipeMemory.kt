@@ -21,18 +21,27 @@ data class SavedRecipe(
 
 class RecipeMemory(context: Context) {
     private val file = File(context.filesDir, "director/recipes.json")
+    private val recentFile = File(context.filesDir, "director/recent_creative.json")
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
     @Synchronized
     fun remember(plan: PlanOutput, score: Double) {
+        val entry = SavedRecipe(plan.scene, plan.objective, plan.skillBranch, score.coerceIn(0.0, 1.0), plan)
+
+        // Reusable recipe cache remains deduplicated/ranked.
         val current = load().toMutableList()
         current.removeAll {
             it.skillBranch == plan.skillBranch &&
                 it.scene.equals(plan.scene, true) &&
                 it.objective.equals(plan.objective, true)
         }
-        current.add(0, SavedRecipe(plan.scene, plan.objective, plan.skillBranch, score.coerceIn(0.0, 1.0), plan))
+        current.add(0, entry)
         save(current.sortedByDescending { it.score }.take(MAX_RECIPES))
+
+        // Creative recency log deliberately preserves repeated choices so Gemini can recognize habit.
+        val recent = loadRecent().toMutableList()
+        recent.add(0, entry)
+        saveRecent(recent.sortedByDescending { it.createdAtMs }.take(MAX_RECENT_SHOTS))
     }
 
     fun promptHints(limit: Int = 4): String {
@@ -48,18 +57,56 @@ class RecipeMemory(context: Context) {
         }
     }
 
+    /** Context only; never a diversity/novelty objective. */
+    fun recentCreativeContext(limit: Int = 6): String {
+        val recent = loadRecent().ifEmpty { load().sortedByDescending { it.createdAtMs } }
+        val items = recent.take(limit.coerceIn(1, 10))
+        if (items.isEmpty()) return "RECENT PHOTO MEMORY: none."
+        return buildString {
+            appendLine("RECENT PHOTO MEMORY (context only; never force novelty):")
+            items.forEachIndexed { index, recipe ->
+                val p = recipe.plan
+                val d = p.photographicDirection
+                val box = p.directorSpec?.primaryEntity?.targetBox
+                append(index + 1).append(". scene=").append(recipe.scene.take(42))
+                append("; objective=").append(recipe.objective.take(72))
+                append("; ratio=").append(p.aspectRatio)
+                append("; crop=").append(String.format(Locale.US, "%.2f,%.2f", p.cropCenterX, p.cropCenterY))
+                if (box != null) append("; entity_box=").append(String.format(Locale.US, "%.2f,%.2f,%.2f,%.2f", box.left, box.top, box.right, box.bottom))
+                if (d.selectedThemeId.isNotBlank()) append("; theme=").append(d.selectedThemeId.take(40))
+                if (d.mood.isNotBlank()) append("; mood=").append(d.mood.take(52))
+                p.renderSpec?.intentSummary?.takeIf(String::isNotBlank)?.let { append("; render=").append(it.take(72)) }
+                appendLine()
+            }
+            append("Do not repeat these merely from habit. If the current scene genuinely benefits from the same treatment, use it again without penalty.")
+        }
+    }
+
     fun count(): Int = load().size
 
     @Synchronized
-    private fun load(): List<SavedRecipe> = runCatching {
-        if (!file.isFile) emptyList() else json.decodeFromString<List<SavedRecipe>>(file.readText())
+    private fun load(): List<SavedRecipe> = decode(file)
+
+    @Synchronized
+    private fun loadRecent(): List<SavedRecipe> = decode(recentFile)
+
+    private fun decode(target: File): List<SavedRecipe> = runCatching {
+        if (!target.isFile) emptyList() else json.decodeFromString<List<SavedRecipe>>(target.readText())
     }.getOrDefault(emptyList())
 
     @Synchronized
-    private fun save(values: List<SavedRecipe>) {
-        file.parentFile?.mkdirs()
-        runCatching { file.writeText(json.encodeToString(values)) }
+    private fun save(values: List<SavedRecipe>) = write(file, values)
+
+    @Synchronized
+    private fun saveRecent(values: List<SavedRecipe>) = write(recentFile, values)
+
+    private fun write(target: File, values: List<SavedRecipe>) {
+        target.parentFile?.mkdirs()
+        runCatching { target.writeText(json.encodeToString(values)) }
     }
 
-    companion object { private const val MAX_RECIPES = 60 }
+    companion object {
+        private const val MAX_RECIPES = 60
+        private const val MAX_RECENT_SHOTS = 12
+    }
 }

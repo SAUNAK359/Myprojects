@@ -34,7 +34,8 @@ class LlamaCppVlmRuntime(private val promptBuilder: PromptBuilder = PromptBuilde
 
     override suspend fun plan(image: Bitmap, capabilities: CapabilityRegistry, camera: CameraSnapshot, skillContext: String): Result<PlanOutput> = runCatching {
         withTimeout(PLAN_TIMEOUT_MS) {
-            val raw = infer(image, promptBuilder.planPrompt(capabilities, camera, skillContext), 220)
+            val contract = withContext(Dispatchers.IO) { DirectorSchemaCompiler().compile() }
+            val raw = infer(image, promptBuilder.planPrompt(capabilities, camera, skillContext, director = contract), 220)
             VlmContractValidator.plan(json.decodeFromString(PlanOutput.serializer(), extractJson(raw)))
         }
     }
@@ -87,7 +88,6 @@ class LlamaCppVlmRuntime(private val promptBuilder: PromptBuilder = PromptBuilde
         private const val PLAN_TIMEOUT_MS = 14_000L
         private const val EVAL_TIMEOUT_MS = 12_000L
 
-        // Verified against grammars/json.gbnf at the pinned llama.cpp revision.
         val JSON_GRAMMAR: String = """
 root   ::= object
 value  ::= object | array | string | number | ("true" | "false" | "null") ws

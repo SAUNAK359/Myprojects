@@ -1,6 +1,7 @@
 package com.saunak.director.director.live
 
 import android.graphics.Bitmap
+import android.os.SystemClock
 import com.saunak.director.camera.CameraEngine
 import com.saunak.director.camera.DirectorExtension
 import com.saunak.director.director.SierraPerceptionFabric
@@ -20,7 +21,8 @@ class LiveDirectorSessionRunner(
     data class Result(
         val ready: Boolean,
         val state: LiveDirectorState,
-        val reason: String? = null
+        val reason: String? = null,
+        val sceneConstraintSuspected: Boolean = false
     )
 
     fun stop(): LiveDirectorState = runtime.stop()
@@ -54,10 +56,6 @@ class LiveDirectorSessionRunner(
         return loop(thermalPressure, isCurrent, onUpdate)
     }
 
-    /**
-     * READY expires naturally because the runtime stability window is timestamp based. One fresh
-     * sample only preserves READY when the prior stable evidence is still within its temporal window.
-     */
     suspend fun reverify(
         thermalPressure: Double,
         isCurrent: () -> Boolean,
@@ -82,17 +80,17 @@ class LiveDirectorSessionRunner(
     ): Result {
         var state = runtime.latest()
         var analysisMisses = 0
+        var bestScore = state.readinessScore
+        var lastProgressAt = SystemClock.elapsedRealtime()
+        var lastInstruction = state.instruction?.nodeId
+        var comparableSamples = 0
+
         while (isCurrent() && !state.captureReady) {
             val frame = camera.captureAnalysisFrame(LIVE_FRAME_TIMEOUT_MS)
             if (frame == null) {
                 analysisMisses++
                 if (analysisMisses >= MAX_ANALYSIS_MISSES) {
-                    val unavailable = state.copy(
-                        entityLocked = false,
-                        stable = false,
-                        captureReady = false,
-                        status = "Live Director preview unavailable"
-                    )
+                    val unavailable = state.copy(entityLocked = false, stable = false, captureReady = false, status = "Live Director preview unavailable")
                     onUpdate(unavailable)
                     return Result(false, unavailable, "Camera analysis stream unavailable")
                 }
@@ -106,6 +104,34 @@ class LiveDirectorSessionRunner(
             } finally {
                 if (!frame.isRecycled) frame.recycle()
             }
+
+            val active = state.instruction?.nodeId
+            val hasComparableEvidence = state.entityLocked && state.evaluations.any { it.measurement.value != null && it.measurement.confidence >= it.node.minConfidence }
+            if (hasComparableEvidence) comparableSamples++
+            val improved = state.readinessScore >= bestScore + MIN_PROGRESS_DELTA || active != lastInstruction
+            if (improved) {
+                bestScore = maxOf(bestScore, state.readinessScore)
+                lastProgressAt = SystemClock.elapsedRealtime()
+                lastInstruction = active
+                comparableSamples = 0
+            }
+
+            val stalledFor = SystemClock.elapsedRealtime() - lastProgressAt
+            if (!state.captureReady && comparableSamples >= MIN_NO_PROGRESS_SAMPLES && stalledFor >= NO_PROGRESS_WINDOW_MS) {
+                val constrained = state.copy(
+                    stable = false,
+                    captureReady = false,
+                    status = "Target not converging • Sierra will validate the closest achievable frame"
+                )
+                onUpdate(constrained)
+                return Result(
+                    ready = false,
+                    state = constrained,
+                    reason = "scene_constraint_no_progress",
+                    sceneConstraintSuspected = true
+                )
+            }
+
             if (!state.captureReady) delay(cadenceMs(thermalPressure))
         }
         return if (state.captureReady) Result(true, state) else Result(false, state, "Director session cancelled")
@@ -140,5 +166,8 @@ class LiveDirectorSessionRunner(
         private const val LIVE_PERCEPTION_BUDGET_MS = 340L
         private const val REVERIFY_FRAME_TIMEOUT_MS = 480L
         private const val MAX_ANALYSIS_MISSES = 6
+        private const val MIN_NO_PROGRESS_SAMPLES = 10
+        private const val MIN_PROGRESS_DELTA = 0.025
+        private const val NO_PROGRESS_WINDOW_MS = 15_000L
     }
 }
