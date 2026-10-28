@@ -163,9 +163,7 @@ private fun SierraAccountScreen(ui: DirectorUiState, vm: DirectorViewModel) {
             Text(if (signup) "Create your Sierra account" else "Welcome back", color = SierraSilver, fontSize = 15.sp)
             Spacer(Modifier.height(6.dp))
 
-            if (signup) {
-                SierraAuthField(name, { name = it }, "Name")
-            }
+            if (signup) SierraAuthField(name, { name = it }, "Name")
             SierraAuthField(email, { email = it }, "Email")
             if (signup) {
                 SierraAuthField(phone, { phone = it }, "Phone with country code")
@@ -181,11 +179,8 @@ private fun SierraAccountScreen(ui: DirectorUiState, vm: DirectorViewModel) {
             )
 
             ui.authError?.let { Text(it, color = SierraError, fontSize = 12.sp, textAlign = TextAlign.Center) }
-
             Button(
-                onClick = {
-                    if (signup) vm.signup(name, email, phone, dob, password) else vm.login(email, password)
-                },
+                onClick = { if (signup) vm.signup(name, email, phone, dob, password) else vm.login(email, password) },
                 enabled = !ui.authBusy,
                 colors = ButtonDefaults.buttonColors(containerColor = SierraGold, contentColor = Color.Black),
                 shape = RoundedCornerShape(18.dp),
@@ -194,11 +189,9 @@ private fun SierraAccountScreen(ui: DirectorUiState, vm: DirectorViewModel) {
                 if (ui.authBusy) CircularProgressIndicator(Modifier.size(18.dp), color = Color.Black, strokeWidth = 2.dp)
                 else Text(if (signup) "Create account" else "Sign in", fontWeight = FontWeight.Bold)
             }
-
             TextButton(onClick = { signup = !signup }) {
                 Text(if (signup) "Already have an account? Sign in" else "New to Sierra Vision? Create account", color = SierraGold)
             }
-
             if (signup) {
                 Surface(color = SierraGraphite, shape = RoundedCornerShape(18.dp), modifier = Modifier.fillMaxWidth().widthIn(max = 520.dp)) {
                     Text(
@@ -210,10 +203,7 @@ private fun SierraAccountScreen(ui: DirectorUiState, vm: DirectorViewModel) {
                     )
                 }
             }
-
-            TextButton(onClick = vm::continueWithBeta) {
-                Text("Continue with Sierra β · local only", color = SierraIvory)
-            }
+            TextButton(onClick = vm::continueWithBeta) { Text("Continue with Sierra β · local only", color = SierraIvory) }
             Text("Sierra β remains available without an account or cloud connection.", color = SierraSilver, fontSize = 10.sp, textAlign = TextAlign.Center)
         }
     }
@@ -221,13 +211,7 @@ private fun SierraAccountScreen(ui: DirectorUiState, vm: DirectorViewModel) {
 
 @Composable
 private fun SierraAuthField(value: String, onValue: (String) -> Unit, label: String) {
-    OutlinedTextField(
-        value = value,
-        onValueChange = onValue,
-        label = { Text(label) },
-        singleLine = true,
-        modifier = Modifier.fillMaxWidth().widthIn(max = 520.dp)
-    )
+    OutlinedTextField(value = value, onValueChange = onValue, label = { Text(label) }, singleLine = true, modifier = Modifier.fillMaxWidth().widthIn(max = 520.dp))
 }
 
 @Composable
@@ -238,15 +222,8 @@ private fun SierraPermissionIntro(request: () -> Unit) {
             Text("SIERRA VISION", color = SierraIvory, fontSize = 25.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 4.sp)
             Text("Photography, directed by intelligence.", color = SierraSilver, fontSize = 15.sp)
             Spacer(Modifier.height(8.dp))
-            Text(
-                "Sierra Vision needs camera access to frame and capture photographs. Sierra β works on-device; only a reduced analysis frame may leave the phone when Sierra AI is used.",
-                color = SierraSilver,
-                textAlign = TextAlign.Center,
-                lineHeight = 21.sp
-            )
-            Button(onClick = request, colors = ButtonDefaults.buttonColors(containerColor = SierraGold, contentColor = Color.Black), shape = RoundedCornerShape(18.dp)) {
-                Text("Open camera", fontWeight = FontWeight.SemiBold)
-            }
+            Text("Sierra Vision needs camera access to frame and capture photographs. Sierra β works on-device; only a reduced analysis frame may leave the phone when Sierra AI is used.", color = SierraSilver, textAlign = TextAlign.Center, lineHeight = 21.sp)
+            Button(onClick = request, colors = ButtonDefaults.buttonColors(containerColor = SierraGold, contentColor = Color.Black), shape = RoundedCornerShape(18.dp)) { Text("Open camera", fontWeight = FontWeight.SemiBold) }
         }
     }
 }
@@ -313,6 +290,7 @@ private fun SierraCameraScreen(vm: DirectorViewModel) {
         if (ui.gridEnabled) SierraRuleOfThirds()
         if (ui.levelEnabled) SierraLevel()
         SierraCompositionFrame(ui)
+        SierraLiveDirectorOverlay(ui, Modifier.fillMaxSize())
         SierraFocusRing(focusPoint)
 
         SierraTopBar(ui, onSierra = { showStatus = true }, onTools = vm::toggleTools, modifier = Modifier.align(Alignment.TopCenter))
@@ -331,9 +309,7 @@ private fun SierraCameraScreen(vm: DirectorViewModel) {
             modifier = Modifier.align(Alignment.BottomCenter)
         )
 
-        AnimatedVisibility(ui.showTools, Modifier.align(Alignment.BottomCenter)) {
-            SierraToolsSheet(ui, vm, onClose = vm::dismissTools)
-        }
+        AnimatedVisibility(ui.showTools, Modifier.align(Alignment.BottomCenter)) { SierraToolsSheet(ui, vm, onClose = vm::dismissTools) }
         if (showStatus) SierraStatusSheet(ui, vm, onClose = { showStatus = false })
         if (ui.showGallery) SierraGallery(ui, vm)
     }
@@ -341,11 +317,7 @@ private fun SierraCameraScreen(vm: DirectorViewModel) {
 
 @Composable
 private fun SierraTopBar(ui: DirectorUiState, onSierra: () -> Unit, onTools: () -> Unit, modifier: Modifier = Modifier) {
-    Row(
-        modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 16.dp, vertical = 12.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
+    Row(modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 16.dp, vertical = 12.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
         Surface(onClick = onSierra, color = SierraGraphite.copy(alpha = .78f), shape = RoundedCornerShape(18.dp)) {
             Row(Modifier.padding(horizontal = 13.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("SIERRA", color = SierraIvory, fontWeight = FontWeight.Bold, letterSpacing = 2.sp, fontSize = 13.sp)
@@ -372,16 +344,12 @@ private fun SierraGuidance(ui: DirectorUiState, modifier: Modifier = Modifier) {
     AnimatedVisibility(visible, modifier) {
         Surface(color = SierraGraphite.copy(alpha = .84f), shape = RoundedCornerShape(22.dp)) {
             Row(Modifier.padding(horizontal = 14.dp, vertical = 9.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-                if (ui.stage in setOf(DirectorStage.ANALYZING, DirectorStage.PLANNING, DirectorStage.APPLYING, DirectorStage.CHECKING, DirectorStage.SAVING, DirectorStage.FINAL_CAPTURING)) {
-                    CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 1.7.dp, color = SierraGold)
-                } else {
-                    Box(Modifier.size(7.dp).background(if (ui.stage == DirectorStage.ERROR) SierraError else SierraGold, CircleShape))
-                }
+                if (ui.stage in setOf(DirectorStage.ANALYZING, DirectorStage.PLANNING, DirectorStage.APPLYING, DirectorStage.CHECKING, DirectorStage.SAVING, DirectorStage.FINAL_CAPTURING)) CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 1.7.dp, color = SierraGold)
+                else Box(Modifier.size(7.dp).background(if (ui.stage == DirectorStage.ERROR) SierraError else SierraGold, CircleShape))
                 Column {
                     Text(ui.status, color = SierraIvory, fontSize = 12.sp, maxLines = 2)
-                    if (ui.stage == DirectorStage.PREPARED) {
-                        Text(listOfNotNull(ui.sceneLabel?.replace('_', ' ')?.replaceFirstChar { it.uppercase() }, ui.aspectRatio).joinToString(" · "), color = SierraSoftGold, fontSize = 10.sp)
-                    }
+                    if (ui.liveDirector.running) Text("Director ${"%.0f".format(ui.liveDirector.readinessScore * 100)}%${if (ui.liveDirector.stable) " · stable" else ""}", color = if (ui.liveDirector.captureReady) SierraSuccess else SierraSoftGold, fontSize = 10.sp)
+                    else if (ui.stage == DirectorStage.PREPARED) Text(listOfNotNull(ui.sceneLabel?.replace('_', ' ')?.replaceFirstChar { it.uppercase() }, ui.aspectRatio).joinToString(" · "), color = SierraSoftGold, fontSize = 10.sp)
                 }
             }
         }
@@ -389,20 +357,8 @@ private fun SierraGuidance(ui: DirectorUiState, modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun SierraBottomBar(
-    ui: DirectorUiState,
-    zoom: Float,
-    onZoom: (Float) -> Unit,
-    onGallery: () -> Unit,
-    onCapture: () -> Unit,
-    onSwitch: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    Column(
-        modifier.fillMaxWidth().navigationBarsPadding().padding(bottom = 18.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(13.dp)
-    ) {
+private fun SierraBottomBar(ui: DirectorUiState, zoom: Float, onZoom: (Float) -> Unit, onGallery: () -> Unit, onCapture: () -> Unit, onSwitch: () -> Unit, modifier: Modifier = Modifier) {
+    Column(modifier.fillMaxWidth().navigationBarsPadding().padding(bottom = 18.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(13.dp)) {
         Row(horizontalArrangement = Arrangement.spacedBy(9.dp), verticalAlignment = Alignment.CenterVertically) {
             listOf(0.5f, 1f, 2f).filter { it >= ui.camera.minZoom && it <= ui.camera.maxZoom }.forEach { value ->
                 val active = kotlin.math.abs(zoom - value) < .18f
@@ -420,6 +376,7 @@ private fun SierraBottomBar(
             when (ui.stage) {
                 DirectorStage.PREPARED -> "READY • tap gold shutter"
                 DirectorStage.SAVING -> "Finishing your Sierra photo"
+                DirectorStage.CHECKING -> if (ui.liveDirector.running) "Follow Sierra’s guide" else "Sierra checking the shot"
                 else -> if (ui.privateMode) "Sierra β Private • no cloud" else "Tap white shutter to prepare the shot"
             },
             color = if (ui.stage == DirectorStage.PREPARED) SierraSoftGold else SierraIvory.copy(alpha = .66f),
@@ -455,30 +412,16 @@ private fun SierraToolsSheet(ui: DirectorUiState, vm: DirectorViewModel, onClose
                 SierraTool("Grid", if (ui.gridEnabled) "On" else "Off") { vm.toggleGrid() }
                 SierraTool("Level", if (ui.levelEnabled) "On" else "Off") { vm.toggleLevel() }
             }
-
             HorizontalDivider(color = Color.White.copy(alpha = .08f))
             Text("Aspect ratio", color = SierraIvory, fontWeight = FontWeight.SemiBold)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 SierraRatioChip("Sierra", ui.aspectRatioOverride == null) { vm.setAspectRatioOverride(null) }
                 SierraCropPolicy.supported.take(3).forEach { ratio -> SierraRatioChip(ratio, ui.aspectRatioOverride == ratio) { vm.setAspectRatioOverride(ratio) } }
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                SierraCropPolicy.supported.drop(3).forEach { ratio -> SierraRatioChip(ratio, ui.aspectRatioOverride == ratio) { vm.setAspectRatioOverride(ratio) } }
-            }
-
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { SierraCropPolicy.supported.drop(3).forEach { ratio -> SierraRatioChip(ratio, ui.aspectRatioOverride == ratio) { vm.setAspectRatioOverride(ratio) } } }
             HorizontalDivider(color = Color.White.copy(alpha = .08f))
-            SierraToggleRow(
-                title = "Private Photography",
-                subtitle = "Sierra β only · no analysis frame leaves device",
-                checked = ui.privateMode,
-                onChange = { vm.togglePrivateMode() }
-            )
-            SierraToggleRow(
-                title = "Keep Original",
-                subtitle = "Also save the untouched full-quality CameraX JPEG",
-                checked = ui.keepOriginal,
-                onChange = { vm.toggleKeepOriginal() }
-            )
+            SierraToggleRow("Private Photography", "Sierra β only · no analysis frame leaves device", ui.privateMode) { vm.togglePrivateMode() }
+            SierraToggleRow("Keep Original", "Also save the untouched full-quality CameraX JPEG", ui.keepOriginal) { vm.toggleKeepOriginal() }
             Text("Sierra finals save to Pictures/Sierra Vision. Originals, when enabled, save separately under Originals.", color = SierraSilver, fontSize = 11.sp, lineHeight = 16.sp)
         }
     }
@@ -486,26 +429,13 @@ private fun SierraToolsSheet(ui: DirectorUiState, vm: DirectorViewModel, onClose
 
 @Composable
 private fun SierraRatioChip(label: String, selected: Boolean, onClick: () -> Unit) {
-    FilterChip(
-        selected = selected,
-        onClick = onClick,
-        label = { Text(label, fontSize = 10.sp) },
-        colors = FilterChipDefaults.filterChipColors(
-            selectedContainerColor = SierraGold,
-            selectedLabelColor = Color.Black,
-            containerColor = Color.White.copy(alpha = .04f),
-            labelColor = SierraIvory
-        )
-    )
+    FilterChip(selected = selected, onClick = onClick, label = { Text(label, fontSize = 10.sp) }, colors = FilterChipDefaults.filterChipColors(selectedContainerColor = SierraGold, selectedLabelColor = Color.Black, containerColor = Color.White.copy(alpha = .04f), labelColor = SierraIvory))
 }
 
 @Composable
 private fun SierraToggleRow(title: String, subtitle: String, checked: Boolean, onChange: () -> Unit) {
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-        Column(Modifier.weight(1f)) {
-            Text(title, color = SierraIvory, fontWeight = FontWeight.SemiBold)
-            Text(subtitle, color = SierraSilver, fontSize = 11.sp, lineHeight = 15.sp)
-        }
+        Column(Modifier.weight(1f)) { Text(title, color = SierraIvory, fontWeight = FontWeight.SemiBold); Text(subtitle, color = SierraSilver, fontSize = 11.sp, lineHeight = 15.sp) }
         Switch(checked = checked, onCheckedChange = { onChange() }, colors = SwitchDefaults.colors(checkedThumbColor = Color.Black, checkedTrackColor = SierraGold))
     }
 }
@@ -515,23 +445,17 @@ private fun SierraStatusSheet(ui: DirectorUiState, vm: DirectorViewModel, onClos
     Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = .62f)).clickable { onClose() }.padding(18.dp), contentAlignment = Alignment.Center) {
         Surface(color = SierraGraphite, shape = RoundedCornerShape(28.dp), modifier = Modifier.fillMaxWidth().widthIn(max = 520.dp).clickable(enabled = false) { }) {
             Column(Modifier.padding(22.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Text("SIERRA", color = SierraIvory, letterSpacing = 3.sp, fontWeight = FontWeight.Bold)
-                    Text("✕", color = SierraIvory, modifier = Modifier.clickable { onClose() }.padding(8.dp))
-                }
-                if (ui.signedIn) {
-                    SierraStatusRow("Account", ui.accountName ?: "Signed in")
-                    SierraStatusRow("AI credits", ui.creditsAvailable?.toString() ?: "Syncing")
-                } else {
-                    SierraStatusRow("Account", if (ui.guestMode) "Sierra β guest" else "Not signed in")
-                }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) { Text("SIERRA", color = SierraIvory, letterSpacing = 3.sp, fontWeight = FontWeight.Bold); Text("✕", color = SierraIvory, modifier = Modifier.clickable { onClose() }.padding(8.dp)) }
+                if (ui.signedIn) { SierraStatusRow("Account", ui.accountName ?: "Signed in"); SierraStatusRow("AI credits", ui.creditsAvailable?.toString() ?: "Syncing") }
+                else SierraStatusRow("Account", if (ui.guestMode) "Sierra β guest" else "Not signed in")
                 SierraStatusRow("Sierra AI", if (ui.aiAvailable && !ui.privateMode) "Available" else if (ui.privateMode) "Disabled by Private Photography" else "Unavailable")
                 SierraStatusRow("Sierra β", "Active")
                 SierraStatusRow("Current intelligence", if (ui.sierraMode == SierraMode.AI) "Sierra AI + Sierra β" else "Sierra β")
                 SierraStatusRow("Composition", ui.aspectRatioOverride?.let { "$it locked" } ?: "Sierra Auto")
+                if (ui.liveDirector.running) SierraStatusRow("Live Director", if (ui.liveDirector.captureReady) "Ready" else "Coaching ${"%.0f".format(ui.liveDirector.readinessScore * 100)}%")
                 SierraStatusRow("Saving", if (ui.keepOriginal) "Final + Original" else "Sierra Final")
                 HorizontalDivider(color = Color.White.copy(alpha = .08f))
-                Text("Sierra AI directs the photograph when available. Sierra β always validates and executes camera controls locally, and takes over planning automatically when cloud intelligence is unavailable or too slow.", color = SierraSilver, fontSize = 12.sp, lineHeight = 18.sp)
+                Text("Sierra AI directs the photograph when available. Sierra β validates camera controls and continuously measures the live scene against Sierra’s Director target before capture.", color = SierraSilver, fontSize = 12.sp, lineHeight = 18.sp)
                 if (ui.privateMode) Text("Private Photography is active. No cloud analysis will be attempted.", color = SierraSoftGold, fontSize = 12.sp)
                 TextButton(onClick = { vm.togglePrivateMode() }) { Text(if (ui.privateMode) "Disable Private Photography" else "Use Sierra β privately", color = SierraGold) }
                 if (ui.signedIn) TextButton(onClick = { onClose(); vm.signOut() }) { Text("Sign out", color = SierraSilver) }
@@ -544,58 +468,22 @@ private fun SierraStatusSheet(ui: DirectorUiState, vm: DirectorViewModel, onClos
 private fun SierraGallery(ui: DirectorUiState, vm: DirectorViewModel) {
     val context = LocalContext.current
     var selected by remember { mutableStateOf<String?>(null) }
-
     Box(Modifier.fillMaxSize().background(SierraInk)) {
         Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
             Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Column {
-                    Text("SIERRA VISION", color = SierraIvory, letterSpacing = 3.sp, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                    Text("Gallery", color = SierraSilver, fontSize = 12.sp)
-                }
+                Column { Text("SIERRA VISION", color = SierraIvory, letterSpacing = 3.sp, fontWeight = FontWeight.Bold, fontSize = 14.sp); Text("Gallery", color = SierraSilver, fontSize = 12.sp) }
                 Text("✕", color = SierraIvory, modifier = Modifier.clickable { vm.closeGallery() }.padding(12.dp), fontSize = 20.sp)
             }
             if (ui.galleryItems.isEmpty()) {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        SierraMark(62.dp)
-                        Text("No Sierra photos yet", color = SierraIvory, fontWeight = FontWeight.SemiBold)
-                        Text("Your finished photographs will appear here.", color = SierraSilver, fontSize = 12.sp)
-                    }
-                }
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) { SierraMark(62.dp); Text("No Sierra photos yet", color = SierraIvory, fontWeight = FontWeight.SemiBold); Text("Your finished photographs will appear here.", color = SierraSilver, fontSize = 12.sp) } }
             } else {
-                LazyVerticalGrid(
-                    columns = GridCells.Fixed(3),
-                    modifier = Modifier.fillMaxSize().padding(horizontal = 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(3.dp),
-                    verticalArrangement = Arrangement.spacedBy(3.dp)
-                ) {
+                LazyVerticalGrid(columns = GridCells.Fixed(3), modifier = Modifier.fillMaxSize().padding(horizontal = 4.dp), horizontalArrangement = Arrangement.spacedBy(3.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                     items(ui.galleryItems, key = { it }) { value -> SierraGalleryThumbnail(value) { selected = value } }
                 }
             }
         }
-
         selected?.let { value ->
-            SierraPhotoViewer(
-                uriString = value,
-                onClose = { selected = null },
-                onOpen = {
-                    runCatching {
-                        context.startActivity(Intent(Intent.ACTION_VIEW).apply {
-                            setDataAndType(Uri.parse(value), "image/jpeg")
-                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                        })
-                    }
-                },
-                onShare = {
-                    runCatching {
-                        context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
-                            type = "image/jpeg"
-                            putExtra(Intent.EXTRA_STREAM, Uri.parse(value))
-                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                        }, "Share Sierra photo"))
-                    }
-                }
-            )
+            SierraPhotoViewer(uriString = value, onClose = { selected = null }, onOpen = { runCatching { context.startActivity(Intent(Intent.ACTION_VIEW).apply { setDataAndType(Uri.parse(value), "image/jpeg"); addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION) }) } }, onShare = { runCatching { context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply { type = "image/jpeg"; putExtra(Intent.EXTRA_STREAM, Uri.parse(value)); addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION) }, "Share Sierra photo")) } })
         }
     }
 }
@@ -613,11 +501,8 @@ private fun SierraGalleryThumbnail(uriString: String, onClick: () -> Unit) {
 private fun SierraPhotoViewer(uriString: String, onClose: () -> Unit, onOpen: () -> Unit, onShare: () -> Unit) {
     val bitmap = rememberMediaThumbnail(uriString, 1600)
     Box(Modifier.fillMaxSize().background(Color.Black)) {
-        if (bitmap != null) {
-            Image(bitmap.asImageBitmap(), contentDescription = "Sierra photograph", modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
-        } else {
-            CircularProgressIndicator(Modifier.align(Alignment.Center), color = SierraGold)
-        }
+        if (bitmap != null) Image(bitmap.asImageBitmap(), contentDescription = "Sierra photograph", modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
+        else CircularProgressIndicator(Modifier.align(Alignment.Center), color = SierraGold)
         Row(Modifier.fillMaxWidth().statusBarsPadding().padding(16.dp), horizontalArrangement = Arrangement.SpaceBetween) {
             SierraRoundAction("‹", onClose)
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -631,37 +516,25 @@ private fun SierraPhotoViewer(uriString: String, onClose: () -> Unit, onOpen: ()
 @Composable
 private fun rememberMediaThumbnail(uriString: String, px: Int): Bitmap? {
     val context = LocalContext.current
-    val bitmap by produceState<Bitmap?>(initialValue = null, uriString, px) {
-        value = withContext(Dispatchers.IO) {
-            runCatching { context.contentResolver.loadThumbnail(Uri.parse(uriString), Size(px, px), null) }.getOrNull()
-        }
-    }
+    val bitmap by produceState<Bitmap?>(initialValue = null, uriString, px) { value = withContext(Dispatchers.IO) { runCatching { context.contentResolver.loadThumbnail(Uri.parse(uriString), Size(px, px), null) }.getOrNull() } }
     return bitmap
 }
 
 @Composable
 private fun SierraStatusRow(label: String, value: String) {
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-        Text(label, color = SierraSilver, fontSize = 12.sp)
-        Text(value, color = SierraIvory, fontSize = 12.sp, fontWeight = FontWeight.Medium, textAlign = TextAlign.End)
-    }
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) { Text(label, color = SierraSilver, fontSize = 12.sp); Text(value, color = SierraIvory, fontSize = 12.sp, fontWeight = FontWeight.Medium, textAlign = TextAlign.End) }
 }
 
 @Composable
 private fun SierraTool(label: String, value: String, onClick: () -> Unit) {
     Surface(onClick = onClick, color = Color.White.copy(alpha = .05f), shape = RoundedCornerShape(16.dp), modifier = Modifier.width(100.dp)) {
-        Column(Modifier.padding(vertical = 12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(label, color = SierraIvory, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-            Text(value, color = SierraSilver, fontSize = 9.sp, maxLines = 1)
-        }
+        Column(Modifier.padding(vertical = 12.dp), horizontalAlignment = Alignment.CenterHorizontally) { Text(label, color = SierraIvory, fontSize = 11.sp, fontWeight = FontWeight.SemiBold); Text(value, color = SierraSilver, fontSize = 9.sp, maxLines = 1) }
     }
 }
 
 @Composable
 private fun SierraRoundAction(text: String, onClick: () -> Unit) {
-    Surface(onClick = onClick, color = SierraGraphite.copy(alpha = .80f), shape = CircleShape, modifier = Modifier.size(52.dp)) {
-        Box(contentAlignment = Alignment.Center) { Text(text, color = SierraIvory, fontSize = 20.sp) }
-    }
+    Surface(onClick = onClick, color = SierraGraphite.copy(alpha = .80f), shape = CircleShape, modifier = Modifier.size(52.dp)) { Box(contentAlignment = Alignment.Center) { Text(text, color = SierraIvory, fontSize = 20.sp) } }
 }
 
 @Composable
@@ -686,24 +559,12 @@ private fun SierraCompositionFrame(ui: DirectorUiState) {
     }
 }
 
-private fun parseRatio(value: String): Pair<Float, Float>? = when (value) {
-    "4:3" -> 4f to 3f
-    "3:2" -> 3f to 2f
-    "4:5" -> 4f to 5f
-    "1:1" -> 1f to 1f
-    "16:9" -> 16f to 9f
-    "9:16" -> 9f to 16f
-    "2.39:1" -> 2.39f to 1f
-    else -> null
-}
+private fun parseRatio(value: String): Pair<Float, Float>? = when (value) { "4:3" -> 4f to 3f; "3:2" -> 3f to 2f; "4:5" -> 4f to 5f; "1:1" -> 1f to 1f; "16:9" -> 16f to 9f; "9:16" -> 9f to 16f; "2.39:1" -> 2.39f to 1f; else -> null }
 
 @Composable
 private fun SierraRuleOfThirds() = Canvas(Modifier.fillMaxSize()) {
     val c = Color.White.copy(alpha = .23f)
-    for (f in listOf(1f / 3f, 2f / 3f)) {
-        drawLine(c, Offset(size.width * f, 0f), Offset(size.width * f, size.height), 1f)
-        drawLine(c, Offset(0f, size.height * f), Offset(size.width, size.height * f), 1f)
-    }
+    for (f in listOf(1f / 3f, 2f / 3f)) { drawLine(c, Offset(size.width * f, 0f), Offset(size.width * f, size.height), 1f); drawLine(c, Offset(0f, size.height * f), Offset(size.width, size.height * f), 1f) }
 }
 
 @Composable
@@ -716,15 +577,10 @@ private fun SierraLevel() = Canvas(Modifier.fillMaxSize()) {
 @Composable
 private fun SierraFocusRing(point: Offset?) {
     if (point == null) return
-    Canvas(Modifier.fillMaxSize()) {
-        drawCircle(SierraGold, 38f, point, style = Stroke(2.5f))
-        drawCircle(SierraGold, 3.5f, point)
-    }
+    Canvas(Modifier.fillMaxSize()) { drawCircle(SierraGold, 38f, point, style = Stroke(2.5f)); drawCircle(SierraGold, 3.5f, point) }
 }
 
 @Composable
 private fun SierraMark(size: androidx.compose.ui.unit.Dp) {
-    Box(Modifier.size(size).border(2.dp, SierraGold, CircleShape), contentAlignment = Alignment.Center) {
-        Text("S", color = SierraGold, fontSize = (size.value * .42f).sp, fontWeight = FontWeight.Light)
-    }
+    Box(Modifier.size(size).border(2.dp, SierraGold, CircleShape), contentAlignment = Alignment.Center) { Text("S", color = SierraGold, fontSize = (size.value * .42f).sp, fontWeight = FontWeight.Light) }
 }
