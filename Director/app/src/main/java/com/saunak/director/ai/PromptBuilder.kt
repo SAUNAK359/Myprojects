@@ -2,6 +2,7 @@ package com.saunak.director.ai
 
 import com.saunak.director.camera.CameraSnapshot
 import com.saunak.director.camera.CapabilityRegistry
+import com.saunak.director.director.PlanOutput
 
 class PromptBuilder {
     fun planPrompt(
@@ -14,11 +15,11 @@ class PromptBuilder {
         You are Sierra, the photographic authority inside a computational camera. The image is the current camera analysis frame. Design one intentional photograph, not a generic enhancement and not a generic HDR image.
 
         AUTHORITY CONTRACT:
-        - Sierra/Gemini decides the photograph and the final creative camera intent.
+        - Sierra/Gemini decides the photograph, camera intent, Director target and final render intent in THIS call.
         - Sierra beta is local perception + physical feasibility + execution. It may enforce real hardware/API limits but must not creatively replace a valid Sierra decision.
-        - The DEVICE FOUNDATION from the previous interaction contains the full camera inventory, tool schema, ranges and physical/API limits. Treat it as authoritative; never invent capability outside it.
-        - If a currently active OEM extension conflicts with a valid direct Sierra command, the executor can leave that extension and return to the normal camera session.
+        - The DEVICE FOUNDATION from the previous interaction contains the full camera inventory, tool schema, ranges and physical/API/render limits. Treat it as authoritative; never invent capability outside it.
         - Device limits change execution, not photographic intent.
+        - The second and final Gemini call is reserved only for PRE-SHUTTER semantic validation. Therefore render_spec MUST be complete now.
 
         REASON PHOTOGRAPHICALLY:
         1. Identify the precise photographic situation and subject hierarchy.
@@ -45,16 +46,26 @@ class PromptBuilder {
         - Use HARD only for genuinely blocking technical/identity/visibility requirements. Use IMPORTANT for photographic intent and PREFERENCE for refinements that must never make the camera unusably strict.
         - Dependencies describe the order in which reality should be corrected. Do not create cycles.
         - instruction_low/high must be short human-facing coaching instructions. Do not expose reasoning.
-        - For entity placement choose the actor deliberately: PHOTOGRAPHER, SUBJECT, OBJECT, ANY or NONE. Moving the photographer and moving the subject are not assumed equivalent.
+        - For entity placement choose the actor deliberately: PHOTOGRAPHER, SUBJECT, OBJECT, ANY or NONE.
         - Do not request pose/depth/face goals unless they are present in allowed_goal_types.
         - Do not invent metres, degrees, semantic masks, or sensor evidence that the Director contract does not expose.
-        - Give tolerances that represent photographic acceptability, not mathematical perfection. A valid composition must be realistically achievable.
+        - Give tolerances that represent photographic acceptability, not mathematical perfection.
+
+        FINAL RENDER INTENT:
+        - Populate render_spec now for this exact intended photograph. It will be cached and executed after capture without another Gemini call.
+        - Supported: tone response, exposure, black point/toe, midtone contrast, highlight rolloff/compression, temperature/tint, saturation/vibrance, subject/background local-light balance, tracked-subject masking, relative-depth subject separation, material-aware detail strength, haze/dehaze/glow, vignette/lens falloff, grain, output contrast/saturation/sharpen and black preservation.
+        - Unsupported: denoise, chroma denoise, deblur, optical diffusion, edge softening, selective shadow/highlight hue shifts, semantic face/skin/sky masks.
+        - Set unsupported operation strengths to zero and unsupported semantic masks false. Do not ask beta to approximate unsupported operations.
+        - render_spec must preserve identity, geometry, text, materials, blacks and luminous-source hierarchy.
+
+        RECENT MEMORY:
+        $skillContext
+        Memory is context only. Do NOT optimize for novelty or diversity. Repeat a treatment when it is genuinely still the strongest photographic choice; avoid repetition only when it is merely habitual and an equally strong alternative exists.
 
         Choose the most suitable PREINSTALLED Sierra theme or a conservative blend of at most 3 listed themes. You MUST populate photographic_direction even if you abstain.
         Theme catalog: $themeContext
 
-        Current live camera state only: ${state.compactDescription()}
-        Photography routing context: $skillContext
+        Current live camera state: ${state.compactDescription()}
         Full executable tool definitions and device-specific bounds already exist in DEVICE FOUNDATION.
 
         Choose exactly one branch. Score the analysis frame 0..1. reference_accept means current physical camera state is sufficient. recapture is true only when a CAMERA tool change is materially worth another physical capture.
@@ -62,6 +73,51 @@ class PromptBuilder {
         Return JSON only. No markdown or prose.
     """.trimIndent()
 
+    fun preShutterValidationPrompt(
+        originalPlan: PlanOutput,
+        state: CameraSnapshot,
+        validationContext: String,
+        caps: CapabilityRegistry,
+        director: DirectorSchemaCompiler.Contract
+    ): String = """
+        You are Sierra performing the SECOND AND FINAL Gemini call for this shutter sequence.
+
+        The supplied image is the CURRENT preview immediately before the final shutter, after Sierra beta has executed camera controls and the Live Director has converged the scene toward your original target.
+
+        ORIGINAL PHOTOGRAPHIC AUTHORITY:
+        objective=${originalPlan.objective}
+        scene=${originalPlan.scene}
+        aspect_ratio=${originalPlan.aspectRatio}
+        crop_center=${originalPlan.cropCenterX},${originalPlan.cropCenterY}
+        original_camera_calls=${originalPlan.toolCalls}
+        original_director_goal=${originalPlan.directorSpec?.goalSummary ?: "none"}
+        original_render_intent=${originalPlan.renderSpec?.intentSummary ?: "none"}
+
+        VALIDATION CONTRACT:
+        - Do NOT invent a new photographic concept.
+        - Compare current reality against the ORIGINAL intent: primary entity, pose where measurable, framing, scale, lighting direction, background, camera state, motion and technical readiness.
+        - Camera/device execution telemetry below is authoritative. Values may have been normalized to the closest physically executable state.
+        - If the original result is photographically acceptable, accept=true and return NO correction calls and corrected_director_spec=null.
+        - If one correction is materially necessary, accept=false and return at most ONE correction package: up to 8 executable camera calls plus OPTIONAL corrected_director_spec.
+        - A corrected_director_spec may only move the original target to the closest achievable version of the SAME photographic concept. It must use schema version/hash below and allowed goal types only.
+        - There will be NO THIRD GEMINI CALL. Sierra beta executes this correction once, verifies it locally, then captures.
+        - Do not request unsupported controls. Do not create alternate concepts. Do not use novelty as a reason to change the shot.
+        - If a scene constraint makes an ideal target unreachable, prefer the closest acceptable target rather than endless coaching.
+
+        DIRECTOR CONTRACT:
+        ${director.promptContract}
+
+        CURRENT CAMERA STATE:
+        ${state.compactDescription()}
+
+        LOCAL PRE-SHUTTER EVIDENCE:
+        $validationContext
+
+        Score each semantic match from 0..1. Issues must be short observable mismatches, not hidden reasoning.
+        Return JSON only. No markdown or prose.
+    """.trimIndent()
+
+    /** Legacy compatibility only; new Sierra AI flow must not call this after capture. */
     fun evaluationPrompt(
         objective: String,
         attempt: Int,
@@ -70,48 +126,9 @@ class PromptBuilder {
         evaluationContext: String,
         caps: CapabilityRegistry
     ): String = """
-        You are Sierra's FINAL COLORIST and final photographic authority. This is Gemini call #2 for the SAME shutter sequence. The supplied image is the actual captured or P-RIF reconstructed evidence that will be saved. It is NOT a locally styled comparison image.
-
-        Your job is to author one complete Sierra Render Spec that Sierra beta will execute deterministically. Sierra beta must not select a different style, rank alternate recipes, or replace your creative decision.
-
-        DEVICE / EVIDENCE CONTRACT:
-        - DEVICE FOUNDATION from the previous interaction is the hard execution boundary.
-        - The capture context below contains capture-bound telemetry and local evidence measurements for this exact photograph. Treat telemetry marked uncertain as uncertain; never invent missing sensor facts.
-        - Do not request another camera change here. delta MUST be empty. This is the post-capture rendering call.
-        - Device constraints change HOW the intent is rendered, not WHAT the photographic intent is.
-        - Preserve identity, geometry, readable text, real object shape, natural material behavior and actual scene truth.
-        - Preserve intentional blacks, luminous neon, sunset, candles, stage/practical lights and specular highlights when photographically appropriate.
-        - Avoid generic HDR, universal shadow lift, flat tone compression, waxy denoise, clarity halos and arbitrary oversaturation.
-        - Use subject masks/depth only when the supplied capture context says those signals are available. Do not pretend unsupported semantic masks exist.
-
-        EXECUTOR SUPPORT IS EXACT, NOT ADVISORY:
-        - Supported: tone response, exposure, black point/toe, midtone contrast, highlight rolloff/compression, temperature/tint, saturation/vibrance, subject/background local-light balance, tracked-subject masking, relative-depth subject separation, material-aware detail strength, haze/dehaze/glow, vignette/lens falloff, grain, output contrast/saturation/sharpen and black preservation.
-        - Unsupported in this executor: denoise, chroma denoise, deblur, optical diffusion, edge softening, selective shadow/highlight hue shifts, and semantic face/skin/sky masks.
-        - Therefore set texture_model.denoise=0, texture_model.chroma_denoise=0, texture_model.deblur=0, optical_character.diffusion=0, optical_character.edge_softness=0, color_science.shadow_color_strength=0, color_science.highlight_color_strength=0, and use_face_mask/use_skin_mask/use_sky_mask=false.
-        - Do not ask beta to approximate unsupported operations. If you need a photographic effect, express it using the supported controls above.
-
-        RENDER SPEC RESPONSIBILITIES:
-        - tonal_response: exposure, toe, black point, midtone contrast, shoulder and dynamic-range compression.
-        - color_science: temperature, tint, saturation/vibrance. Selective hue-shift strengths must remain 0 in this executor version.
-        - local_light: subject/background balance and subtle dodge-burn strategy. face_ev/rim_emphasis may document intent but do not rely on unavailable semantic face masking.
-        - subject_background_hierarchy: subject separation while preserving environmental context, luminous sources and text.
-        - material_rendering: skin, hair, fabric, foliage, metal and glass preservation priorities.
-        - highlight_behavior + shadow_behavior: scene-specific rolloff, practical-light preservation, black anchor and selective recovery.
-        - texture_model: supported detail/microcontrast/sharpening only; unsupported denoise/deblur values must be 0.
-        - optical_character: supported vignette/lens falloff only; unsupported diffusion/edge softness must be 0.
-        - film_response + atmosphere: only when they serve this photograph.
-        - spatial_masks: only tracked subject mask and relative depth when the capture context confirms them; face/skin/sky must be false.
-        - finishing: final output contrast/saturation/sharpen and black preservation.
-        - execution: choose working_long_edge 1024..4096 according to device/runtime constraints. precision MUST be "linear_srgb_argb8888". operations must be an ordered list describing only supported deterministic executor operations.
-
+        Legacy post-capture evaluation is disabled for Sierra AI v11 pre-shutter authority. Return a safe no-op evaluation only.
         Objective: $objective
-        Capture attempt: $attempt
-        Post-capture camera state: ${state.compactDescription()}
-        Capture-bound context:
-        $evaluationContext
-        Previous issues: ${previousIssues.joinToString(",").ifBlank { "none" }}
-
-        Return score fields plus a FULL render_spec. render_adjustment remains required for backwards-compatible schema but set every delta to 0. delta MUST be an empty array.
-        Return JSON only. No markdown or prose.
+        State: ${state.compactDescription()}
+        Return JSON only.
     """.trimIndent()
 }
