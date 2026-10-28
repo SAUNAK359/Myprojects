@@ -157,8 +157,9 @@ class GeminiDirectVlmRuntime(
             )
             try {
                 val streamed = streamer.execute(request)
+                val decoded = decode(streamed.text)
                 onInteractionCompleted(streamed.interactionId)
-                decode(streamed.text)
+                decoded
             } catch (http: GeminiHttpException) {
                 if (http.statusCode == 400 || http.statusCode == 404) modelResolver.invalidate()
                 throw IOException("http=${http.statusCode};${apiError(http.statusCode, http.payload)}")
