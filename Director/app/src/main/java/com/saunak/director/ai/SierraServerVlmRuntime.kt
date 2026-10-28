@@ -69,11 +69,15 @@ class SierraServerVlmRuntime(
             ).getOrThrow()
             activeJobId = created.id
             val plan = VlmContractValidator.plan(toPlanOutput(awaitReady(created)))
-            val director = plan.directorSpec?.let { LiveDirectorValidator.validate(it, DirectorSchemaCompiler().compile()) }
+            val serverDirector = requireNotNull(plan.directorSpec) {
+                "Sierra Server omitted capability-aware Director spec"
+            }
+            val director = LiveDirectorValidator.validate(serverDirector, DirectorSchemaCompiler().compile())
             val validated = plan.copy(directorSpec = director)
             latestDirectorSpec = director
             Result.success(validated)
         } catch (t: Throwable) {
+            activeJobId?.let { id -> scope.launch { server.cancel(id) } }
             activeJobId = null
             latestDirectorSpec = null
             Result.failure(t)
@@ -132,9 +136,6 @@ class SierraServerVlmRuntime(
     override fun setStreamProgressListener(listener: ((VlmStreamProgress) -> Unit)?) { directGemini.setStreamProgressListener(listener) }
     override fun cancel() = cancelCloudJob()
     override fun isReady(): Boolean = geminiKeyStore.isConfigured() || (server.configured && server.authenticated)
-    // Semantic planning now owns a local live coaching phase. The old outer 7.5 s prepare
-    // deadline must never cancel a healthy server plan or a user who is still following guidance.
-    // The server transport itself remains bounded by its own HTTP/polling limits.
     override fun waitForSemanticPlan(): Boolean = true
     override fun supportsFinalReview(): Boolean = geminiKeyStore.isConfigured()
     override fun diagnostics(): VlmDiagnostics = if (geminiKeyStore.isConfigured()) directGemini.diagnostics() else VlmDiagnostics("sierra_server")
