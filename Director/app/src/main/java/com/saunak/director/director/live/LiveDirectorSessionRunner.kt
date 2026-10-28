@@ -2,6 +2,7 @@ package com.saunak.director.director.live
 
 import android.graphics.Bitmap
 import com.saunak.director.camera.CameraEngine
+import com.saunak.director.camera.DirectorExtension
 import com.saunak.director.director.SierraPerceptionFabric
 import com.saunak.director.processing.PhotoQuality
 import kotlinx.coroutines.delay
@@ -32,12 +33,54 @@ class LiveDirectorSessionRunner(
         isCurrent: () -> Boolean,
         onUpdate: (LiveDirectorState) -> Unit
     ): Result {
-        if (camera.snapshot().extension != com.saunak.director.camera.DirectorExtension.NONE) {
+        if (camera.snapshot().extension != DirectorExtension.NONE) {
             val state = runtime.stop()
             return Result(false, state, "Live Director analysis unavailable while OEM extension owns the session")
         }
-        var state = runtime.initialize(spec, planningFrame)
-        onUpdate(state)
+        val initialized = runtime.initialize(spec, planningFrame)
+        onUpdate(initialized)
+        return loop(thermalPressure, isCurrent, onUpdate)
+    }
+
+    suspend fun resumeUntilReady(
+        thermalPressure: Double,
+        isCurrent: () -> Boolean,
+        onUpdate: (LiveDirectorState) -> Unit
+    ): Result {
+        if (!runtime.latest().running) return Result(false, runtime.latest(), "Director runtime is not initialized")
+        if (camera.snapshot().extension != DirectorExtension.NONE) {
+            return Result(false, runtime.latest().copy(captureReady = false, stable = false), "Live Director analysis unavailable while OEM extension owns the session")
+        }
+        return loop(thermalPressure, isCurrent, onUpdate)
+    }
+
+    /**
+     * READY expires naturally because the runtime stability window is timestamp based. One fresh
+     * sample only preserves READY when the prior stable evidence is still within its temporal window.
+     */
+    suspend fun reverify(
+        thermalPressure: Double,
+        isCurrent: () -> Boolean,
+        onUpdate: (LiveDirectorState) -> Unit
+    ): Result {
+        if (!isCurrent()) return Result(false, runtime.latest(), "Director session cancelled")
+        val frame = camera.captureAnalysisFrame(REVERIFY_FRAME_TIMEOUT_MS)
+            ?: return Result(false, runtime.latest().copy(captureReady = false, stable = false), "Fresh preview unavailable")
+        return try {
+            val state = observeFrame(frame, thermalPressure)
+            onUpdate(state)
+            Result(state.captureReady, state, if (state.captureReady) null else "Photographic target moved outside stable tolerance")
+        } finally {
+            if (!frame.isRecycled) frame.recycle()
+        }
+    }
+
+    private suspend fun loop(
+        thermalPressure: Double,
+        isCurrent: () -> Boolean,
+        onUpdate: (LiveDirectorState) -> Unit
+    ): Result {
+        var state = runtime.latest()
         var analysisMisses = 0
         while (isCurrent() && !state.captureReady) {
             val frame = camera.captureAnalysisFrame(LIVE_FRAME_TIMEOUT_MS)
@@ -58,20 +101,7 @@ class LiveDirectorSessionRunner(
             }
             try {
                 analysisMisses = 0
-                val quality = PhotoQuality.analyze(frame)
-                val caps = camera.capabilities()
-                val snapshot = camera.snapshot()
-                val perceived = withTimeoutOrNull(LIVE_PERCEPTION_BUDGET_MS) {
-                    perception.analyze(
-                        frame = frame,
-                        quality = quality,
-                        lensFacing = caps.lensFacing,
-                        zoomRatio = snapshot.zoomRatio,
-                        thermalPressure = thermalPressure,
-                        cameraId = camera.activeCameraId()
-                    )
-                }
-                state = runtime.observe(frame, perceived, quality)
+                state = observeFrame(frame, thermalPressure)
                 onUpdate(state)
             } finally {
                 if (!frame.isRecycled) frame.recycle()
@@ -81,34 +111,21 @@ class LiveDirectorSessionRunner(
         return if (state.captureReady) Result(true, state) else Result(false, state, "Director session cancelled")
     }
 
-    /**
-     * READY expires naturally because the runtime stability window is timestamp based. One fresh
-     * sample only preserves READY when the prior stable evidence is still within its temporal window.
-     */
-    suspend fun reverify(
-        thermalPressure: Double,
-        isCurrent: () -> Boolean,
-        onUpdate: (LiveDirectorState) -> Unit
-    ): Result {
-        if (!isCurrent()) return Result(false, runtime.latest(), "Director session cancelled")
-        val frame = camera.captureAnalysisFrame(REVERIFY_FRAME_TIMEOUT_MS)
-            ?: return Result(false, runtime.latest().copy(captureReady = false, stable = false), "Fresh preview unavailable")
-        return try {
-            val quality = PhotoQuality.analyze(frame)
-            val caps = camera.capabilities()
-            val snapshot = camera.snapshot()
-            val perceived = withTimeoutOrNull(REVERIFY_PERCEPTION_BUDGET_MS) {
-                perception.analyze(
-                    frame, quality, caps.lensFacing, snapshot.zoomRatio,
-                    thermalPressure, camera.activeCameraId()
-                )
-            }
-            val state = runtime.observe(frame, perceived, quality)
-            onUpdate(state)
-            Result(state.captureReady, state, if (state.captureReady) null else "Photographic target moved outside stable tolerance")
-        } finally {
-            if (!frame.isRecycled) frame.recycle()
+    private suspend fun observeFrame(frame: Bitmap, thermalPressure: Double): LiveDirectorState {
+        val quality = PhotoQuality.analyze(frame)
+        val caps = camera.capabilities()
+        val snapshot = camera.snapshot()
+        val perceived = withTimeoutOrNull(LIVE_PERCEPTION_BUDGET_MS) {
+            perception.analyze(
+                frame = frame,
+                quality = quality,
+                lensFacing = caps.lensFacing,
+                zoomRatio = snapshot.zoomRatio,
+                thermalPressure = thermalPressure,
+                cameraId = camera.activeCameraId()
+            )
         }
+        return runtime.observe(frame, perceived, quality)
     }
 
     private fun cadenceMs(pressure: Double): Long = when {
@@ -122,7 +139,6 @@ class LiveDirectorSessionRunner(
         private const val LIVE_FRAME_TIMEOUT_MS = 420L
         private const val LIVE_PERCEPTION_BUDGET_MS = 340L
         private const val REVERIFY_FRAME_TIMEOUT_MS = 480L
-        private const val REVERIFY_PERCEPTION_BUDGET_MS = 360L
         private const val MAX_ANALYSIS_MISSES = 6
     }
 }
