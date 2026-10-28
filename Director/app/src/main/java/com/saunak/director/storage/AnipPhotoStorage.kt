@@ -8,10 +8,8 @@ import com.saunak.director.engine.SierraEngine
 import com.saunak.director.engine.render.AnipEngine
 import com.saunak.director.engine.render.AnipRenderResult
 import com.saunak.director.engine.render.AnipRequest
-import com.saunak.director.engine.render.AnipSituation
 import com.saunak.director.engine.render.AnipSubjectContext
 import com.saunak.director.processing.LookSpec
-import com.saunak.director.processing.PhotoQuality
 import com.saunak.director.processing.PhotographicDirectionFinisher
 import java.io.File
 import kotlin.math.abs
@@ -29,6 +27,8 @@ object AnipPhotoFinish {
         direction: PhotographicDirection? = null,
         adjustment: FinalRenderAdjustment? = null
     ): Output {
+        require(!source.isRecycled && source.width > 0 && source.height > 0) { "Invalid Sierra source bitmap" }
+
         val engine = SierraEngine.getOrNull()
         val track = engine?.subjects?.latest()
         val subject = track?.let {
@@ -77,42 +77,17 @@ object AnipPhotoFinish {
             backgroundSuppressionIntentEv = direction?.backgroundSuppressionEv?.coerceIn(-0.6, 0.1) ?: 0.0,
             directionConfidence = semanticConfidence
         )
+
         val (anip, result) = AnipEngine().render(source, request, subject)
+        require(!anip.isRecycled && anip.width > 0 && anip.height > 0) { "ANIP returned invalid bitmap" }
+
         val finished = PhotographicDirectionFinisher.apply(anip, direction, adjustment, subject)
-        val released = if (passesReleaseGate(source, finished, result)) finished else source
+        require(!finished.isRecycled && finished.width > 0 && finished.height > 0) { "Sierra finisher returned invalid bitmap" }
 
-        // Recycle only intermediates not returned to the caller. Returning the untouched source is an
-        // intentional fail-safe when every artistic candidate violates hard technical invariants.
-        if (finished !== released && finished !== source && !finished.isRecycled) finished.recycle()
-        if (anip !== finished && anip !== released && anip !== source && !anip.isRecycled) anip.recycle()
-        return Output(released, result)
-    }
-
-    private fun passesReleaseGate(source: Bitmap, candidate: Bitmap, result: AnipRenderResult): Boolean {
-        if (candidate.isRecycled) return false
-        if (result.score.artifactPenalty >= 0.72 || result.score.total < 0.18) return false
-        val before = runCatching { PhotoQuality.analyze(source) }.getOrNull() ?: return true
-        val after = runCatching { PhotoQuality.analyze(candidate) }.getOrNull() ?: return false
-        if (after.catastrophic) return false
-        if (after.brightClipFraction > before.brightClipFraction + 0.025) return false
-        if (after.darkClipFraction > before.darkClipFraction + 0.035) return false
-        if (after.heuristicScore + 0.16 < before.heuristicScore) return false
-
-        val darkSituation = result.recipe.situation in setOf(
-            AnipSituation.NIGHT,
-            AnipSituation.NIGHT_NEON,
-            AnipSituation.STAGE,
-            AnipSituation.SUNSET,
-            AnipSituation.PORTRAIT_LOW_LIGHT,
-            AnipSituation.SELFIE_LOW_LIGHT
-        )
-        val allowedBlackRise = if (darkSituation) 12.0 else 20.0
-        if (before.shadowP05 < 45.0 && after.shadowP05 - before.shadowP05 > allowedBlackRise) return false
-
-        val beforeSpan = (before.highlightP95 - before.shadowP05).coerceAtLeast(12.0)
-        val afterSpan = (after.highlightP95 - after.shadowP05).coerceAtLeast(0.0)
-        if (afterSpan / beforeSpan < if (darkSituation) 0.68 else 0.62) return false
-        return true
+        // Artistic output is no longer rejected by a subjective quality gate. If ANIP produced a
+        // technically valid bitmap, that result is the Sierra result and is passed forward.
+        if (finished !== anip && !anip.isRecycled) anip.recycle()
+        return Output(finished, result)
     }
 }
 
@@ -127,12 +102,12 @@ suspend fun PhotoRepository.saveAnipFinal(
     direction: PhotographicDirection? = null,
     adjustment: FinalRenderAdjustment? = null
 ): Uri {
-    val source = decodeOriented(file, PhotoRepository.PROCESSED_MAX_DIMENSION)
+    var source: Bitmap? = decodeOriented(file, PhotoRepository.PROCESSED_MAX_DIMENSION)
     var rendered: Bitmap? = null
     var cropped: Bitmap? = null
     return try {
         val output = AnipPhotoFinish.render(
-            source = source,
+            source = checkNotNull(source),
             look = look,
             sceneLabel = sceneLabel,
             objective = objective,
@@ -141,13 +116,29 @@ suspend fun PhotoRepository.saveAnipFinal(
             adjustment = adjustment
         )
         rendered = output.bitmap
+
+        // Ownership hand-off #1: once ANIP has produced an independent output, the original full
+        // resolution decode is no longer needed and is released before crop/encode begins.
+        if (rendered !== source) {
+            source?.let { if (!it.isRecycled) it.recycle() }
+            source = null
+        }
+
         val ratio = SierraCropPolicy.ratioOrNull(aspectRatio)
-        cropped = if (ratio == null) output.bitmap else cropAnipBitmap(output.bitmap, ratio.first, ratio.second, cropCenterX, cropCenterY)
+        cropped = if (ratio == null) rendered else cropAnipBitmap(checkNotNull(rendered), ratio.first, ratio.second, cropCenterX, cropCenterY)
+
+        // Ownership hand-off #2: if cropping created a new bitmap, release the pre-crop render
+        // before JPEG encoding. At every stage only the currently required large image remains.
+        if (cropped !== rendered) {
+            rendered?.let { if (!it.isRecycled) it.recycle() }
+            rendered = null
+        }
+
         saveProcessed(checkNotNull(cropped), file)
     } finally {
-        cropped?.let { if (it !== rendered && !it.isRecycled) it.recycle() }
+        cropped?.let { if (!it.isRecycled) it.recycle() }
         rendered?.let { if (!it.isRecycled) it.recycle() }
-        if (!source.isRecycled) source.recycle()
+        source?.let { if (!it.isRecycled) it.recycle() }
     }
 }
 
@@ -158,6 +149,7 @@ internal fun cropAnipBitmap(
     centerX: Double,
     centerY: Double
 ): Bitmap {
+    require(!source.isRecycled && source.width > 0 && source.height > 0) { "Invalid crop source bitmap" }
     val target = ratioWidth.toDouble() / ratioHeight.toDouble()
     val current = source.width.toDouble() / source.height.toDouble()
     if (abs(target - current) < 0.015) return source
