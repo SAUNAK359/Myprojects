@@ -17,8 +17,8 @@ class VlmContractValidatorTest {
         assertEquals(1.0, result.referenceScore, .0001)
     }
 
-    @Test fun capsTooManyCalls() {
-        val calls = List(9) { ToolCall(30) }
+    @Test fun capsTooManyCallsIndependentlyOfLookAmbiguity() {
+        val calls = List(9) { index -> ToolCall(100 + index) }
         val result = VlmContractValidator.plan(PlanOutput("scene", "objective", "general", .5, false, calls))
         assertEquals(8, result.toolCalls.size)
     }
