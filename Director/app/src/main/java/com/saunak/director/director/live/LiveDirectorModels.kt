@@ -1,5 +1,7 @@
 package com.saunak.director.director.live
 
+import com.saunak.director.director.DirectorStrategy
+import com.saunak.director.director.InterventionPolicy
 import com.saunak.director.engine.subject.NormalizedPoint
 import com.saunak.director.engine.subject.NormalizedRect
 import kotlinx.serialization.SerialName
@@ -136,6 +138,8 @@ data class SierraDirectorSpec(
     @SerialName("schema_version") val schemaVersion: String,
     @SerialName("schema_hash") val schemaHash: String,
     @SerialName("goal_summary") val goalSummary: String,
+    val strategy: DirectorStrategy = DirectorStrategy.GENERAL,
+    @SerialName("intervention_policy") val interventionPolicy: InterventionPolicy = InterventionPolicy.DIRECTED,
     @SerialName("primary_entity") val primaryEntity: PrimaryEntityTarget,
     val goals: List<DirectorGoalNode>,
     val readiness: DirectorReadinessPolicy = DirectorReadinessPolicy()
@@ -207,6 +211,8 @@ object DirectorGoalTypes {
     const val ENTITY_VISIBILITY = "entity_visibility"
     const val SUBJECT_LUMINANCE = "subject_luminance"
     const val LIGHT_BALANCE_X = "light_balance_x"
+    const val SUBJECT_BACKGROUND_EV = "subject_background_ev"
+    const val BACKGROUND_DISTRACTION = "background_distraction"
     const val MOTION_STABILITY = "motion_stability"
     const val TECHNICAL_SHARPNESS = "technical_sharpness"
     const val BACKGROUND_SEPARATION = "background_separation"

@@ -1,18 +1,16 @@
 package com.saunak.director.ai
 
 import android.os.SystemClock
+import com.saunak.director.director.DirectorStrategy
+import com.saunak.director.director.InterventionPolicy
+import com.saunak.director.director.live.DirectorGoalTypes
 import com.saunak.director.engine.SierraEngine
 import com.saunak.director.engine.models.SierraShippingManifests
-import com.saunak.director.director.live.DirectorGoalTypes
 import java.security.MessageDigest
 import org.json.JSONArray
 import org.json.JSONObject
 
-/**
- * Single capability-aware source of truth for Gemini Director output and local validation.
- * Model presence stays checksum-gated. A short process cache avoids repeatedly hashing large ONNX
- * artifacts on planning/UI paths while still allowing newly provisioned capabilities to appear soon.
- */
+/** Single capability-aware source of truth for Gemini Director output and local validation. */
 class DirectorSchemaCompiler(private val engine: SierraEngine = SierraEngine.get()) {
     data class Contract(
         val version: String,
@@ -46,6 +44,8 @@ class DirectorSchemaCompiler(private val engine: SierraEngine = SierraEngine.get
             DirectorGoalTypes.ENTITY_VISIBILITY,
             DirectorGoalTypes.SUBJECT_LUMINANCE,
             DirectorGoalTypes.LIGHT_BALANCE_X,
+            DirectorGoalTypes.SUBJECT_BACKGROUND_EV,
+            DirectorGoalTypes.BACKGROUND_DISTRACTION,
             DirectorGoalTypes.MOTION_STABILITY,
             DirectorGoalTypes.TECHNICAL_SHARPNESS
         )
@@ -70,13 +70,18 @@ class DirectorSchemaCompiler(private val engine: SierraEngine = SierraEngine.get
             promptContract = buildString {
                 appendLine("SIERRA DIRECTOR CONTRACT $VERSION hash=$hash")
                 appendLine("allowed_goal_types=${goals.sorted().joinToString()}")
+                appendLine("strategies=${DirectorStrategy.entries.joinToString()}")
+                appendLine("intervention_policies=${InterventionPolicy.entries.joinToString()}")
                 appendLine("face_landmarks=$face; pose_landmarks=$pose; relative_depth=$depth; person_mask=$segmentation")
-                appendLine("Gemini defines targets; Sierra beta only measures, compares, coaches and gates readiness.")
+                appendLine("Gemini defines targets and strategy; Sierra beta only measures, compares, coaches and gates readiness.")
                 appendLine("Unknown evidence is never success. Do not emit a goal type absent from allowed_goal_types.")
                 appendLine("Use normalized final-composition coordinates 0..1. Never output screen pixels or metric distance unless a metric sensor capability is explicitly present.")
                 appendLine("Every target must include ideal/acceptable tolerance, confidence floor, priority and stability duration.")
-                appendLine("Primary entity current_box must locate the exact entity in THIS analysis frame; target_box is where that same entity should be in the intended photograph.")
-                appendLine("Use at most $MAX_GOALS goal nodes and at most $MAX_GRAPH_EDGES dependencies/invalidations per node; include only goals that materially affect this photograph.")
+                appendLine("Primary entity current_box must locate the exact entity in THIS frame; target_box is where the same entity should be in the intended photograph.")
+                appendLine("CANDID with OBSERVE/MINIMAL must preserve the moment: no hard/required pose goal and no blocking subject-reposition goal. Prefer photographer movement, framing, timing, exposure and motion safety.")
+                appendLine("BACKGROUND_DISTRACTION is an observable clutter/saliency target; do not imply generative object removal. Sierra coaches physical reframing/repositioning only.")
+                appendLine("SUBJECT_BACKGROUND_EV is measured image-space luminance separation, not a fabricated light meter reading.")
+                appendLine("Use at most $MAX_GOALS goal nodes and at most $MAX_GRAPH_EDGES dependencies/invalidations per node; include only materially useful goals.")
             }.trim()
         )
     }
@@ -86,7 +91,7 @@ class DirectorSchemaCompiler(private val engine: SierraEngine = SierraEngine.get
         fun integer(min: Int? = null) = JSONObject().put("type", "integer").apply { min?.let { put("minimum", it) } }
         fun string() = JSONObject().put("type", "string")
         fun bool() = JSONObject().put("type", "boolean")
-        fun enum(values: List<String>) = JSONObject().put("type", "string").put("enum", JSONArray(values))
+        fun enumeration(values: List<String>) = JSONObject().put("type", "string").put("enum", JSONArray(values))
         fun nullableNumber() = JSONObject().put("type", JSONArray(listOf("number", "null")))
         fun nullableString() = JSONObject().put("type", JSONArray(listOf("string", "null")))
         fun array(item: JSONObject, max: Int? = null) = JSONObject().put("type", "array").put("items", item).apply { max?.let { put("maxItems", it) } }
@@ -99,7 +104,7 @@ class DirectorSchemaCompiler(private val engine: SierraEngine = SierraEngine.get
             listOf("entity_id","semantic_label","entity_kind","current_box","target_box","movable_actor","min_iou","center_tolerance","scale_tolerance","visibility_min"),
             mapOf(
                 "entity_id" to string(), "semantic_label" to string(), "entity_kind" to string(), "current_box" to rect, "target_box" to rect,
-                "movable_actor" to enum(listOf("PHOTOGRAPHER","SUBJECT","OBJECT","ANY","NONE")), "min_iou" to number(0.0,1.0),
+                "movable_actor" to enumeration(listOf("PHOTOGRAPHER","SUBJECT","OBJECT","ANY","NONE")), "min_iou" to number(0.0,1.0),
                 "center_tolerance" to number(0.005,0.30), "scale_tolerance" to number(0.01,0.50), "visibility_min" to number(0.0,1.0)
             )
         )
@@ -109,10 +114,10 @@ class DirectorSchemaCompiler(private val engine: SierraEngine = SierraEngine.get
         val goal = obj(
             listOf("id","type","priority","required","weight","entity_id","target_min","target_max","ideal_tolerance","acceptable_tolerance","min_confidence","target_keypoints","actor","instruction_low","instruction_high","instruction_hold","depends_on","invalidates","stability_ms"),
             mapOf(
-                "id" to string(), "type" to enum(allowed.sorted()), "priority" to enum(listOf("HARD","IMPORTANT","PREFERENCE")),
+                "id" to string(), "type" to enumeration(allowed.sorted()), "priority" to enumeration(listOf("HARD","IMPORTANT","PREFERENCE")),
                 "required" to bool(), "weight" to number(0.0,10.0), "entity_id" to nullableString(), "target_min" to nullableNumber(), "target_max" to nullableNumber(),
                 "ideal_tolerance" to number(0.0,1.0), "acceptable_tolerance" to number(0.0,2.0), "min_confidence" to number(0.0,1.0),
-                "target_keypoints" to array(keypoint, MAX_POSE_KEYPOINTS), "actor" to enum(listOf("PHOTOGRAPHER","SUBJECT","OBJECT","ANY","NONE")),
+                "target_keypoints" to array(keypoint, MAX_POSE_KEYPOINTS), "actor" to enumeration(listOf("PHOTOGRAPHER","SUBJECT","OBJECT","ANY","NONE")),
                 "instruction_low" to string(), "instruction_high" to string(), "instruction_hold" to string(), "depends_on" to array(string(), MAX_GRAPH_EDGES),
                 "invalidates" to array(string(), MAX_GRAPH_EDGES), "stability_ms" to integer(100)
             )
@@ -125,16 +130,25 @@ class DirectorSchemaCompiler(private val engine: SierraEngine = SierraEngine.get
             )
         )
         return obj(
-            listOf("schema_version","schema_hash","goal_summary","primary_entity","goals","readiness"),
-            mapOf("schema_version" to enum(listOf(version)), "schema_hash" to enum(listOf(hash)), "goal_summary" to string(), "primary_entity" to entity, "goals" to array(goal, MAX_GOALS), "readiness" to readiness)
+            listOf("schema_version","schema_hash","goal_summary","strategy","intervention_policy","primary_entity","goals","readiness"),
+            mapOf(
+                "schema_version" to enumeration(listOf(version)),
+                "schema_hash" to enumeration(listOf(hash)),
+                "goal_summary" to string(),
+                "strategy" to enumeration(DirectorStrategy.entries.map { it.name }),
+                "intervention_policy" to enumeration(InterventionPolicy.entries.map { it.name }),
+                "primary_entity" to entity,
+                "goals" to array(goal, MAX_GOALS),
+                "readiness" to readiness
+            )
         )
     }
 
     private data class CachedContract(val createdAtMs: Long, val contract: Contract)
 
     companion object {
-        const val VERSION = "director.v1"
-        const val MAX_GOALS = 12
+        const val VERSION = "director.v2"
+        const val MAX_GOALS = 14
         const val MAX_GRAPH_EDGES = 8
         const val MAX_POSE_KEYPOINTS = 17
         private const val CACHE_TTL_MS = 15_000L

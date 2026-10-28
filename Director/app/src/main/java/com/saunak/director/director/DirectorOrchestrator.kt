@@ -159,6 +159,7 @@ class DirectorOrchestrator(
                 perception.analyze(frame, referenceQuality, planningCaps.lensFacing, snapshot.zoomRatio, thermalPolicy.thermalPressure)
             }
             val sceneSignals = perceptionSnapshot?.signals ?: SierraSceneAnalyzer.analyze(frame, referenceQuality, planningCaps.lensFacing)
+            val situation = SierraSituationSignature.from(sceneSignals, referenceQuality, frame.width, frame.height)
             val localPlan by lazy { SierraLocalPlanner.plan(referenceQuality, frame.width, frame.height, sceneSignals, planningCaps) }
 
             var mode = SierraMode.BETA
@@ -172,6 +173,7 @@ class DirectorOrchestrator(
                     vlm.setMaxImageDimension(if (vlm.waitForSemanticPlan()) 512 else thermalPolicy.maxAiDimension)
                     val planningContext = buildString {
                         appendLine(skills.planningContext())
+                        appendLine(situation.compactDescription())
                         appendLine(recipeMemory.recentCreativeContext())
                     }
                     val result = if (vlm.waitForSemanticPlan()) {
@@ -187,7 +189,7 @@ class DirectorOrchestrator(
                         aiFallbackReason = result.exceptionOrNull()?.message?.take(120) ?: "Sierra semantic plan unavailable"
                         emit(session, lastUiState.copy(
                             stage = DirectorStage.PLANNING, aiAvailable = false, sierraMode = SierraMode.BETA,
-                            status = "Sierra continuing locally • no interruption", aiLatencyMs = vlm.diagnostics().latencyMs,
+                            status = "Sierra continuing locally • Gemini direction unavailable", aiLatencyMs = vlm.diagnostics().latencyMs,
                             aiFallbackReason = aiFallbackReason
                         ))
                         localPlan
@@ -199,11 +201,14 @@ class DirectorOrchestrator(
 
             val cognitionPlan = if (mode == SierraMode.AI) planned else mergeCognitionDirection(planned, cognition)
             val userConstrainedPlan = aspectRatioOverride?.let { cognitionPlan.copy(aspectRatio = it) } ?: cognitionPlan
-            val plan = InstantFinishEngine.enrich(userConstrainedPlan, referenceQuality)
+            val enriched = InstantFinishEngine.enrich(userConstrainedPlan, referenceQuality)
+            val plan = if (mode == SierraMode.BETA) enriched.copy(
+                renderSpec = SierraBetaRenderPlanner.plan(referenceQuality, sceneSignals, situation)
+            ) else enriched
             val aiDiag = vlm.diagnostics()
             emit(session, lastUiState.copy(
                 stage = DirectorStage.APPLYING, aiAvailable = mode == SierraMode.AI,
-                status = if (mode == SierraMode.AI) "Sierra direction locked • applying" else "Sierra preparing the shot",
+                status = if (mode == SierraMode.AI) "Sierra direction locked • applying" else "Sierra β measured render + camera plan locked",
                 camera = camera.uiState(), sierraMode = mode, aspectRatio = plan.aspectRatio, sceneLabel = plan.scene,
                 objective = plan.objective, aiProvider = if (mode == SierraMode.AI) "Sierra Intelligence" else null,
                 aiLatencyMs = if (mode == SierraMode.AI) aiDiag.latencyMs else null,
@@ -274,37 +279,23 @@ class DirectorOrchestrator(
 
                 directorSessionActive = true
                 val guidance = try {
-                    liveDirector.guideUntilReady(
-                        planningFrame = frame,
-                        spec = validated.getOrThrow(),
-                        thermalPressure = thermalPolicy.thermalPressure,
-                        isCurrent = { isCurrent(session) }
-                    ) { live ->
+                    liveDirector.guideUntilReady(frame, validated.getOrThrow(), thermalPolicy.thermalPressure, { isCurrent(session) }) { live ->
                         emit(session, lastUiState.copy(stage = DirectorStage.CHECKING, status = live.status, liveDirector = live, executionReceipts = receipts))
                     }
-                } finally {
-                    directorSessionActive = false
-                }
+                } finally { directorSessionActive = false }
                 assertCurrent(session)
 
                 if (!guidance.ready && !guidance.sceneConstraintSuspected) {
                     val reason = guidance.reason ?: "Live Director unavailable"
                     liveDirector.stop()
-                    emit(session, lastUiState.copy(
-                        stage = DirectorStage.READY,
-                        status = "Sierra could not validate the live target • re-prepare the shot",
-                        aiFallbackReason = reason.take(120),
-                        liveDirector = liveDirector.latest()
-                    ))
+                    emit(session, lastUiState.copy(stage = DirectorStage.READY, status = "Sierra could not validate the live target • re-prepare the shot", aiFallbackReason = reason.take(120), liveDirector = liveDirector.latest()))
                     return null
                 }
 
                 emit(session, lastUiState.copy(
                     stage = DirectorStage.CHECKING,
                     status = if (guidance.sceneConstraintSuspected) "Sierra validating closest achievable composition…" else "Sierra performing final semantic validation…",
-                    liveDirector = guidance.state,
-                    executionReceipts = receipts,
-                    finalReviewStatus = cameraReport.compactDescription()
+                    liveDirector = guidance.state, executionReceipts = receipts, finalReviewStatus = cameraReport.compactDescription()
                 ))
                 directorSessionActive = true
                 val authority = try {
@@ -314,27 +305,15 @@ class DirectorOrchestrator(
                         thermalPressure = thermalPolicy.thermalPressure,
                         isCurrent = { isCurrent(session) },
                         sceneConstraintSuspected = guidance.sceneConstraintSuspected
-                    ) { live ->
-                        emit(session, lastUiState.copy(stage = DirectorStage.CHECKING, status = live.status, liveDirector = live))
-                    }
-                } finally {
-                    directorSessionActive = false
-                }
+                    ) { live -> emit(session, lastUiState.copy(stage = DirectorStage.CHECKING, status = live.status, liveDirector = live)) }
+                } finally { directorSessionActive = false }
                 assertCurrent(session)
                 if (!authority.ready) {
                     approved = null
-                    emit(session, lastUiState.copy(
-                        stage = DirectorStage.READY,
-                        status = authority.status,
-                        aiFallbackReason = authority.reason?.take(120),
-                        executionReceipts = authority.receipts,
-                        liveDirector = authority.liveState
-                    ))
+                    emit(session, lastUiState.copy(stage = DirectorStage.READY, status = authority.status, aiFallbackReason = authority.reason?.take(120), executionReceipts = authority.receipts, liveDirector = authority.liveState))
                     return null
                 }
                 receipts = authority.receipts.toMutableList()
-                // A corrected camera state invalidates any RAW/burst program compiled before that correction.
-                // Use a fresh normal capture rather than executing stale absolute exposure/ISO instructions.
                 val safeCaptureProgram = if (authority.corrected) null else captureProgram
                 approve(session, authority.plan, score, mode, safeCaptureProgram, if (authority.corrected) "one_final_correction_applied" else aiFallbackReason, receipts)
                 emit(session, lastUiState.copy(status = authority.status, liveDirector = authority.liveState, finalReviewStatus = "pre_shutter_validated"))
@@ -343,21 +322,12 @@ class DirectorOrchestrator(
             }
             return null
         } catch (_: StaleSession) {
-            directorSessionActive = false
-            liveDirector.stop()
-            runCatching { tools.restoreUserState() }; return null
+            directorSessionActive = false; liveDirector.stop(); runCatching { tools.restoreUserState() }; return null
         } catch (t: CancellationException) {
-            directorSessionActive = false
-            liveDirector.stop()
-            runCatching { tools.restoreUserState() }; throw t
+            directorSessionActive = false; liveDirector.stop(); runCatching { tools.restoreUserState() }; throw t
         } catch (t: Throwable) {
-            directorSessionActive = false
-            liveDirector.stop()
-            runCatching { tools.restoreUserState() }
-            emit(session, lastUiState.copy(
-                stage = DirectorStage.ERROR, aiAvailable = false, status = "Sierra could not prepare this shot", error = t.message,
-                sierraMode = SierraMode.BETA, aiFallbackReason = t.message?.take(120)
-            ))
+            directorSessionActive = false; liveDirector.stop(); runCatching { tools.restoreUserState() }
+            emit(session, lastUiState.copy(stage = DirectorStage.ERROR, aiAvailable = false, status = "Sierra could not prepare this shot", error = t.message, sierraMode = SierraMode.BETA, aiFallbackReason = t.message?.take(120)))
             return null
         } finally {
             planningBitmap?.let { if (!it.isRecycled) it.recycle() }
@@ -373,20 +343,27 @@ class DirectorOrchestrator(
 
     private fun mergeCognitionDirection(plan: PlanOutput, cognition: CognitionDecision?): PlanOutput {
         if (plan.planner.startsWith("sierra_ai")) return plan
-        val current = plan.photographicDirection
-        if (current.selectedThemeId.isNotBlank() && current.themeConfidence >= 0.20) return plan
         val local = cognition ?: return plan
-        val r = local.intent.render; val t = r.theme
+        val r = local.intent.render
         return plan.copy(photographicDirection = PhotographicDirection(
-            story = plan.objective, mood = "scene-aware natural",
+            story = plan.objective,
+            mood = "measured local",
             primarySubject = if (local.world.primaryHumanSubject) "human subject" else local.world.sceneBranch,
             narrativeRole = if (local.world.primaryHumanSubject) "hero" else "environment",
-            selectedThemeId = t.themeId, themeStrength = t.strength.toDouble(), themeConfidence = t.confidence,
-            atmospherePriority = r.atmospherePreservation, skinNaturalness = r.skinNaturalness,
-            highlightProtection = r.highlightProtection, shadowDepth = (1.0 - r.shadowRecovery * 0.55).coerceIn(0.0, 1.0),
-            midtoneContrast = 0.58, localContrast = 0.56, colorIntensity = 0.52,
-            subjectRelightEv = r.subjectRelightEv, backgroundSuppressionEv = r.backgroundSuppressionEv,
-            abstain = t.abstained, reasonCodes = t.reasonCodes
+            selectedThemeId = "",
+            themeStrength = 0.0,
+            themeConfidence = 0.0,
+            atmospherePriority = r.atmospherePreservation,
+            skinNaturalness = r.skinNaturalness,
+            highlightProtection = r.highlightProtection,
+            shadowDepth = (1.0 - r.shadowRecovery * 0.55).coerceIn(0.0, 1.0),
+            midtoneContrast = 0.58,
+            localContrast = 0.56,
+            colorIntensity = 0.52,
+            subjectRelightEv = r.subjectRelightEv,
+            backgroundSuppressionEv = r.backgroundSuppressionEv,
+            abstain = true,
+            reasonCodes = listOf("beta_measurement_driven")
         ))
     }
 
@@ -410,81 +387,53 @@ class DirectorOrchestrator(
     private fun combinedReadyScore(ai: Double, camera: Double, finish: Double): Double =
         (0.48 * ai.coerceIn(0.0, 1.0) + 0.34 * camera.coerceIn(0.0, 1.0) + 0.18 * finish.coerceIn(0.0, 1.0)).coerceIn(0.0, 1.0)
 
-    private fun approve(
-        session: Long,
-        plan: PlanOutput,
-        score: Double,
-        mode: SierraMode,
-        captureProgram: CaptureProgram?,
-        fallback: String?,
-        receipts: List<ToolExecutionReceipt>
-    ) {
+    private fun approve(session: Long, plan: PlanOutput, score: Double, mode: SierraMode, captureProgram: CaptureProgram?, fallback: String?, receipts: List<ToolExecutionReceipt>) {
         approved = ApprovedState(plan, score, mode, captureProgram, receipts)
         val captureSuffix = captureProgram?.takeIf { it.frames.size > 1 }?.let { " • ${it.frames.size}f smart burst" }.orEmpty()
-        val theme = plan.photographicDirection.selectedThemeId.takeIf(String::isNotBlank)
         val diag = vlm.diagnostics()
+        val strategy = plan.directorSpec?.strategy?.name?.lowercase()?.replace('_', ' ')
         emit(session, lastUiState.copy(
             stage = DirectorStage.PREPARED, aiAvailable = mode == SierraMode.AI,
-            status = if (mode == SierraMode.AI) "Ready • Sierra ${theme ?: "directed"}$captureSuffix" else "Ready • Sierra β$captureSuffix",
+            status = if (mode == SierraMode.AI) "Ready • Sierra ${strategy ?: "directed"}$captureSuffix" else "Ready • Sierra β measured$captureSuffix",
             lastScore = score, camera = camera.uiState(), recipeCount = recipeMemory.count(), sierraMode = mode,
             aspectRatio = plan.aspectRatio, sceneLabel = plan.scene, objective = plan.objective,
             aiProvider = if (mode == SierraMode.AI) "Sierra Intelligence" else null,
-            aiLatencyMs = if (mode == SierraMode.AI) diag.latencyMs else null, aiTheme = theme,
+            aiLatencyMs = if (mode == SierraMode.AI) diag.latencyMs else null,
+            aiTheme = plan.photographicDirection.selectedThemeId.takeIf(String::isNotBlank),
             aiThemeStrength = plan.photographicDirection.themeStrength, aiFallbackReason = fallback,
             executionReceipts = receipts, aiStreamPhase = null
         ))
     }
 
-    private suspend fun resolveRenderSpec(
-        source: Bitmap,
-        state: ApprovedState,
-        telemetry: CapturedStillTelemetry,
-        captureKind: String,
-        reconstructionIntegrity: Double? = null
-    ): RenderDecision {
+    private suspend fun resolveRenderSpec(source: Bitmap, state: ApprovedState, telemetry: CapturedStillTelemetry, captureKind: String, reconstructionIntegrity: Double? = null): RenderDecision {
         if (state.mode == SierraMode.BETA) {
-            return RenderDecision(SierraRenderSpecFactory.fromDirection(state.plan.photographicDirection), "Sierra β deterministic render")
+            return RenderDecision(state.plan.renderSpec ?: SierraRenderSpecFactory.fromDirection(state.plan.photographicDirection), "Sierra β measured deterministic render")
         }
         val spec = state.plan.renderSpec
-        return if (spec != null) {
-            RenderDecision(spec, "Sierra pre-authorized Render Spec • no post-capture AI call")
-        } else {
-            RenderDecision(null, "Sierra Render Spec missing • captured evidence preserved")
-        }
+        return if (spec != null) RenderDecision(spec, "Sierra pre-authorized Render Spec • no post-capture AI call")
+        else RenderDecision(null, "Sierra Render Spec missing • captured evidence preserved")
     }
 
     private suspend fun resolveRenderSpecFile(file: File, state: ApprovedState, telemetry: CapturedStillTelemetry, captureKind: String): RenderDecision {
         val bitmap = storage.decodeOriented(file, FINAL_RENDER_UPLOAD_EDGE)
-        return try { resolveRenderSpec(bitmap, state, telemetry, captureKind) }
-        finally { if (!bitmap.isRecycled) bitmap.recycle() }
+        return try { resolveRenderSpec(bitmap, state, telemetry, captureKind) } finally { if (!bitmap.isRecycled) bitmap.recycle() }
     }
 
     private suspend fun captureFinal(): Uri? {
         val state = approved ?: return null
         val session = generation.get()
-
         if (state.plan.directorSpec != null && liveDirector.latest().running) {
             directorSessionActive = true
-            val fresh = try {
-                liveDirector.reverify(thermalPressure = thermal.policy().thermalPressure, isCurrent = { isCurrent(session) }) { live ->
-                    emit(session, lastUiState.copy(stage = DirectorStage.CHECKING, status = live.status, liveDirector = live))
-                }
-            } finally { directorSessionActive = false }
+            val fresh = try { liveDirector.reverify(thermal.policy().thermalPressure, { isCurrent(session) }) { live -> emit(session, lastUiState.copy(stage = DirectorStage.CHECKING, status = live.status, liveDirector = live)) } }
+            finally { directorSessionActive = false }
             if (!fresh.ready) {
                 assertCurrent(session)
                 directorSessionActive = true
-                val resumed = try {
-                    liveDirector.resumeUntilReady(thermalPressure = thermal.policy().thermalPressure, isCurrent = { isCurrent(session) }) { live ->
-                        emit(session, lastUiState.copy(stage = DirectorStage.CHECKING, status = live.status, liveDirector = live))
-                    }
-                } finally { directorSessionActive = false }
+                val resumed = try { liveDirector.resumeUntilReady(thermal.policy().thermalPressure, { isCurrent(session) }) { live -> emit(session, lastUiState.copy(stage = DirectorStage.CHECKING, status = live.status, liveDirector = live)) } }
+                finally { directorSessionActive = false }
                 assertCurrent(session)
-                if (resumed.ready) {
-                    emit(session, lastUiState.copy(stage = DirectorStage.PREPARED, status = "Ready • hold there • press shutter", liveDirector = resumed.state))
-                } else {
-                    approved = null
-                    emit(session, lastUiState.copy(stage = DirectorStage.READY, status = "Live Director unavailable • re-prepare the shot", aiFallbackReason = resumed.reason?.take(120), liveDirector = liveDirector.stop()))
-                }
+                if (resumed.ready) emit(session, lastUiState.copy(stage = DirectorStage.PREPARED, status = "Ready • hold there • press shutter", liveDirector = resumed.state))
+                else { approved = null; emit(session, lastUiState.copy(stage = DirectorStage.READY, status = "Live Director unavailable • re-prepare the shot", aiFallbackReason = resumed.reason?.take(120), liveDirector = liveDirector.stop())) }
                 return null
             }
         }
@@ -498,12 +447,7 @@ class DirectorOrchestrator(
             val activeExtension = camera.snapshot().extension
             val executableProgram = state.captureProgram.takeIf { activeExtension == DirectorExtension.NONE }
             val plannedFrames = executableProgram?.frames?.size ?: 1
-            emit(session, lastUiState.copy(
-                stage = DirectorStage.FINAL_CAPTURING,
-                status = if (plannedFrames > 1) "Capturing Sierra smart burst…" else "Capturing full quality…",
-                lastScore = state.score, camera = camera.uiState(), sierraMode = state.mode,
-                executionReceipts = state.receipts, liveDirector = clearedDirector
-            ))
+            emit(session, lastUiState.copy(stage = DirectorStage.FINAL_CAPTURING, status = if (plannedFrames > 1) "Capturing Sierra smart burst…" else "Capturing full quality…", lastScore = state.score, camera = camera.uiState(), sierraMode = state.mode, executionReceipts = state.receipts, liveDirector = clearedDirector))
             camera.awaitSettledState(550)
 
             if (executableProgram?.path == CapturePath.RAW_CUSTOM && camera.rawJpegCaptureSupported()) {
@@ -522,15 +466,13 @@ class DirectorOrchestrator(
                         val captureScore = (0.55 * state.score + 0.45 * reconstruction.integrity.score).coerceIn(0.0, 1.0)
                         emit(session, lastUiState.copy(stage = DirectorStage.SAVING, status = "P-RIF verified • applying Sierra render…", lastScore = captureScore))
                         val render = resolveRenderSpec(reconstruction.bitmap, state, telemetry, "prif_reconstruction", reconstruction.integrity.score)
-                        val uri = if (render.spec != null) storage.savePrifSierraRenderFinal(reconstruction.bitmap, safetyFile, render.spec, state.plan.aspectRatio, state.plan.cropCenterX, state.plan.cropCenterY)
-                            else storage.saveProcessed(reconstruction.bitmap, safetyFile)
+                        val uri = if (render.spec != null) storage.savePrifSierraRenderFinal(reconstruction.bitmap, safetyFile, render.spec, state.plan.aspectRatio, state.plan.cropCenterX, state.plan.cropCenterY) else storage.saveProcessed(reconstruction.bitmap, safetyFile)
                         recipeMemory.remember(state.plan, captureScore)
                         approved = null; tools.restoreUserState(); storage.markFinalized(safetyFile); prifSafety = null
                         if (!reconstruction.bitmap.isRecycled) reconstruction.bitmap.recycle(); prifBitmap = null
                         emit(session, lastUiState.copy(stage = DirectorStage.READY, status = "Sierra photo saved • ${render.status}", lastScore = captureScore, camera = camera.uiState(), lastSavedUri = uri.toString(), recipeCount = recipeMemory.count(), finalReviewStatus = render.status, aiStreamPhase = null))
                         return uri
                     }
-
                     val captureScore = (0.78 * state.score + 0.22 * 0.55).coerceIn(0.0, 1.0)
                     val render = resolveRenderSpecFile(safetyFile, state, telemetry, "prif_safety_jpeg")
                     val uri = if (render.spec != null) storage.saveSierraRenderFinal(safetyFile, render.spec, state.plan.aspectRatio, state.plan.cropCenterX, state.plan.cropCenterY) else storage.saveRawJpeg(safetyFile)
@@ -561,9 +503,7 @@ class DirectorOrchestrator(
             emit(session, lastUiState.copy(stage = DirectorStage.READY, status = savedStatus, lastScore = captureScore, camera = camera.uiState(), lastSavedUri = uri.toString(), recipeCount = recipeMemory.count(), finalReviewStatus = render.status, aiLatencyMs = vlm.diagnostics().latencyMs, aiStreamPhase = null))
             uri
         } catch (t: Throwable) {
-            approved = null
-            directorSessionActive = false
-            liveDirector.stop()
+            approved = null; directorSessionActive = false; liveDirector.stop()
             val fallbackUri = prifSafety?.takeIf { it.isFile && it.length() > 0L }?.let { runCatching { storage.saveRawJpeg(it) }.getOrNull() }
                 ?: burst?.selected?.file?.takeIf { it.isFile && it.length() > 0L }?.let { runCatching { storage.saveRawJpeg(it) }.getOrNull() }
             runCatching { tools.restoreUserState() }
@@ -571,8 +511,7 @@ class DirectorOrchestrator(
                 emit(session, lastUiState.copy(stage = DirectorStage.READY, status = "Sierra finishing failed • untouched capture saved", error = t.message, camera = camera.uiState(), lastSavedUri = fallbackUri.toString(), finalReviewStatus = "failed:${t.message?.take(80)}", aiStreamPhase = null))
                 fallbackUri
             } else {
-                emit(session, lastUiState.copy(stage = DirectorStage.ERROR, status = "Final capture failed", error = t.message, camera = camera.uiState(), finalReviewStatus = "failed", aiStreamPhase = null))
-                null
+                emit(session, lastUiState.copy(stage = DirectorStage.ERROR, status = "Final capture failed", error = t.message, camera = camera.uiState(), finalReviewStatus = "failed", aiStreamPhase = null)); null
             }
         } finally {
             prifBitmap?.let { if (!it.isRecycled) it.recycle() }
@@ -581,12 +520,7 @@ class DirectorOrchestrator(
         }
     }
 
-    private fun emit(session: Long, state: DirectorUiState) {
-        if (isCurrent(session)) {
-            lastUiState = state
-            onState(state)
-        }
-    }
+    private fun emit(session: Long, state: DirectorUiState) { if (isCurrent(session)) { lastUiState = state; onState(state) } }
     private fun isCurrent(session: Long): Boolean = generation.get() == session
     private fun assertCurrent(session: Long) { if (!isCurrent(session)) throw StaleSession() }
     private class StaleSession : RuntimeException()

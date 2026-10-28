@@ -1,106 +1,149 @@
-# Sierra Vision / Director — v3 Beta
+# Sierra Vision / Director — v11 Production Candidate
 
-Sierra Vision is an Android computational-camera project. The current `director-sierra-v3` branch combines a CameraX camera, local technical analysis and on-device experts, an optional Sierra Server planning path, capability-gated camera tools, adaptive capture planning, smart burst selection, deterministic finishing, encrypted account state, and a growing Sierra engine for deeper computational photography.
+Sierra Vision is an Android computational camera built around a strict authority split:
 
-This document describes the code that is actually live in the v3 Beta branch. Research architecture that is not yet connected to the shutter path is called out explicitly rather than presented as a finished feature.
+- **Gemini / Sierra** chooses the photograph when AI mode is available.
+- **Sierra β** measures the scene, enforces device/API feasibility, executes camera controls, coaches the photographer and verifies readiness.
+- **CameraX / Camera2 + hardware** define the physical boundary.
+- **P-RIF** is the computational reconstruction path when selected and supported.
+- **SierraRenderExecutor** is the active deterministic final renderer. ANIP-era creative finishing is legacy/historical, not the active v11 authority path.
 
-## Current end-to-end workflow
+The current production architecture is documented in [`docs/sierra-v11/ARCHITECTURE.md`](docs/sierra-v11/ARCHITECTURE.md).
+Physical-device qualification is deliberately separate from hosted build validation and is defined in [`docs/sierra-v11/DEVICE_QUALIFICATION.md`](docs/sierra-v11/DEVICE_QUALIFICATION.md).
 
-The current Beta is a two-stage Director workflow:
+## Active v11 shot pipeline
 
-`live CameraX preview → first shutter/prepare → analysis frame → local technical quality + YuNet face expert → local Sierra planner and optional Sierra Server plan → contract/tool validation → temporary camera controls → verification → PREPARED → second shutter → OEM single capture or Sierra smart JPEG burst → technical frame selection → deterministic crop/look finishing → MediaStore save`
+```text
+Device Foundation + current camera state + situation signature + recent creative memory
+        ↓
+Gemini Call #1
+  photographic intent
+  camera intent
+  capability-aware DirectorSpec
+  complete RenderSpec
+        ↓
+Sierra β camera feasibility/execution
+        ↓
+requested → resolved → applied → actual camera verification
+        ↓
+Live Director
+  track → measure → compare → coach → stable readiness
+        ↓
+Gemini Call #2 — PRE-SHUTTER and FINAL Gemini call
+  PASS or exactly one bounded correction
+        ↓
+local execution + fresh local verification
+        ↓
+FINAL SHUTTER
+        ↓
+JPEG / smart capture / P-RIF as selected by capture compiler
+        ↓
+cached Call #1 RenderSpec
+        ↓
+SierraRenderExecutor
+        ↓
+technical safety / MediaStore
+        ↓
+Saved-to-Gallery completion + optional before/Sierra comparison
+```
 
-The camera remains usable when cloud AI or on-device experts fail. Sierra Server is optional; Private Photography and guest mode keep planning local.
+There is no third Gemini correction loop and no post-capture Gemini creative call.
 
-### Capture safety
+## Capability-aware Live Director
 
-- Camera mutations are capability-gated and range-clamped before CameraX/Camera2 APIs are touched.
-- User camera state is restored after completion, cancellation, stale work, or recoverable failure.
-- An active OEM HDR/Night/Bokeh/Face Retouch extension is never multiplied into a Sierra multi-frame burst; the extension gets one final still.
-- The current universal multi-frame path is a **smart JPEG burst selector**, not RAW/HDR fusion. It captures independent full-quality CameraX JPEGs, rejects catastrophic frames, and chooses the strongest technical frame.
-- If finishing fails after a valid still was captured, Sierra attempts to save the untouched JPEG instead of discarding the photograph.
-- Burst size is bounded by thermal policy and working-storage checks.
+The backend-owned `director.v2` contract is generated from verified local capabilities. Gemini can only request goal types Sierra can measure locally.
 
-## On-device models actually implemented
+Current goal families include:
 
-### YuNet face detection — live
+- primary-entity placement / scale / visibility
+- subject luminance
+- left/right light balance
+- subject-to-background image-space EV separation
+- background distraction reduction through physical reframing/repositioning
+- motion stability
+- technical sharpness
+- relative-depth separation when depth is installed
+- pose alignment when pose is installed
+- face placement when face detection is installed
 
-A checksum-pinned YuNet 2026 ONNX checkpoint is downloaded into app-private storage, verified before installation, and used during shot preparation when available. NNAPI is attempted with XNNPACK as the portable correctness fallback. The model-specific MIT license is bundled in the APK assets.
+Director strategies include portrait, candid, group, fashion, food, product, architecture, landscape, night and general. The intervention policy controls how intrusive coaching may be. In candid/minimal/observe modes, pose and subject repositioning cannot become blocking requirements.
 
-### Depth Anything V2 Small — provisioned, not yet in the live shutter decision
+## AI and β rendering converge
 
-A checksum-pinned Apache-2.0 ONNX checkpoint can be provisioned by constrained WorkManager jobs. The expert returns normalized **relative inverse depth**, never fabricated metric metres. The model is implemented and testable, but v3 Beta does not yet use its output to drive portrait rendering, capture policy, or final-image arbitration.
+AI mode:
 
-## Sierra engine implemented as infrastructure
+```text
+Gemini RenderSpec → SierraRenderExecutor
+```
 
-The repository contains production-oriented primitives for:
+β mode:
 
-- immutable frame metadata contracts;
-- Camera2 device/calibration twins;
-- explicit coordinate-space transforms;
-- time-decaying probabilistic scene beliefs;
-- model manifests, SHA-256 verification and release licence gates;
-- ONNX Runtime session management with NNAPI/XNNPACK fallbacks;
-- value-of-information expert scheduling;
-- measured-backend/pressure-aware scheduling models;
-- capture-program compilation;
-- evidence ledgers and deterministic-vs-neural reconstruction arbitration;
-- multi-axis quality-council decisions;
-- thermal and memory-pressure handling.
+```text
+measured TechnicalQuality + SceneSignals + SituationSignature
+→ SierraBetaRenderPlanner
+→ SierraRenderSpec
+→ SierraRenderExecutor
+```
 
-These primitives are not all connected to the current shutter path yet. In particular, the SceneBeliefGraph, CoordinateGraph, ExpertScheduler/ComputeHypervisor, EvidenceLedger, ReconstructionArbiter and QualityCouncil are currently engine infrastructure rather than mandatory final-capture gates.
+Installed theme names are optional descriptive priors only. The rich RenderSpec is the artistic execution contract.
 
-## Computational-photography work still required for the full Sierra architecture
+## Production memory controls
 
-The following are **not** complete in the live Beta path and must not be represented as shipping features yet:
+- Crop is determined before expensive rendering in the active file path.
+- The final renderer uses a bounded tile pixel buffer instead of a full-frame auxiliary `IntArray`.
+- P-RIF reconstruction evidence is protected from accidental in-place mutation when required.
+- Before/after comparison uses a bounded ~1280 px cache JPEG rather than a second full-resolution image.
+- Per-shot Gemini image requests stream JPEG → Base64 directly into OkHttp, avoiding simultaneous JPEG byte-array + Base64-string + full-request-string heap copies.
+- Gemini SSE uses cancellable asynchronous OkHttp calls.
 
-- certified RAW+JPEG/manual burst execution;
-- YUV reprocessing path;
-- CFA-aware RAW alignment/reconstruction;
-- gyro/rolling-shutter/optical-flow fusion;
-- HDR radiance fusion and deghosting;
-- temporal denoise and true burst super-resolution;
-- face parsing, portrait matting and whole-body pose experts;
-- scene-semantic foundation model;
-- semantic/calibrated neural ISP and device-specific colour calibration;
-- multi-camera pixel fusion;
-- TOPIQ/Q-ReAlign-class final IQA;
-- live EvidenceLedger/ReconstructionArbiter/QualityCouncil integration;
-- measured backend profiling/interference tables for true CPU/GPU/NPU load balancing.
+## Observability
 
-The model catalog contains research candidates for these roles, but a catalog entry is not treated as an implemented model. Only checksum-pinned manifests with acceptable licence terms can become installable production assets.
+Sierra v11 exposes actual runtime events rather than collapsing the shot into a single opaque status string.
 
-## Security and privacy
+The UI can show:
 
-- Android permissions: Camera and Internet only.
+- Gemini planning
+- plan validation
+- requested / resolved / applied / actual camera controls
+- clamped/rejected camera actions
+- Live Director coaching/readiness
+- pre-shutter semantic validation
+- one final correction
+- capture
+- P-RIF reconstruction
+- Sierra render
+- technical safety
+- MediaStore save
+- explicit Saved to Gallery completion
+
+Each saved shot also writes a bounded app-private audit JSON containing observable execution evidence; hidden model reasoning is never stored.
+
+## Build / validation
+
+The GitHub Android workflow performs:
+
+1. Java 17 / Android SDK 36 setup
+2. Kotlin compile
+3. unit tests
+4. lint
+5. debug APK assembly
+6. APK signature verification
+7. zipalign verification
+8. ZIP integrity / `classes.dex` check
+9. artifact checksum/upload
+
+A green hosted build proves source/package integrity. It does **not** prove OEM-camera behavior on a physical phone. Flash, extensions, RAW/P-RIF, thermal behavior, real memory peaks and Camera2 telemetry must still pass the device qualification contract for each hardware/OS combination.
+
+## Privacy / security
+
+- Camera and Internet are the primary runtime permissions.
 - Cleartext network traffic is disabled.
-- Sierra Server URL must be blank or HTTPS at build time.
-- Provider API keys are forbidden in Android source and checked in CI.
-- Account access/refresh tokens are stored with Android Keystore AES/GCM encryption.
-- Model downloads are HTTPS-only, size-bounded, disk-space-gated, SHA-256 verified and atomically installed.
-- Current account/session, settlement and Sierra preference files are explicitly excluded from backup/device-transfer rules in addition to `allowBackup=false`.
-- Private Photography disables cloud planning; only local Beta logic is used.
-- Shipping model licences are bundled under `app/src/main/assets/third_party_licenses/`.
+- Server URL must be blank or HTTPS at build time.
+- Provider API keys are not hard-coded in source.
+- Model artifacts are checksum-pinned and verified before use.
+- Private Photography disables cloud analysis and keeps Sierra β local.
+- Per-shot audit records store observable execution metadata, not hidden chain-of-thought.
 
-## Build stack
+## Historical documentation
 
-- Android compile/target SDK 36
-- JDK 17
-- Kotlin / Compose
-- CameraX 1.6.2
-- ONNX Runtime Android 1.31.0
-- WorkManager 2.12.0
-- OkHttp 4.12.0
-- minSdk 29
-
-## CI gates
-
-GitHub Actions and CircleCI build the Android project. CircleCI contains independent compile-isolation jobs for UI, cloud runtime and backend boundaries, plus unit tests and APK verification. Android lint is a blocking gate. APK verification checks signing metadata, alignment, ZIP integrity and DEX presence.
-
-The current CI validates a debug APK. A production release still requires a dedicated signed release pipeline, R8/shrinker validation, dependency/SBOM and licence compliance checks, and physical-device qualification.
-
-## Release status
-
-Sierra v3 Beta is an actively integrated deep-tech camera branch, not yet a justified claim of outperforming Pixel/Samsung/Xiaomi stock cameras. The current product path is substantially more conservative than the full research architecture: it protects camera availability and captured evidence first, while RAW reconstruction, semantic ISP, full expert fusion and measured heterogeneous scheduling are completed and benchmarked.
-
-No release should claim OEM superiority until controlled device tests demonstrate it across daylight, low light, motion, portrait, HDR, zoom, skin tone, colour error, detail, ghosting, thermal behaviour, shutter latency and blind human preference.
+Any file that describes Sierra v3/v8/v10 or ANIP as the active final creative authority should be treated as historical unless it explicitly references this v11 architecture document.

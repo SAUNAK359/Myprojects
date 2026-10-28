@@ -1,81 +1,155 @@
-# Sierra Vision v3 Beta — Product Contract
+# Sierra Vision v11 — Product Contract
 
-This contract describes the behavior of `director-sierra-v3`. It supersedes the earlier one-local-VLM/Qwen reference-capture contract.
+This is the current behavioral contract for the Android application. Detailed architecture lives in `docs/sierra-v11/ARCHITECTURE.md`.
 
-## Current Beta interaction
+## Core promise
 
-Sierra v3 currently uses a two-stage Director interaction rather than a conventional one-tap stock-camera shutter:
+Sierra Vision is a computational camera, not an image-generation app. It may direct, capture, reconstruct and deterministically render a real camera photograph, but it must preserve scene evidence, identity, geometry, readable text and material truth.
 
-1. The white shutter starts preparation.
-2. Sierra samples a current analysis frame, measures local technical quality, runs the local YuNet face expert when available, and builds a local plan. A signed-in non-private session may additionally request one bounded Sierra Server plan.
-3. Cloud output is treated as untrusted structured data. It is normalized, reconciled with local planning, schema/range checked and capability-gated before camera APIs are touched.
-4. Temporary focus/zoom/exposure/flash/extension changes are applied locally, followed by a verification frame when the active camera session supports analysis.
-5. Sierra enters `PREPARED` state. The second shutter performs the final still capture.
-6. With an active OEM computational extension, Sierra captures one final still and does not multiply the OEM pipeline into an additional burst.
-7. Without an OEM extension, Sierra may perform a thermally bounded smart CameraX JPEG burst. The current fallback burst performs technical frame selection; it does not claim RAW/HDR fusion.
-8. The selected still is cropped/rendered when requested and saved to MediaStore. If rendering/saving the intended final fails after an untouched still exists, Sierra attempts to preserve that untouched still instead.
-9. Temporary burst files are cleaned after finalization.
+## Authority
 
-## Non-negotiable safety rules
+When Sierra AI is available:
 
-- Camera availability is more important than AI availability.
-- Private Photography never invokes Sierra Server planning.
-- A model, cloud planner or quality component may fail without making the normal CameraX camera unusable.
-- A cloud/model output never executes arbitrary Android operations. Only typed Sierra tool calls exist.
-- Tool calls are count-bounded, parameter-validated, range-clamped, conflict-resolved and filtered through live device capabilities.
-- Unsupported hardware capability is never fabricated.
-- An active CameraX OEM extension owns its private capture pipeline; Sierra does not force manual RAW controls into that session.
-- Stale/cancelled preparation restores user camera state before it exits.
-- Thermal policy may reduce AI work and burst length.
-- Model files are never trusted by filename alone; installable production models require a pinned SHA-256 and an approved redistribution/commercial-use manifest.
-- Relative monocular depth must never be represented as metric metres.
-- Research catalog entries are not shipping features.
+- Gemini/Sierra is the photographic creative authority.
+- Sierra β is the deterministic feasibility, perception, coaching and execution layer.
+- Hardware/API limits are authoritative physical constraints.
 
-## Cloud and credits
+When AI is unavailable or Private Photography is enabled:
 
-Sierra Server is optional. The Android application stores only Sierra session tokens and uses the server as a planning boundary; third-party provider credentials are forbidden from Android source. The analysis image sent to Sierra Server is a reduced JPEG rather than the final full-resolution photograph.
+- Sierra β remains functional locally.
+- The UI must identify the β path rather than implying Gemini direction was used.
 
-A cloud analysis job is completed/settled only after a final photo is successfully saved. Pending settlement identifiers are persisted so account synchronization can retry after transient failure. Cancellation clears the active local cloud job and requests server cancellation asynchronously.
+## User interaction
 
-## Current local intelligence
+A Sierra-directed photograph is intentionally prepared before the final shutter:
 
-Live:
+1. Sierra samples a reduced analysis frame.
+2. AI mode performs Gemini Call #1 and receives camera intent, `DirectorSpec` and complete `RenderSpec`. β mode creates a measured local camera/render plan.
+3. Camera controls are validated, resolved to executable values, applied and compared with actual camera state.
+4. Live Director measures the preview against executable photographic goals and coaches only allowed interventions.
+5. AI mode performs Gemini Call #2 immediately before capture. This call may PASS or issue exactly one correction package.
+6. Sierra β executes/verifies any one-time correction locally. There is no third Gemini call.
+7. The final shutter captures the photograph. A safe capture program or P-RIF may be selected when supported.
+8. The approved RenderSpec is executed deterministically.
+9. The result is saved through MediaStore and only then shown as “Saved to Gallery.”
 
-- deterministic technical image statistics;
-- YuNet face detection when its verified model is available;
-- Sierra scene heuristics/local planner;
-- capability-constrained camera tool execution;
-- thermal policy;
-- smart-burst technical frame selection;
-- deterministic look/crop finishing.
+## Live Director
 
-Implemented but not yet mandatory in the live shutter path:
+The capability-aware `director.v2` graph is machine executable, not prose guidance.
 
-- Depth Anything V2 Small relative depth;
-- DeviceTwin calibration metadata;
-- SceneBeliefGraph;
-- CoordinateGraph;
-- ExpertScheduler / ComputeHypervisor;
-- EvidenceLedger / ReconstructionArbiter;
-- QualityCouncil.
+- Gemini identifies the exact primary entity in the planning frame and the target position in normalized final-composition coordinates.
+- Local tracking continuously measures the same entity.
+- Readiness uses hard/important/preference goals, confidence floors, ideal/acceptable tolerances, hysteresis and time-based stability.
+- Unknown measurements never count as success.
+- A stale READY state is reverified before shutter.
+- Persistent no-progress is treated as a scene constraint; Gemini Call #2 may move the target once to the closest achievable version of the same concept.
 
-## Current image-quality boundary
+## Director strategies / human intervention
 
-The v3 Beta must not call the JPEG smart-burst selector a fused HDR/denoise/SR pipeline. True Sierra computational photography remains a separate implementation milestone requiring certified RAW/YUV acquisition, alignment, motion/occlusion reasoning, deghosting, radiance fusion, denoise/SR, calibrated ISP, semantic rendering and evidence-gated quality arbitration.
+Supported strategy vocabulary includes portrait, candid, group, fashion, food, product, architecture, landscape, night and general.
 
-Creative/cropped output currently uses a bounded Android bitmap finishing path. Natural identity output can preserve the captured JPEG bytes, but the current creative-processing path is not a full-resolution RAW ISP and must not be marketed as one.
+Intervention levels are observe, minimal, directed and high-direction.
 
-## Release gate
+For candid / observe / minimal behavior:
 
-A debug APK compiling is necessary but not sufficient for production. Release requires:
+- posing cannot be a hard capture gate;
+- required subject repositioning is forbidden;
+- Sierra prioritizes photographer position, framing, timing, exposure and motion safety.
 
-- strict unit/lint/build CI;
-- signed release APK/AAB validation;
-- production model-licence validation and bundled notices;
-- dependency/security/SBOM review;
-- physical Android device tests for CameraX extensions and lifecycle/state restoration;
-- model execution tests on actual CPU/GPU/NPU paths;
-- shutter-latency, memory and sustained thermal testing;
-- controlled image-quality comparison against native camera apps.
+## Physical lighting and background direction
 
-The product must not claim that Sierra beats native OEM cameras until those device/image benchmarks demonstrate it.
+Sierra only coaches conditions it can measure locally.
+
+Examples:
+
+- left/right subject light balance;
+- subject/background luminance separation expressed as an image-space EV-like ratio;
+- off-subject background distraction score based on observable contrast/edge saliency;
+- physical reframing/repositioning to simplify a background.
+
+Sierra does not claim metric light placement without metric sensing and does not perform generative background deletion.
+
+## Camera execution receipts
+
+Every typed camera action can produce an auditable chain:
+
+```text
+requested → resolved → applied → actual
+```
+
+with one of:
+
+- APPLIED
+- CLAMPED
+- REJECTED
+- FAILED
+
+Zoom/EV are numerically compared against actual camera state. AF/AE/AWB are treated as state machines rather than fake scalar values.
+
+## Rendering
+
+The active final renderer is `SierraRenderExecutor`.
+
+AI:
+
+```text
+Gemini Call #1 RenderSpec → RenderExecutor
+```
+
+β:
+
+```text
+measured scene/quality → SierraBetaRenderPlanner → RenderSpec → RenderExecutor
+```
+
+Themes are optional descriptive priors only. They are not required for creative expression and do not override the RenderSpec.
+
+ANIP-era creative finishing is legacy/historical and must not be presented as the current release gate.
+
+## Failure behavior
+
+- Invalid AI structured output is rejected before camera execution.
+- Unsupported controls are not fabricated.
+- Values such as EV may be quantized to the closest physically executable setting and then verified.
+- A failed AI preparation does not silently claim AI success.
+- A failed final correction does not trigger another AI loop.
+- If final rendering cannot safely complete after real capture evidence exists, Sierra preserves the best safe evidence available.
+- A raw/evidence-only save must not be labeled as a Sierra-rendered result.
+
+## Memory / resource behavior
+
+- Final processing is crop-first where the active path allows it.
+- The render executor uses a bounded tile pixel buffer.
+- P-RIF evidence is protected when in-place rendering would mutate it.
+- Before/after comparison is a bounded cache preview, not another full-resolution persistent original.
+- Gemini image-bearing requests stream JPEG/Base64 into the network request rather than retaining multiple large payload copies.
+- Cancellation terminates active Gemini OkHttp calls.
+
+## Privacy
+
+- Private Photography disables cloud analysis.
+- Cloud analysis uses a reduced analysis frame, not the final full-resolution photograph.
+- Per-shot audit records contain observable execution data and never store hidden model reasoning.
+- Original full-resolution JPEGs are saved separately only when Keep Original is enabled or when a safety fallback requires evidence preservation.
+
+## Transparency
+
+The UI exposes real pipeline events rather than fake progress:
+
+- AI planning
+- camera application/verification
+- Live Director
+- pre-shutter validation/correction
+- capture
+- P-RIF when used
+- render
+- technical safety
+- MediaStore save
+
+Successful MediaStore completion produces an explicit Saved to Gallery experience with final preview and, where applicable, a bounded before-Sierra-render comparison.
+
+## Release claims
+
+A hosted green compile/unit/lint/APK workflow proves software/package integrity for the commit that ran it.
+
+Physical CameraX/Camera2/OEM/RAW/flash/thermal/memory behavior is a separate per-device qualification and must not be claimed from CI alone. See `docs/sierra-v11/DEVICE_QUALIFICATION.md`.

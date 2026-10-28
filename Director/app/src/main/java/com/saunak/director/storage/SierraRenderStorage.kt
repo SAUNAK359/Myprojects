@@ -17,6 +17,7 @@ suspend fun PhotoRepository.saveSierraRenderFinal(
     cropCenterX: Double,
     cropCenterY: Double
 ): Uri {
+    stageComparisonPreview(file)
     var source: Bitmap? = decodeOriented(file, renderSpec.execution.workingLongEdge.coerceIn(1024, PROCESSED_MAX_DIMENSION))
     var cropped: Bitmap? = null
     var rendered: Bitmap? = null
@@ -52,6 +53,7 @@ suspend fun PhotoRepository.savePrifSierraRenderFinal(
     cropCenterY: Double
 ): Uri {
     require(!bitmap.isRecycled)
+    stageComparisonPreview(bitmap)
     val evidenceLedger = SierraEngine.get().evidence
     val newestPrifTimestamp = evidenceLedger.snapshot().asSequence()
         .filter { it.regionId.value.startsWith("prif/") }
@@ -97,9 +99,5 @@ suspend fun PhotoRepository.savePrifSierraRenderFinal(
 
 private fun prifSierraProcessingMaxDimension(): Int {
     val heapMb = Runtime.getRuntime().maxMemory() / (1024L * 1024L)
-    return when {
-        heapMb < 256L -> 1792
-        heapMb < 384L -> 2304
-        else -> 3072
-    }
+    return when { heapMb < 256L -> 1792; heapMb < 384L -> 2304; else -> 3072 }
 }
