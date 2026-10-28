@@ -8,11 +8,6 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
 
-/**
- * Data-driven Gemini transport configuration plus capability-checked model resolution.
- * No provider model id is compiled into Kotlin. If discovery cannot prove that an installed
- * preference is currently available, Sierra fails closed to its local photographic path.
- */
 data class GeminiProviderConfig(
     val interactionsUrl: String,
     val modelsUrl: String,
@@ -69,11 +64,7 @@ class GeminiModelResolver(
     @Throws(IOException::class)
     fun resolve(apiKey: String, nowElapsedMs: Long = android.os.SystemClock.elapsedRealtime()): String {
         cached.get()?.takeIf { nowElapsedMs < it.expiresElapsedMs }?.let { return it.model }
-        val request = Request.Builder()
-            .url(config.modelsUrl)
-            .header("x-goog-api-key", apiKey)
-            .get()
-            .build()
+        val request = Request.Builder().url(config.modelsUrl).header("x-goog-api-key", apiKey).get().build()
         val available = client.newCall(request).execute().use { response ->
             val payload = response.body?.string().orEmpty()
             if (!response.isSuccessful) throw IOException(providerError(response.code, payload))
@@ -104,6 +95,8 @@ fun GeminiProviderConfig.newHttpClient(): OkHttpClient = OkHttpClient.Builder()
     .connectTimeout(connectTimeoutMs, TimeUnit.MILLISECONDS)
     .readTimeout(readTimeoutMs, TimeUnit.MILLISECONDS)
     .writeTimeout(writeTimeoutMs, TimeUnit.MILLISECONDS)
-    .callTimeout(callTimeoutMs, TimeUnit.MILLISECONDS)
+    // Streaming uses socket read timeout as the stall watchdog. A total call deadline would
+    // incorrectly convert a healthy long-running Gemini stream into local beta fallback.
+    .callTimeout(0, TimeUnit.MILLISECONDS)
     .retryOnConnectionFailure(true)
     .build()

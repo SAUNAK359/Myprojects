@@ -45,9 +45,8 @@ class SierraServerVlmRuntime(
     override suspend fun load(modelPath: String, projectorPath: String): Result<Unit> =
         if (isReady()) Result.success(Unit) else Result.failure(IllegalStateException("Add a Gemini API key in Sierra or sign in to Sierra Vision"))
 
-    override suspend fun syncDeviceFoundation(profile: DeviceFoundationProfile): Result<Unit> {
-        return if (geminiKeyStore.isConfigured()) directGemini.syncDeviceFoundation(profile) else Result.success(Unit)
-    }
+    override suspend fun syncDeviceFoundation(profile: DeviceFoundationProfile): Result<Unit> =
+        if (geminiKeyStore.isConfigured()) directGemini.syncDeviceFoundation(profile) else Result.success(Unit)
 
     override suspend fun plan(image: Bitmap, capabilities: CapabilityRegistry, camera: CameraSnapshot, skillContext: String): Result<PlanOutput> {
         if (geminiKeyStore.isConfigured()) {
@@ -80,12 +79,10 @@ class SierraServerVlmRuntime(
         previousIssues: List<String>,
         evaluationContext: String,
         capabilities: CapabilityRegistry
-    ): Result<EvaluationOutput> {
-        return if (geminiKeyStore.isConfigured()) {
-            directGemini.setMaxImageDimension(maxImageDimension)
-            directGemini.evaluate(image, objective, attempt, camera, previousIssues, evaluationContext, capabilities)
-        } else Result.failure(UnsupportedOperationException("Sierra Server final review is not enabled for this beta path"))
-    }
+    ): Result<EvaluationOutput> = if (geminiKeyStore.isConfigured()) {
+        directGemini.setMaxImageDimension(maxImageDimension)
+        directGemini.evaluate(image, objective, attempt, camera, previousIssues, evaluationContext, capabilities)
+    } else Result.failure(UnsupportedOperationException("Sierra Server final render authority is unavailable without direct Gemini"))
 
     override suspend fun completeFinalCapture(captureId: String): Result<Unit> {
         if (geminiKeyStore.isConfigured()) return Result.success(Unit)
@@ -122,7 +119,7 @@ class SierraServerVlmRuntime(
         maxImageDimension = pixels.coerceIn(384, 896)
         directGemini.setMaxImageDimension(maxImageDimension)
     }
-
+    override fun setStreamProgressListener(listener: ((VlmStreamProgress) -> Unit)?) { directGemini.setStreamProgressListener(listener) }
     override fun cancel() = cancelCloudJob()
     override fun isReady(): Boolean = geminiKeyStore.isConfigured() || (server.configured && server.authenticated)
     override fun waitForSemanticPlan(): Boolean = geminiKeyStore.isConfigured()
