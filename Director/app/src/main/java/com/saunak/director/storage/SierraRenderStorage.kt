@@ -17,7 +17,6 @@ suspend fun PhotoRepository.saveSierraRenderFinal(
     cropCenterX: Double,
     cropCenterY: Double
 ): Uri {
-    // Comparison reference is intentionally a small cache artifact, never another full-size bitmap.
     stageComparisonPreview(file)
     var source: Bitmap? = decodeOriented(file, renderSpec.execution.workingLongEdge.coerceIn(1024, PROCESSED_MAX_DIMENSION))
     var cropped: Bitmap? = null
@@ -31,8 +30,10 @@ suspend fun PhotoRepository.saveSierraRenderFinal(
         }
         rendered = withContext(Dispatchers.Default) {
             SierraRenderExecutor.render(
-                source = checkNotNull(cropped), renderSpec,
-                SierraEngine.getOrNull()?.subjects?.latest(), protectSource = false
+                source = checkNotNull(cropped),
+                spec = renderSpec,
+                subject = SierraEngine.getOrNull()?.subjects?.latest(),
+                protectSource = false
             ).bitmap
         }
         saveProcessed(checkNotNull(rendered), file)
@@ -79,7 +80,8 @@ suspend fun PhotoRepository.savePrifSierraRenderFinal(
                 working = null
             }
             rendered = SierraRenderExecutor.render(
-                source = checkNotNull(cropped), spec = renderSpec,
+                source = checkNotNull(cropped),
+                spec = renderSpec,
                 subject = SierraEngine.getOrNull()?.subjects?.latest(),
                 protectSource = cropped === bitmap
             ).bitmap
