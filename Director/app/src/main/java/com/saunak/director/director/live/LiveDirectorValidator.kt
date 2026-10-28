@@ -8,7 +8,7 @@ object LiveDirectorValidator {
         require(spec.schemaVersion == contract.version) { "Director schema version mismatch" }
         require(spec.schemaHash == contract.hash) { "Director schema capability hash mismatch" }
         require(spec.goalSummary.length <= 240) { "Director goal summary too long" }
-        require(spec.goals.size in 1..18) { "Director goal count out of bounds" }
+        require(spec.goals.size in 1..DirectorSchemaCompiler.MAX_GOALS) { "Director goal count out of bounds" }
 
         val ids = spec.goals.map { it.id }
         require(ids.distinct().size == ids.size) { "Director graph contains duplicate goal ids" }
@@ -18,6 +18,9 @@ object LiveDirectorValidator {
             require(node.type in contract.allowedGoalTypes) { "Unsupported Director goal type ${node.type}" }
             require(node.entityId == null || node.entityId == spec.primaryEntity.entityId) {
                 "Director goal references unknown entity ${node.entityId}"
+            }
+            require(node.dependsOn.size <= DirectorSchemaCompiler.MAX_GRAPH_EDGES && node.invalidates.size <= DirectorSchemaCompiler.MAX_GRAPH_EDGES) {
+                "Director graph edge count out of bounds"
             }
             require(node.dependsOn.distinct().size == node.dependsOn.size) { "Duplicate Director dependencies" }
             require(node.invalidates.distinct().size == node.invalidates.size) { "Duplicate Director invalidations" }
@@ -30,6 +33,7 @@ object LiveDirectorValidator {
             }
             if (node.type == DirectorGoalTypes.POSE_KEYPOINT_ALIGNMENT) {
                 require(node.targetKeypoints.isNotEmpty()) { "Pose goal requires target keypoints" }
+                require(node.targetKeypoints.size <= DirectorSchemaCompiler.MAX_POSE_KEYPOINTS) { "Too many Director pose keypoints" }
                 require(node.targetKeypoints.map { it.index }.distinct().size == node.targetKeypoints.size) { "Duplicate pose keypoint targets" }
             } else {
                 require(node.targetKeypoints.isEmpty()) { "Non-pose Director goal cannot carry pose keypoints" }
@@ -57,6 +61,9 @@ object LiveDirectorValidator {
         }
         require(spec.readiness.exitFactor > spec.readiness.enterFactor) { "Director hysteresis requires exit_factor > enter_factor" }
         require(spec.readiness.maxStabilityMs >= spec.readiness.baseStabilityMs) { "Invalid Director stability policy" }
+        require(spec.goals.filter { it.priority != GoalPriority.PREFERENCE }.all { it.stabilityMs <= spec.readiness.maxStabilityMs }) {
+            "Director goal stability exceeds readiness maximum"
+        }
 
         detectDependencyCycle(spec.goals)
         validateInvalidationSafety(spec.goals)
@@ -83,8 +90,6 @@ object LiveDirectorValidator {
         nodes.forEach { node ->
             node.invalidates.forEach { targetId ->
                 val target = byId.getValue(targetId)
-                // Lower-priority refinements must not invalidate hard safety gates. This avoids a
-                // coaching plan where cosmetic optimization repeatedly destroys technical readiness.
                 require(!(node.priority == GoalPriority.PREFERENCE && target.priority == GoalPriority.HARD)) {
                     "Preference goal cannot invalidate a hard Director gate"
                 }
