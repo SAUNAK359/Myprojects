@@ -11,6 +11,8 @@ import java.io.ByteArrayOutputStream
 import java.io.IOException
 import kotlin.math.max
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
@@ -41,6 +43,7 @@ class GeminiDirectVlmRuntime(
     private val client = provider.newHttpClient()
     private val modelResolver = GeminiModelResolver(provider, client)
     private val foundationPrefs = appContext.getSharedPreferences("sierra_device_foundation_v1", Context.MODE_PRIVATE)
+    private val foundationMutex = Mutex()
 
     @Volatile private var maxImageDimension = 512
     @Volatile private var activeCall: Call? = null
@@ -55,14 +58,18 @@ class GeminiDirectVlmRuntime(
     }
 
     override suspend fun syncDeviceFoundation(profile: DeviceFoundationProfile): Result<Unit> = withContext(Dispatchers.IO) {
-        lastFoundationProfile = profile
+        foundationMutex.withLock {
+            lastFoundationProfile = profile
+            if (foundationIsFresh(profile)) Result.success(Unit) else createFoundation(profile)
+        }
+    }
+
+    private fun foundationIsFresh(profile: DeviceFoundationProfile): Boolean {
         val storedDigest = foundationPrefs.getString(KEY_FOUNDATION_DIGEST, null)
         val storedId = foundationPrefs.getString(KEY_FOUNDATION_ID, null)
         val storedAt = foundationPrefs.getLong(KEY_FOUNDATION_AT, 0L)
-        val fresh = storedDigest == profile.digest && !storedId.isNullOrBlank() &&
+        return storedDigest == profile.digest && !storedId.isNullOrBlank() &&
             System.currentTimeMillis() - storedAt in 0 until FOUNDATION_REFRESH_MS
-        if (fresh) return@withContext Result.success(Unit)
-        createFoundation(profile)
     }
 
     private fun createFoundation(profile: DeviceFoundationProfile): Result<Unit> {
@@ -125,27 +132,30 @@ class GeminiDirectVlmRuntime(
         camera: CameraSnapshot,
         skillContext: String
     ): Result<PlanOutput> {
-        val call = suspend {
-            request(
-                prompt = promptBuilder.planPrompt(capabilities, camera, skillContext, themeCatalog.compactDescription()),
-                image = image,
-                schema = planSchema(),
-                previousInteractionId = currentFoundationId(),
-                decode = { raw ->
-                    val plan = VlmContractValidator.plan(json.decodeFromString<PlanOutput>(raw))
-                    validateThemeReferences(plan)
-                    plan
-                }
-            )
-        }
-        val first = call()
+        suspend fun executePlan(): Result<PlanOutput> = request(
+            prompt = promptBuilder.planPrompt(capabilities, camera, skillContext, themeCatalog.compactDescription()),
+            image = image,
+            schema = planSchema(),
+            previousInteractionId = currentFoundationId(),
+            decode = { raw ->
+                val plan = VlmContractValidator.plan(json.decodeFromString<PlanOutput>(raw))
+                validateThemeReferences(plan)
+                plan
+            }
+        )
+
+        val first = executePlan()
         if (first.isSuccess || !foundationContextFailure(first.exceptionOrNull())) return first
 
-        clearFoundation()
         val profile = lastFoundationProfile ?: return first
-        val rebuilt = withContext(Dispatchers.IO) { createFoundation(profile) }
+        val rebuilt = withContext(Dispatchers.IO) {
+            foundationMutex.withLock {
+                clearFoundation()
+                createFoundation(profile)
+            }
+        }
         if (rebuilt.isFailure) return Result.failure(rebuilt.exceptionOrNull() ?: IllegalStateException("Device foundation rebuild failed"))
-        return call()
+        return executePlan()
     }
 
     override suspend fun evaluate(
@@ -232,7 +242,8 @@ class GeminiDirectVlmRuntime(
 
     private fun foundationContextFailure(t: Throwable?): Boolean {
         val message = t?.message?.lowercase().orEmpty()
-        return "previous_interaction" in message || "interaction" in message && ("not found" in message || "expired" in message) ||
+        return "previous_interaction" in message ||
+            ("interaction" in message && ("not found" in message || "expired" in message)) ||
             message.startsWith("http=404")
     }
 
