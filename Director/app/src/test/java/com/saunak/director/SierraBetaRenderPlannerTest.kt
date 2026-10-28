@@ -61,7 +61,8 @@ class SierraBetaRenderPlannerTest {
         assertTrue(spec.shadows.blackAnchor >= .76)
         assertTrue(spec.highlights.practicalLightPreservation >= .90)
         assertTrue(spec.shadows.recovery <= .44)
-        assertTrue(spec.renderIntentDoesNotExistForTest().not())
+        assertTrue(spec.reasonCodes.contains("low_light"))
+        assertEquals("measured_beta", spec.film.character)
     }
 
     @Test fun portraitUsesSubjectHierarchyAndOptionalMeasuredDepthOnly() {
@@ -82,7 +83,4 @@ class SierraBetaRenderPlannerTest {
         assertTrue(spec.spatial.useDepth)
         assertTrue(spec.localLight.backgroundEv <= 0.0)
     }
-
-    // Compile-time guard that this test remains about the active RenderSpec, not a named-look recipe.
-    private fun com.saunak.director.director.SierraRenderSpec.renderIntentDoesNotExistForTest(): Boolean = false
 }
