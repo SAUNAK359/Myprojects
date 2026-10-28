@@ -40,6 +40,7 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
     private val deviceConfigSkill = DeviceConfigSkill(app)
     private val runtime = SierraServerVlmRuntime(app, server = server, deviceSkill = deviceConfigSkill)
     private val repository = PhotoRepository(app)
+    private val toolExecutor = ToolExecutor(camera)
     private val preferences = app.getSharedPreferences("sierra_vision_preferences", Application.MODE_PRIVATE)
     private val initialPrivateMode = preferences.getBoolean("private_mode", false)
     private val initialGuestMode = preferences.getBoolean("guest_mode", false)
@@ -52,7 +53,7 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
         camera = camera,
         vlm = runtime,
         skills = SkillEngine(app),
-        tools = ToolExecutor(camera),
+        tools = toolExecutor,
         storage = repository,
         recipeMemory = recipeMemory,
         thermal = ThermalMonitor(app)
@@ -102,7 +103,7 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
 
     private var previewView: PreviewView? = null
     private var owner: LifecycleOwner? = null
-    private var cameraBound = false
+    @Volatile private var cameraBound = false
 
     init {
         orchestrator.setCloudEnabled(runtime.isReady() && !initialPrivateMode)
@@ -136,8 +137,10 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     refreshCamera()
                     syncDeviceProfile()
+                    launch { ensureDeviceFoundation() }
                 }
                 .onFailure {
+                    cameraBound = false
                     _ui.value = _ui.value.copy(stage = DirectorStage.ERROR, status = "Camera unavailable", error = it.message)
                 }
         }
@@ -163,6 +166,7 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
                         status = if (_ui.value.privateMode) "Sierra β Private • on-device only" else "Sierra AI + β ready"
                     )
                     syncDeviceProfile()
+                    launch { ensureDeviceFoundation() }
                 }
                 .onFailure { error ->
                     _ui.value = _ui.value.copy(authBusy = false, authError = error.message ?: "Could not create account")
@@ -190,6 +194,7 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
                         status = if (_ui.value.privateMode) "Sierra β Private • on-device only" else "Sierra AI + β ready"
                     )
                     syncDeviceProfile()
+                    launch { ensureDeviceFoundation() }
                 }
                 .onFailure { error ->
                     _ui.value = _ui.value.copy(authBusy = false, authError = error.message ?: "Could not sign in")
@@ -226,11 +231,22 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
             sierraMode = if (directReady) SierraMode.AI else SierraMode.BETA,
             status = if (directReady) "Sierra AI + β ready" else "Signed out • Sierra β available"
         )
+        if (directReady) viewModelScope.launch { ensureDeviceFoundation() }
     }
 
     fun primaryCapture() {
         viewModelScope.launch {
             val preparedBeforePress = orchestrator.isPrepared()
+            val aiWanted = runtime.isReady() && !_ui.value.privateMode
+            val foundation = if (aiWanted && !preparedBeforePress) ensureDeviceFoundation() else Result.success(Unit)
+            val useLocalForThisShot = aiWanted && foundation.isFailure
+            if (useLocalForThisShot) {
+                orchestrator.setCloudEnabled(false)
+                _ui.value = _ui.value.copy(
+                    status = "Sierra device foundation unavailable • β taking over this shot",
+                    aiFallbackReason = foundation.exceptionOrNull()?.message?.take(120)
+                )
+            }
             try {
                 val saved = orchestrator.onPrimaryPressed()
                 if (preparedBeforePress) {
@@ -263,6 +279,8 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
                     status = "Sierra could not prepare the shot",
                     error = t.message ?: t::class.java.simpleName
                 )
+            } finally {
+                if (useLocalForThisShot) orchestrator.setCloudEnabled(runtime.isReady() && !_ui.value.privateMode)
             }
         }
     }
@@ -311,6 +329,7 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
                         runCatching { deviceConfigSkill.refresh(camera.capabilities(), camera.snapshot()) }
                     }
                     syncDeviceProfile()
+                    viewModelScope.launch { ensureDeviceFoundation() }
                 }
                 refreshCamera(if (switched) "Camera switched" else "Other camera unavailable")
             }
@@ -331,6 +350,7 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
             status = if (enabled) "Sierra β Private • on-device only" else if (aiReady) "Sierra AI + β ready" else "Sierra β ready",
             error = null
         )
+        if (aiReady) viewModelScope.launch { ensureDeviceFoundation() }
     }
 
     fun setAspectRatioOverride(value: String?) {
@@ -407,6 +427,17 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    private suspend fun ensureDeviceFoundation(): Result<Unit> {
+        if (!cameraBound || _ui.value.privateMode || !runtime.isReady()) return Result.success(Unit)
+        return withContext(Dispatchers.IO) {
+            runCatching {
+                val caps = camera.capabilities()
+                val profile = deviceConfigSkill.foundationProfile(caps)
+                runtime.syncDeviceFoundation(profile).getOrThrow()
+            }
+        }
+    }
+
     private fun syncDeviceProfile() {
         if (!server.authenticated) return
         viewModelScope.launch {
@@ -435,9 +466,24 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { delay(80); refreshCamera(status) }
     }
 
-    fun onAppBackgrounded() { orchestrator.cancelForUserAction() }
+    fun onAppBackgrounded() {
+        orchestrator.cancelForUserAction()
+        runtime.cancel()
+        viewModelScope.launch {
+            runCatching { camera.releaseToSystem() }
+            cameraBound = false
+        }
+    }
+
     fun onAppForegrounded() {
-        refreshCamera()
+        val currentOwner = owner
+        val currentView = previewView
+        if (!cameraBound && currentOwner != null && currentView != null) {
+            bind(currentOwner, currentView)
+        } else {
+            refreshCamera()
+            viewModelScope.launch { ensureDeviceFoundation() }
+        }
         refreshGallery()
         refreshCredits()
         retryPendingSettlement()
