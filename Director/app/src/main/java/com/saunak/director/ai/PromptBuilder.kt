@@ -102,6 +102,7 @@ class PromptBuilder {
         - corrected_director_spec may only move the original target to the closest achievable version of the SAME photographic concept. It must use the schema version/hash below and allowed goal types only.
         - There will be NO THIRD GEMINI CALL. Sierra beta executes this correction once, verifies it locally, then captures.
         - Do not request unsupported controls. Do not create alternate concepts. Do not use novelty as a reason to change the shot.
+        - If scene_constraint_suspected=true, the original deterministic graph did not converge. In that case accept MUST be false and corrected_director_spec MUST define the closest achievable version of the SAME concept; do not bypass deterministic readiness by simply accepting the old graph.
         - If a scene constraint makes an ideal target unreachable, prefer the closest acceptable target rather than endless coaching.
 
         DIRECTOR CONTRACT:
