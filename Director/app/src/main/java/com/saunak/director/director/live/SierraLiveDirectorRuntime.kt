@@ -2,14 +2,12 @@ package com.saunak.director.director.live
 
 import android.graphics.Bitmap
 import com.saunak.director.director.SierraPerceptionFabric
-import com.saunak.director.engine.subject.NormalizedPoint
 import com.saunak.director.engine.subject.NormalizedRect
 import com.saunak.director.processing.TechnicalQuality
 import java.util.ArrayDeque
 import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.max
-import kotlin.math.min
 import kotlin.math.sqrt
 
 /**
@@ -41,6 +39,8 @@ class SierraLiveDirectorRuntime {
             overlay = DirectorOverlayState(
                 targetBox = spec.primaryEntity.targetBox,
                 currentBox = DirectorRect.from(anchored.bounds),
+                sourceWidth = planningFrame.width,
+                sourceHeight = planningFrame.height,
                 confidence = anchored.confidence,
                 activeGoalType = DirectorGoalTypes.ENTITY_PLACEMENT,
                 showTarget = true
@@ -89,10 +89,10 @@ class SierraLiveDirectorRuntime {
         val importantScore = weightedScore(important)
         val requiredImportantPass = evaluations.filter { it.node.required && it.node.priority == GoalPriority.IMPORTANT }
             .all { it.measurement.state != GoalState.UNKNOWN && it.satisfaction >= graph.readiness.requiredNodeFloor }
-        val dependencyPass = evaluations.all { evaluation ->
+        val dependencyPass = evaluations.filter { it.node.priority != GoalPriority.PREFERENCE }.all { evaluation ->
             evaluation.node.dependsOn.all { depId ->
-                evaluations.firstOrNull { it.node.id == depId }?.let { it.measurement.state in setOf(GoalState.ACCEPTABLE, GoalState.IDEAL) } == true
-            } || evaluation.node.priority == GoalPriority.PREFERENCE
+                evaluations.firstOrNull { it.node.id == depId }?.measurement?.state in setOf(GoalState.ACCEPTABLE, GoalState.IDEAL)
+            }
         }
         val candidateReady = entityLocked && hardPass && requiredImportantPass && dependencyPass && importantScore >= graph.readiness.importantScoreMin
         val adaptiveWindowMs = adaptiveStabilityMs(graph, evaluations, motion)
@@ -111,6 +111,8 @@ class SierraLiveDirectorRuntime {
             currentBox = entityBounds?.let(DirectorRect::from),
             targetKeypoints = active?.targetKeypoints.orEmpty(),
             currentKeypoints = if (active?.type == DirectorGoalTypes.POSE_KEYPOINT_ALIGNMENT) currentPose else emptyList(),
+            sourceWidth = frame.width,
+            sourceHeight = frame.height,
             confidence = entityConfidence,
             activeGoalType = active?.type ?: if (captureReady) "capture_ready" else DirectorGoalTypes.ENTITY_PLACEMENT,
             showTarget = entityConfidence >= OVERLAY_MIN_CONFIDENCE || entityBounds == null
@@ -123,7 +125,7 @@ class SierraLiveDirectorRuntime {
             hardPass = hardPass,
             stable = stable,
             captureReady = captureReady,
-            stableSinceNs = readinessHistory.firstOrNull()?.timestampNs,
+            stableSinceNs = stableWindowStart(timestampNs, adaptiveWindowMs),
             instruction = instruction,
             overlay = overlay,
             evaluations = evaluations,
@@ -211,11 +213,10 @@ class SierraLiveDirectorRuntime {
             } ?: unknown("relative_depth_unavailable")
             DirectorGoalTypes.POSE_KEYPOINT_ALIGNMENT -> {
                 val pose = perception?.subject?.pose ?: return unknown("pose_unavailable")
-                val targets = node.targetKeypoints
                 val actual = pose.keypoints.associateBy { it.index }
                 var weightedError = 0.0
                 var weight = 0.0
-                targets.forEach { target ->
+                node.targetKeypoints.forEach { target ->
                     val point = actual[target.index] ?: return@forEach
                     if (point.confidence < target.confidenceMin) return@forEach
                     weightedError += hypot(point.position.x - target.x, point.position.y - target.y) * point.confidence
@@ -226,7 +227,6 @@ class SierraLiveDirectorRuntime {
             }
             DirectorGoalTypes.FACE_PLACEMENT -> {
                 val face = perception?.faces?.maxByOrNull { it.area * it.score } ?: return unknown("face_unavailable")
-                val fw = frame.width.toDouble(); val fh = frame.height.toDouble()
                 val rect = NormalizedRect.fromPixels(face.x.toDouble(), face.y.toDouble(), face.width.toDouble(), face.height.toDouble(), frame.width, frame.height)
                 GoalMeasurement(node.id, rect.center.distanceTo(graph.primaryEntity.targetBox.normalizedRect().center), face.score.toDouble(), timestampNs, "yunet_face")
             }
@@ -339,12 +339,24 @@ class SierraLiveDirectorRuntime {
         return relevant.last().pass && validFraction >= policy.validFractionMin
     }
 
+    private fun stableWindowStart(nowNs: Long, requiredWindowMs: Long): Long? {
+        if (readinessHistory.isEmpty()) return null
+        val cutoff = nowNs - requiredWindowMs * 1_000_000L
+        return readinessHistory.firstOrNull { it.timestampNs >= cutoff && it.pass }?.timestampNs
+    }
+
     private fun adaptiveStabilityMs(graph: SierraDirectorSpec, evaluations: List<GoalEvaluation>, motion: Double?): Long {
         val unknownRequired = evaluations.count { (it.node.required || it.node.priority == GoalPriority.HARD) && it.measurement.state == GoalState.UNKNOWN }
-        val confidence = evaluations.filter { it.measurement.state != GoalState.UNKNOWN }.map { it.measurement.confidence }.average().takeIf { it.isFinite() } ?: 0.0
+        val confidenceValues = evaluations.filter { it.measurement.state != GoalState.UNKNOWN }.map { it.measurement.confidence }
+        val confidence = if (confidenceValues.isEmpty()) 0.0 else confidenceValues.average()
         val uncertainty = (1.0 - confidence + unknownRequired * 0.12).coerceIn(0.0, 1.0)
         val motionFactor = (motion ?: 0.12).coerceIn(0.0, 1.0)
-        val proposed = graph.readiness.baseStabilityMs + (320.0 * uncertainty + 260.0 * motionFactor).toLong()
+        val nodeMinimum = evaluations.filter { it.node.priority != GoalPriority.PREFERENCE }
+            .maxOfOrNull { it.node.stabilityMs } ?: graph.readiness.baseStabilityMs
+        val proposed = max(
+            nodeMinimum,
+            graph.readiness.baseStabilityMs + (320.0 * uncertainty + 260.0 * motionFactor).toLong()
+        )
         return proposed.coerceIn(graph.readiness.baseStabilityMs, graph.readiness.maxStabilityMs)
     }
 
@@ -376,15 +388,18 @@ class SierraLiveDirectorRuntime {
     }
 
     private fun regionMeanLuma(frame: Bitmap, rect: NormalizedRect): Double {
-        val samplesX = 12; val samplesY = 12
-        var sum = 0.0; var count = 0
+        val samplesX = 12
+        val samplesY = 12
+        var sum = 0.0
+        var count = 0
         for (y in 0 until samplesY) for (x in 0 until samplesX) {
             val nx = rect.left + (x + 0.5) / samplesX * rect.width
             val ny = rect.top + (y + 0.5) / samplesY * rect.height
             val px = (nx * (frame.width - 1)).toInt().coerceIn(0, frame.width - 1)
             val py = (ny * (frame.height - 1)).toInt().coerceIn(0, frame.height - 1)
             val p = frame.getPixel(px, py)
-            sum += (77 * ((p shr 16) and 255) + 150 * ((p shr 8) and 255) + 29 * (p and 255)) shr 8
+            val luma = (77 * ((p shr 16) and 255) + 150 * ((p shr 8) and 255) + 29 * (p and 255)) shr 8
+            sum += luma.toDouble()
             count++
         }
         return if (count == 0) 0.0 else sum / count
@@ -393,6 +408,7 @@ class SierraLiveDirectorRuntime {
     /** -1 = brighter on left, +1 = brighter on right. */
     private fun horizontalLightBalance(frame: Bitmap, rect: NormalizedRect): Double {
         val mid = rect.center.x
+        if (mid <= rect.left + 1e-6 || mid >= rect.right - 1e-6) return 0.0
         val left = NormalizedRect(rect.left, rect.top, mid, rect.bottom)
         val right = NormalizedRect(mid, rect.top, rect.right, rect.bottom)
         val l = regionMeanLuma(frame, left)
