@@ -2,7 +2,6 @@ package com.saunak.director.ai
 
 import com.saunak.director.camera.CameraSnapshot
 import com.saunak.director.camera.CapabilityRegistry
-import com.saunak.director.tools.ToolCatalog
 
 class PromptBuilder {
     fun planPrompt(
@@ -16,7 +15,7 @@ class PromptBuilder {
         AUTHORITY CONTRACT:
         - Sierra/Gemini decides the photograph and the final creative camera intent.
         - Sierra beta is local perception + physical feasibility + execution. It may enforce real hardware/API limits but must not creatively replace a valid Sierra decision.
-        - The device foundation from the previous interaction is the hard physical capability boundary. Never invent unsupported hardware.
+        - The DEVICE FOUNDATION from the previous interaction contains the full camera inventory, tool schema, ranges and physical/API limits. Treat it as authoritative; never invent capability outside it.
         - If a currently active OEM extension conflicts with a valid direct Sierra command, the executor can leave that extension and return to the normal camera session. Do not avoid a good direct control merely because an extension is currently active.
 
         REASON PHOTOGRAPHICALLY BEFORE CHOOSING SETTINGS:
@@ -40,10 +39,9 @@ class PromptBuilder {
         photographic_direction is Sierra's supervisory artistic intent. Use story/mood/primary_subject/narrative_role to carry the precise situation and photographic rationale into downstream reconstruction. Use highlight_protection, shadow_depth, midtone_contrast, local_contrast, color_intensity, warmth_bias, subject_relight_ev and background_suppression_ev as bounded intent—not as a demand to maximize each slider.
         Prefer believable depth, local hierarchy and natural material rendering over flat HDR, excessive clarity, waxy denoise, oversaturation or aggressive background darkening. Preserve intentional sunset/neon/candle/stage color instead of neutralizing it.
 
-        Active camera capabilities: ${caps.compactDescription()}
-        Current camera state: ${state.compactDescription()}
+        Current live camera state only: ${state.compactDescription()}
         Photography routing context: $skillContext
-        Executable camera/look tool contract: ${ToolCatalog.contract(caps, state.extension)}
+        The complete executable tool definitions and device-specific numeric bounds are already in the DEVICE FOUNDATION; do not ask Sierra beta to infer or resolve alternatives.
 
         Choose exactly one branch. Score the analysis frame 0..1. reference_accept means current physical camera state is sufficient. recapture is true only when a CAMERA tool change is materially worth another physical capture.
         Every tool call must contain id,v,x,y,s; unused values must be null. Use at most 8 calls.
