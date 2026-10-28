@@ -75,10 +75,6 @@ data class PrimaryEntityTarget(
     }
 }
 
-/**
- * Flexible envelope with strict semantics. `type` is capability-gated by DirectorSchemaCompiler.
- * Scalar goals use targetMin/targetMax. Pose goals may additionally use targetKeypoints.
- */
 @Serializable
 data class DirectorGoalNode(
     val id: String,
@@ -174,6 +170,8 @@ data class DirectorOverlayState(
     val currentBox: DirectorRect? = null,
     val targetKeypoints: List<DirectorKeypointTarget> = emptyList(),
     val currentKeypoints: List<NormalizedPoint> = emptyList(),
+    val sourceWidth: Int = 0,
+    val sourceHeight: Int = 0,
     val confidence: Double = 0.0,
     val activeGoalType: String? = null,
     val showTarget: Boolean = false
