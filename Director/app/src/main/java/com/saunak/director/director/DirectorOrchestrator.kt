@@ -128,7 +128,6 @@ class DirectorOrchestrator(
         try {
             tools.restoreUserState()
             val thermalPolicy = thermal.policy()
-            // AI is only authoritative when this runtime can complete the locked two-call protocol.
             val cloudAllowed = cloudEnabled && vlm.isReady() && thermalPolicy.allowAi && vlm.supportsPreShutterValidation()
             emit(session, DirectorUiState(
                 stage = DirectorStage.ANALYZING, aiAvailable = cloudAllowed,
@@ -316,7 +315,7 @@ class DirectorOrchestrator(
                         isCurrent = { isCurrent(session) },
                         sceneConstraintSuspected = guidance.sceneConstraintSuspected
                     ) { live ->
-                        emit(session, lastUiState.copy(stage = DirectorStage.CORRECTING, status = live.status, liveDirector = live))
+                        emit(session, lastUiState.copy(stage = DirectorStage.CHECKING, status = live.status, liveDirector = live))
                     }
                 } finally {
                     directorSessionActive = false
@@ -334,7 +333,10 @@ class DirectorOrchestrator(
                     return null
                 }
                 receipts = authority.receipts.toMutableList()
-                approve(session, authority.plan, score, mode, captureProgram, if (authority.corrected) "one_final_correction_applied" else aiFallbackReason, receipts)
+                // A corrected camera state invalidates any RAW/burst program compiled before that correction.
+                // Use a fresh normal capture rather than executing stale absolute exposure/ISO instructions.
+                val safeCaptureProgram = if (authority.corrected) null else captureProgram
+                approve(session, authority.plan, score, mode, safeCaptureProgram, if (authority.corrected) "one_final_correction_applied" else aiFallbackReason, receipts)
                 emit(session, lastUiState.copy(status = authority.status, liveDirector = authority.liveState, finalReviewStatus = "pre_shutter_validated"))
             } else {
                 approve(session, appliedPlan, score, mode, captureProgram, aiFallbackReason, receipts)
