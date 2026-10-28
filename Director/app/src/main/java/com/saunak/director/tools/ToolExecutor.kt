@@ -17,6 +17,7 @@ class ToolExecutor(private val camera: CameraEngine, private val validator: Tool
     data class Result(
         val applied: List<ToolCall>,
         val rejected: List<Rejected>,
+        val receipts: List<ToolExecutionReceipt>,
         val look: LookSpec,
         val requiresRecapture: Boolean,
         val predictiveRetargeted: Boolean = false
@@ -28,15 +29,41 @@ class ToolExecutor(private val camera: CameraEngine, private val validator: Tool
         val validated = validator.validate(calls, effectiveCaps)
         val applied = mutableListOf<ToolCall>()
         val rejected = validated.rejected.mapTo(mutableListOf()) { Rejected(it.call, it.reason) }
+        val receipts = validated.rejected.mapTo(mutableListOf()) {
+            ToolExecutionReceipt(it.call, status = ToolExecutionStatus.REJECTED, reason = it.reason)
+        }
         var look = currentLook
-        val ordered = validated.accepted.sortedBy { if (it.id == ToolIds.EXTENSION) 0 else if (it.id in ToolIds.LOOK_IDS) 2 else 1 }
+
+        // Sierra/Gemini is the photographic authority. If it asks for any direct camera mutation,
+        // leave an active OEM extension first instead of rejecting the request.
+        val wantsDirectCameraControl = validated.accepted.any { it.id in ToolIds.CAMERA_IDS && it.id != ToolIds.EXTENSION }
+        if (wantsDirectCameraControl && camera.snapshot().extension != DirectorExtension.NONE) {
+            runCatching { camera.aiSetExtension(DirectorExtension.NONE) }
+                .onFailure { error ->
+                    validated.accepted.filter { it.id in ToolIds.CAMERA_IDS && it.id != ToolIds.EXTENSION }.forEach { call ->
+                        rejected += Rejected(call, "extension_release_failed:${error.message}")
+                        receipts += ToolExecutionReceipt(call, resolved = call, status = ToolExecutionStatus.FAILED,
+                            reason = "Could not leave OEM extension: ${error.message ?: "unknown"}")
+                    }
+                }
+        }
+
+        val failedForExtensionRelease = rejected.map { it.call }.toSet()
+        val ordered = validated.accepted
+            .filterNot { it in failedForExtensionRelease }
+            .sortedBy { if (it.id == ToolIds.EXTENSION) 0 else if (it.id in ToolIds.LOOK_IDS) 2 else 1 }
+
         for (call in ordered) {
+            val requested = calls.firstOrNull { it.id == call.id } ?: call
             runCatching {
                 when (call.id) {
                     ToolIds.FOCUS -> camera.aiFocusNormalized(call.x!!.toFloat(), call.y!!.toFloat())
                     ToolIds.ZOOM -> camera.aiSetZoom(call.value!!.toFloat())
                     ToolIds.EXPOSURE_EV -> camera.aiSetExposureEv(call.value!!.toFloat())
-                    ToolIds.TORCH -> camera.aiSetTorch(call.value!! >= 0.5)
+                    ToolIds.TORCH -> {
+                        if (call.value!! >= 0.5) camera.aiSetFlash(StillFlashMode.OFF)
+                        camera.aiSetTorch(call.value >= 0.5)
+                    }
                     ToolIds.FLASH -> {
                         val mode = checkNotNull(StillFlashMode.fromWire(call.stringValue))
                         if (mode != StillFlashMode.OFF) camera.aiSetTorch(false)
@@ -59,12 +86,18 @@ class ToolExecutor(private val camera: CameraEngine, private val validator: Tool
                     ToolIds.LOOK_NIGHT_NEON -> look = LookSpec(Look.NIGHT_NEON, call.value?.toFloat() ?: .54f)
                     else -> error("Unknown tool ${call.id}")
                 }
-            }.onSuccess { applied += call }.onFailure { rejected += Rejected(call, it.message ?: "execution_failed") }
+            }.onSuccess {
+                applied += call
+                val actual = actualStateFor(call)
+                val status = if (requested != call) ToolExecutionStatus.CLAMPED else ToolExecutionStatus.APPLIED
+                receipts += ToolExecutionReceipt(requested, resolved = call, actual = actual, status = status)
+            }.onFailure { error ->
+                rejected += Rejected(call, error.message ?: "execution_failed")
+                receipts += ToolExecutionReceipt(requested, resolved = call, status = ToolExecutionStatus.FAILED,
+                    reason = error.message ?: "execution_failed")
+            }
         }
 
-        // System-owned predictive 3A runs only when the plan did not explicitly choose a focus point.
-        // CameraX's existing aiFocusNormalized action meters AF+AE+AWB together, so the orchestrator's
-        // normal requiresRecapture path will wait for convergence and verify the result afterward.
         val explicitFocusApplied = applied.any { it.id == ToolIds.FOCUS }
         val extensionActive = camera.snapshot().extension != DirectorExtension.NONE
         val predictiveRetargeted = if (!explicitFocusApplied && !extensionActive && effectiveCaps.focusMeteringSupported) {
@@ -72,16 +105,31 @@ class ToolExecutor(private val camera: CameraEngine, private val validator: Tool
             val directive = track?.let(PredictiveSubjectPolicy::evaluate)
             if (directive != null && directive.shouldRetargetThreeA) {
                 runCatching {
-                    camera.aiFocusNormalized(
-                        directive.autofocusPoint.x.toFloat(),
-                        directive.autofocusPoint.y.toFloat()
-                    )
+                    camera.aiFocusNormalized(directive.autofocusPoint.x.toFloat(), directive.autofocusPoint.y.toFloat())
                 }.isSuccess
             } else false
         } else false
 
         val requiresRecapture = predictiveRetargeted || applied.any { it.id in ToolIds.CAMERA_IDS }
-        Result(applied, rejected, look, requiresRecapture, predictiveRetargeted)
+        Result(applied, rejected, receipts, look, requiresRecapture, predictiveRetargeted)
+    }
+
+    private fun actualStateFor(call: ToolCall): String? {
+        val state = camera.snapshot()
+        return when (call.id) {
+            ToolIds.FOCUS -> "metering accepted"
+            ToolIds.ZOOM -> "${"%.2f".format(java.util.Locale.US, state.zoomRatio)}×"
+            ToolIds.EXPOSURE_EV -> {
+                val caps = camera.capabilities()
+                val ev = state.exposureCompensationIndex * caps.exposureStepEv
+                "${"%+.2f".format(java.util.Locale.US, ev)} EV"
+            }
+            ToolIds.TORCH -> if (state.torchEnabled) "on" else "off"
+            ToolIds.FLASH -> state.flashMode.wireName
+            ToolIds.EXTENSION -> state.extension.wireName
+            in ToolIds.LOOK_IDS -> ToolNames.value(call)
+            else -> null
+        }
     }
 
     suspend fun restoreUserState() = mutationMutex.withLock { camera.restoreUserState() }
