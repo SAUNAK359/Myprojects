@@ -70,10 +70,6 @@ data class PlanOutput(
     @SerialName("planner") val planner: String = "sierra_ai"
 )
 
-/**
- * Gemini call #2. It may either accept the converged scene or issue exactly one bounded correction.
- * It cannot author a second photographic concept and it cannot request a further Gemini round.
- */
 @Serializable
 data class PreShutterValidationOutput(
     @SerialName("accept") val accept: Boolean,
@@ -117,6 +113,10 @@ data class DirectorUiState(
     val error: String? = null,
     val camera: CameraUiState = CameraUiState(),
     val lastSavedUri: String? = null,
+    val comparisonReferencePath: String? = null,
+    val showCompletion: Boolean = false,
+    val showTimeline: Boolean = false,
+    val timeline: List<PipelineEvent> = emptyList(),
     val recipeCount: Int = 0,
     val showSettings: Boolean = false,
     val showTools: Boolean = false,
