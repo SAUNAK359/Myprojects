@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Build
 import com.saunak.director.camera.CameraSnapshot
 import com.saunak.director.camera.CapabilityRegistry
+import com.saunak.director.camera.DirectorExtension
 import com.saunak.director.tools.ToolCatalog
 import org.json.JSONArray
 import org.json.JSONObject
@@ -52,7 +53,6 @@ class DeviceConfigSkill(private val context: Context) {
             appendLine("## Hard rules")
             appendLine("- Never output unsupported tool IDs.")
             appendLine("- Never exceed any min/max range above.")
-            appendLine("- Only the Active Director camera session controls are directly executable in the next payload.")
             appendLine("- Camera extension mode is mutually exclusive with direct focus/zoom/exposure/torch/flash mutations in one recipe.")
             appendLine("- Prefer small changes over extreme values.")
             appendLine("- Preserve natural skin, highlight detail and subject sharpness unless the scene intent strongly requires otherwise.")
@@ -62,11 +62,7 @@ class DeviceConfigSkill(private val context: Context) {
         return text
     }
 
-    /**
-     * Full capability foundation sent as its own Gemini interaction. It intentionally excludes
-     * volatile per-frame camera state so its digest changes only when the camera/device contract
-     * changes. Normal image requests reference the stored foundation interaction.
-     */
+    /** Full capability/tool foundation sent separately from image planning. */
     fun foundationProfile(capabilities: CapabilityRegistry): DeviceFoundationProfile {
         val inventory = inventoryCache ?: scanner.scan().also { inventoryCache = it }
         val payload = buildString {
@@ -89,6 +85,9 @@ class DeviceConfigSkill(private val context: Context) {
             appendLine("opticalStabilizationModes=${capabilities.opticalStabilizationModes.joinToString()}")
             appendLine("videoStabilizationModes=${capabilities.videoStabilizationModes.joinToString()}")
             appendLine("allowedToolIds=${capabilities.allowedToolIds.sorted().joinToString()}")
+            appendLine()
+            appendLine("## Complete Sierra camera/look tool schema and device-specific ranges")
+            appendLine(ToolCatalog.contract(capabilities, DirectorExtension.NONE))
             appendLine()
             appendLine("AUTHORITY CONTRACT")
             appendLine("- Sierra/Gemini is the photographic authority.")
