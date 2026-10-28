@@ -11,6 +11,6 @@
   "read_timeout_ms": 5200,
   "write_timeout_ms": 3200,
   "call_timeout_ms": 6200,
-  "max_output_tokens": 1150,
+  "max_output_tokens": 2600,
   "thinking_level": "low"
 }

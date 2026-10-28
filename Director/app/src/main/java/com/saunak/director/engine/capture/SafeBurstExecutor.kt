@@ -1,6 +1,7 @@
 package com.saunak.director.engine.capture
 
 import com.saunak.director.camera.CameraEngine
+import com.saunak.director.camera.CapturedStillTelemetry
 import com.saunak.director.camera.StillFlashMode
 import com.saunak.director.processing.PhotoQuality
 import com.saunak.director.processing.TechnicalQuality
@@ -8,12 +9,7 @@ import com.saunak.director.storage.PhotoRepository
 import java.io.File
 import kotlin.math.max
 
-/**
- * Production-safe multi-frame executor built entirely on the certified CameraX JPEG path.
- * The first successfully captured still is written to the recoverable no-backup pending directory;
- * later burst frames are disposable cache. Flash AUTO/ON is intentionally single-shot: repeated
- * flash frames are slow, uncomfortable, thermally expensive and highly vulnerable to subject motion.
- */
+/** Production-safe multi-frame executor on the certified CameraX JPEG path. */
 class SafeBurstExecutor(
     private val camera: CameraEngine,
     private val storage: PhotoRepository
@@ -23,7 +19,8 @@ class SafeBurstExecutor(
         val quality: TechnicalQuality,
         val score: Double,
         val index: Int,
-        val protectedReference: Boolean = false
+        val protectedReference: Boolean = false,
+        val telemetry: CapturedStillTelemetry
     )
 
     data class Result(
@@ -38,7 +35,7 @@ class SafeBurstExecutor(
     ) {
         init {
             require(frames.isNotEmpty())
-            require(frames.first().protectedReference) { "First burst frame must be the recoverable reference" }
+            require(frames.first().protectedReference)
             require(selected in frames)
             require(requestedCount >= 1)
             require(executedCount == frames.size)
@@ -46,34 +43,22 @@ class SafeBurstExecutor(
             require(rejectedCount in 0..executedCount)
             require(allCatastrophic == frames.all { it.quality.catastrophic })
         }
-
         val protectedReference: CapturedFrame get() = frames.first()
     }
 
-    suspend fun execute(
-        sessionId: Long,
-        program: CaptureProgram?,
-        maxFrames: Int = DEFAULT_MAX_FRAMES
-    ): Result {
+    suspend fun execute(sessionId: Long, program: CaptureProgram?, maxFrames: Int = DEFAULT_MAX_FRAMES): Result {
         require(maxFrames in 1..MAX_ALLOWED_FRAMES)
         val requested = program?.frames?.size?.coerceAtLeast(1) ?: 1
         val flashArmed = camera.snapshot().flashMode != StillFlashMode.OFF
         val count = if (flashArmed) 1 else requested.coerceAtMost(maxFrames)
-        require(storage.hasWorkingSpace(requiredWorkingBytes(count))) {
-            "Insufficient working storage for Sierra burst"
-        }
-
+        require(storage.hasWorkingSpace(requiredWorkingBytes(count))) { "Insufficient working storage for Sierra burst" }
         val captured = ArrayList<CapturedFrame>(count)
         var truncated = false
 
         for (index in 0 until count) {
             val protectedReference = index == 0
-            val file = if (protectedReference) {
-                storage.newPendingReference(sessionId)
-            } else {
-                storage.newAttempt(sessionId, 100 + index)
-            }
-
+            val file = if (protectedReference) storage.newPendingReference(sessionId) else storage.newAttempt(sessionId, 100 + index)
+            val shutterState = camera.snapshot()
             val capture = runCatching { camera.capturePrivate(file) }
             if (capture.isFailure) {
                 runCatching { file.delete() }
@@ -81,83 +66,50 @@ class SafeBurstExecutor(
                 truncated = true
                 break
             }
-
+            val telemetry = CapturedStillTelemetry.fromJpeg(
+                file = file,
+                captureId = "$sessionId:jpeg:$index",
+                shutterState = shutterState,
+                postCaptureState = camera.snapshot(),
+                sensor = camera.sensorTelemetry()
+            )
             val quality = runCatching {
                 val preview = storage.decodeOriented(file, QUALITY_DECODE_MAX_DIMENSION)
-                try {
-                    PhotoQuality.analyze(preview)
-                } finally {
-                    if (!preview.isRecycled) preview.recycle()
-                }
+                try { PhotoQuality.analyze(preview) } finally { if (!preview.isRecycled) preview.recycle() }
             }.getOrElse { rejectedAnalysisQuality() }
-
-            captured += CapturedFrame(
-                file = file,
-                quality = quality,
-                score = frameScore(quality, index, count),
-                index = index,
-                protectedReference = protectedReference
-            )
+            captured += CapturedFrame(file, quality, frameScore(quality, index, count), index, protectedReference, telemetry)
         }
 
         val valid = captured.filterNot { it.quality.catastrophic }
         val allCatastrophic = valid.isEmpty()
         val pool = if (valid.isNotEmpty()) valid else captured
         val center = (captured.size - 1) / 2.0
-        val selected = pool.maxWithOrNull(
-            compareBy<CapturedFrame> { it.score }
-                .thenBy { -kotlin.math.abs(it.index - center) }
-                .thenBy { -it.index }
-        ) ?: error("Sierra burst produced no frames")
-
+        val selected = pool.maxWithOrNull(compareBy<CapturedFrame> { it.score }.thenBy { -kotlin.math.abs(it.index - center) }.thenBy { -it.index })
+            ?: error("Sierra burst produced no frames")
         return Result(
-            selected = selected,
-            frames = captured,
-            rejectedCount = captured.count { it.quality.catastrophic },
-            requestedCount = requested,
-            executedCount = captured.size,
-            truncatedByFailure = truncated,
-            allCatastrophic = allCatastrophic,
+            selected = selected, frames = captured, rejectedCount = captured.count { it.quality.catastrophic },
+            requestedCount = requested, executedCount = captured.size, truncatedByFailure = truncated, allCatastrophic = allCatastrophic,
             rationale = when {
-                allCatastrophic -> "all captured frames failed the technical quality gate; preserve an untouched fallback"
-                flashArmed -> "flash capture constrained to one certified CameraX evidence frame"
-                truncated -> "burst stopped after a later capture failure; best valid earlier evidence retained"
+                allCatastrophic -> "all captured frames failed technical quality gate; preserve untouched fallback"
+                flashArmed -> "flash constrained to one certified CameraX evidence frame"
+                truncated -> "burst stopped after later capture failure; best valid earlier evidence retained"
                 captured.size == 1 -> "single certified CameraX evidence frame"
                 else -> "best-evidence selection across ${captured.size} serialized CameraX frames"
             }
         )
     }
 
-    private fun rejectedAnalysisQuality(): TechnicalQuality = TechnicalQuality(
-        meanLuma = 0.0,
-        lumaStdDev = 0.0,
-        darkClipFraction = 0.0,
-        brightClipFraction = 0.0,
-        edgeEnergy = 0.0,
-        catastrophic = true,
-        heuristicScore = 0.0
-    )
-
+    private fun rejectedAnalysisQuality(): TechnicalQuality = TechnicalQuality(0.0,0.0,0.0,0.0,0.0,true,0.0)
     private fun frameScore(quality: TechnicalQuality, index: Int, total: Int): Double {
         if (quality.catastrophic) return 0.0
         val clippingPenalty = (quality.darkClipFraction + quality.brightClipFraction).coerceIn(0.0, 1.0)
         val detail = (quality.edgeEnergy / 14.0).coerceIn(0.0, 1.0)
         val dynamic = (quality.lumaStdDev / 50.0).coerceIn(0.0, 1.0)
         val center = (total - 1) / 2.0
-        val temporalCenterBias = if (total <= 1) 1.0 else {
-            (1.0 - kotlin.math.abs(index - center) / max(1.0, center)).coerceIn(0.0, 1.0)
-        }
-        return (
-            0.46 * quality.heuristicScore +
-                0.24 * detail +
-                0.14 * dynamic +
-                0.06 * temporalCenterBias +
-                0.10 * (1.0 - clippingPenalty)
-            ).coerceIn(0.0, 1.0)
+        val temporalCenterBias = if (total <= 1) 1.0 else (1.0 - kotlin.math.abs(index - center) / max(1.0, center)).coerceIn(0.0, 1.0)
+        return (0.46 * quality.heuristicScore + 0.24 * detail + 0.14 * dynamic + 0.06 * temporalCenterBias + 0.10 * (1.0 - clippingPenalty)).coerceIn(0.0, 1.0)
     }
-
-    private fun requiredWorkingBytes(frameCount: Int): Long =
-        STORAGE_RESERVE_BYTES + frameCount.toLong() * ESTIMATED_MAX_JPEG_BYTES
+    private fun requiredWorkingBytes(frameCount: Int): Long = STORAGE_RESERVE_BYTES + frameCount.toLong() * ESTIMATED_MAX_JPEG_BYTES
 
     companion object {
         private const val QUALITY_DECODE_MAX_DIMENSION = 768

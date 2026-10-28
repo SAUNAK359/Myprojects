@@ -6,19 +6,10 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
 @Serializable
-data class ToolCall(
-    @SerialName("id") val id: Int,
-    @SerialName("v") val value: Double? = null,
-    @SerialName("x") val x: Double? = null,
-    @SerialName("y") val y: Double? = null,
-    @SerialName("s") val stringValue: String? = null
-)
+data class ToolCall(@SerialName("id") val id: Int, @SerialName("v") val value: Double? = null, @SerialName("x") val x: Double? = null, @SerialName("y") val y: Double? = null, @SerialName("s") val stringValue: String? = null)
 
 @Serializable
-data class ThemeBlendComponent(
-    @SerialName("theme_id") val themeId: String,
-    @SerialName("weight") val weight: Double
-)
+data class ThemeBlendComponent(@SerialName("theme_id") val themeId: String, @SerialName("weight") val weight: Double)
 
 @Serializable
 data class PhotographicDirection(
@@ -87,14 +78,11 @@ data class EvaluationOutput(
     @SerialName("delta") val deltaCalls: List<ToolCall> = emptyList(),
     @SerialName("intent_match") val intentMatch: Double = score,
     @SerialName("naturalness") val naturalness: Double = score,
-    @SerialName("render_adjustment") val renderAdjustment: FinalRenderAdjustment = FinalRenderAdjustment()
+    @SerialName("render_adjustment") val renderAdjustment: FinalRenderAdjustment = FinalRenderAdjustment(),
+    @SerialName("render_spec") val renderSpec: SierraRenderSpec? = null
 )
 
-enum class DirectorStage {
-    CAMERA_ONLY, READY, CAPTURING, ANALYZING, PLANNING, APPLYING, RECAPTURING,
-    CHECKING, CORRECTING, PREPARED, FINAL_CAPTURING, SAVING, ERROR, OBSERVING
-}
-
+enum class DirectorStage { CAMERA_ONLY, READY, CAPTURING, ANALYZING, PLANNING, APPLYING, RECAPTURING, CHECKING, CORRECTING, PREPARED, FINAL_CAPTURING, SAVING, ERROR, OBSERVING }
 enum class SierraMode { AI, BETA }
 
 data class DirectorUiState(
@@ -133,5 +121,6 @@ data class DirectorUiState(
     val aiThemeStrength: Double? = null,
     val aiFallbackReason: String? = null,
     val finalReviewStatus: String? = null,
+    val aiStreamPhase: String? = null,
     val executionReceipts: List<ToolExecutionReceipt> = emptyList()
 )
