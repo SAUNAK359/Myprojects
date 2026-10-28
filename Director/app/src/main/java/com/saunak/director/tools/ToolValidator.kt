@@ -4,6 +4,7 @@ import com.saunak.director.camera.CapabilityRegistry
 import com.saunak.director.camera.DirectorExtension
 import com.saunak.director.camera.StillFlashMode
 import com.saunak.director.director.ToolCall
+import kotlin.math.roundToInt
 
 /**
  * Physical/API feasibility validator. It normalizes only to real device bounds; it does not make
@@ -52,7 +53,12 @@ class ToolValidator {
                 ToolIds.ZOOM -> if (!finite(call.value)) null
                     else call.copy(value = call.value!!.coerceIn(caps.minZoom.toDouble(), caps.maxZoom.toDouble()))
                 ToolIds.EXPOSURE_EV -> if (!finite(call.value) || caps.exposureStepEv <= 0f) null
-                    else call.copy(value = call.value!!.coerceIn(caps.minExposureEv.toDouble(), caps.maxExposureEv.toDouble()))
+                    else {
+                        val step = caps.exposureStepEv.toDouble()
+                        val desired = call.value!!.coerceIn(caps.minExposureEv.toDouble(), caps.maxExposureEv.toDouble())
+                        val index = (desired / step).roundToInt().coerceIn(caps.exposureMinIndex, caps.exposureMaxIndex)
+                        call.copy(value = index * step)
+                    }
                 ToolIds.TORCH -> if (!finite(call.value) || !caps.torchSupported) null
                     else call.copy(value = if (call.value!! >= 0.5) 1.0 else 0.0)
                 ToolIds.FLASH -> if (!caps.hasFlash) null
