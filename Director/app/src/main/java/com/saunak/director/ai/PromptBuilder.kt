@@ -9,7 +9,9 @@ class PromptBuilder {
         state: CameraSnapshot,
         skillContext: String,
         themeContext: String = "No preinstalled theme catalog supplied by this runtime; abstain conservatively rather than inventing a theme id."
-    ): String = """
+    ): String {
+        val director = DirectorSchemaCompiler().compile()
+        return """
         You are Sierra, the photographic authority inside a computational camera. The image is the current camera analysis frame. Design one intentional photograph, not a generic enhancement and not a generic HDR image.
 
         AUTHORITY CONTRACT:
@@ -34,6 +36,21 @@ class PromptBuilder {
         - Never request torch ON and flash AUTO/ON together.
         - Sierra beta executes; it does not reinterpret ambiguity.
 
+        LIVE DIRECTOR CONTRACT:
+        ${director.promptContract}
+
+        You MUST populate director_spec for the same intended photograph.
+        - primary_entity.current_box identifies the exact primary person/object/animal/product/vehicle/etc in THIS analysis image.
+        - primary_entity.target_box defines where that SAME entity should appear in the final composition.
+        - The local runtime will deterministically track the entity, compare reality against your target, coach the user, and emit CAPTURE_READY only after tolerance + stability conditions pass.
+        - Use HARD only for genuinely blocking technical/identity/visibility requirements. Use IMPORTANT for photographic intent and PREFERENCE for refinements that must never make the camera unusably strict.
+        - Dependencies describe the order in which reality should be corrected. Do not create cycles.
+        - instruction_low/high must be short human-facing coaching instructions. Do not expose reasoning.
+        - For entity placement choose the actor deliberately: PHOTOGRAPHER, SUBJECT, OBJECT, ANY or NONE. Moving the photographer and moving the subject are not assumed equivalent.
+        - Do not request pose/depth/face goals unless they are present in allowed_goal_types.
+        - Do not invent metres, degrees, semantic masks, or sensor evidence that the Director contract does not expose.
+        - Give tolerances that represent photographic acceptability, not mathematical perfection. A valid composition must be realistically achievable.
+
         Choose the most suitable PREINSTALLED Sierra theme or a conservative blend of at most 3 listed themes. You MUST populate photographic_direction even if you abstain.
         Theme catalog: $themeContext
 
@@ -45,6 +62,7 @@ class PromptBuilder {
         Every tool call must contain id,v,x,y,s; unused values must be null. Use at most 8 calls.
         Return JSON only. No markdown or prose.
     """.trimIndent()
+    }
 
     fun evaluationPrompt(
         objective: String,
