@@ -1,6 +1,7 @@
 package com.saunak.director.director
 
 import com.saunak.director.camera.CameraUiState
+import com.saunak.director.tools.ToolExecutionReceipt
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
@@ -131,5 +132,6 @@ data class DirectorUiState(
     val aiTheme: String? = null,
     val aiThemeStrength: Double? = null,
     val aiFallbackReason: String? = null,
-    val finalReviewStatus: String? = null
+    val finalReviewStatus: String? = null,
+    val executionReceipts: List<ToolExecutionReceipt> = emptyList()
 )
