@@ -5,6 +5,7 @@ import com.saunak.director.camera.CameraSnapshot
 import com.saunak.director.camera.CapabilityRegistry
 import com.saunak.director.director.EvaluationOutput
 import com.saunak.director.director.PlanOutput
+import com.saunak.director.director.live.SierraDirectorSpec
 
 data class VlmDiagnostics(
     val provider: String,
@@ -31,6 +32,7 @@ interface VlmRuntime {
     fun waitForSemanticPlan(): Boolean = false
     fun supportsFinalReview(): Boolean = false
     fun diagnostics(): VlmDiagnostics = VlmDiagnostics(provider = "unknown")
+    fun lastDirectorSpec(): SierraDirectorSpec? = null
     fun unload()
     fun close()
 }

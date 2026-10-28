@@ -2,11 +2,14 @@ package com.saunak.director.director
 
 import android.graphics.Bitmap
 import android.net.Uri
+import com.saunak.director.ai.DirectorSchemaCompiler
 import com.saunak.director.ai.VlmRuntime
 import com.saunak.director.camera.CameraEngine
 import com.saunak.director.camera.CapturedStillTelemetry
 import com.saunak.director.camera.DirectorExtension
 import com.saunak.director.camera.SierraCaptureBridge
+import com.saunak.director.director.live.LiveDirectorSessionRunner
+import com.saunak.director.director.live.LiveDirectorValidator
 import com.saunak.director.engine.capture.CaptureProgram
 import com.saunak.director.engine.capture.SafeBurstExecutor
 import com.saunak.director.engine.cognition.CognitionDecision
@@ -50,6 +53,7 @@ class DirectorOrchestrator(
     private val captureBridge = SierraCaptureBridge(camera)
     private val safeBurstExecutor = SafeBurstExecutor(camera, storage)
     private val prifExecutor = PrifLiveCaptureExecutor(camera)
+    private val liveDirector = LiveDirectorSessionRunner(camera, perception)
 
     private data class ApprovedState(
         val plan: PlanOutput,
@@ -65,6 +69,7 @@ class DirectorOrchestrator(
     @Volatile private var cloudEnabled: Boolean = true
     @Volatile private var aspectRatioOverride: String? = null
     @Volatile private var keepOriginal: Boolean = false
+    @Volatile private var directorSessionActive: Boolean = false
     @Volatile private var lastUiState: DirectorUiState = DirectorUiState()
 
     init {
@@ -76,7 +81,7 @@ class DirectorOrchestrator(
         }
     }
 
-    fun isPrepared(): Boolean = approved != null
+    fun isPrepared(): Boolean = approved != null && !directorSessionActive
     fun setCloudEnabled(enabled: Boolean) { cloudEnabled = enabled; if (!enabled) vlm.cancel() }
     fun setAspectRatioOverride(value: String?) { aspectRatioOverride = value?.takeIf(SierraCropPolicy::isSupported); approved = null }
     fun setKeepOriginal(enabled: Boolean) { keepOriginal = enabled }
@@ -84,12 +89,16 @@ class DirectorOrchestrator(
 
     fun cancelForUserAction(): Long {
         approved = null
+        directorSessionActive = false
+        val reset = liveDirector.stop()
+        lastUiState = lastUiState.copy(liveDirector = reset)
         val next = generation.incrementAndGet()
         vlm.cancel()
         return next
     }
 
     suspend fun onPrimaryPressed(): Uri? {
+        if (directorSessionActive) return null
         if (approved != null) return captureFinal()
         val completed = if (cloudEnabled && vlm.isReady() && vlm.waitForSemanticPlan()) {
             prepareShot(); true
@@ -233,13 +242,60 @@ class DirectorOrchestrator(
             val captureProgram = if (camera.snapshot().extension == DirectorExtension.NONE) {
                 withTimeoutOrNull(CAPTURE_PLAN_BUDGET_MS) { captureBridge.plan(finalObservedQuality, sceneSignals, thermalPolicy).getOrNull() }
             } else null
-            approve(session, appliedPlan, score, mode, captureProgram, aiFallbackReason, execution.receipts)
+
+            if (mode == SierraMode.AI && appliedPlan.directorSpec != null) {
+                val validated = runCatching {
+                    LiveDirectorValidator.validate(appliedPlan.directorSpec, DirectorSchemaCompiler().compile())
+                }
+                if (validated.isSuccess) {
+                    directorSessionActive = true
+                    val guidance = try {
+                        liveDirector.guideUntilReady(
+                            planningFrame = frame,
+                            spec = validated.getOrThrow(),
+                            thermalPressure = thermalPolicy.thermalPressure,
+                            isCurrent = { isCurrent(session) }
+                        ) { live ->
+                            emit(session, lastUiState.copy(
+                                stage = DirectorStage.CHECKING,
+                                status = live.status,
+                                liveDirector = live,
+                                executionReceipts = execution.receipts
+                            ))
+                        }
+                    } finally {
+                        directorSessionActive = false
+                    }
+                    assertCurrent(session)
+                    if (guidance.ready) {
+                        approve(session, appliedPlan.copy(directorSpec = validated.getOrThrow()), score, mode, captureProgram, aiFallbackReason, execution.receipts)
+                    } else {
+                        val reason = guidance.reason ?: "Live Director unavailable"
+                        liveDirector.stop()
+                        approve(session, appliedPlan.copy(directorSpec = null), score, mode, captureProgram, reason.take(120), execution.receipts)
+                        emit(session, lastUiState.copy(status = "Ready • live guidance unavailable • manual framing", aiFallbackReason = reason.take(120)))
+                    }
+                } else {
+                    val reason = validated.exceptionOrNull()?.message ?: "Invalid Director graph"
+                    liveDirector.stop()
+                    approve(session, appliedPlan.copy(directorSpec = null), score, mode, captureProgram, reason.take(120), execution.receipts)
+                    emit(session, lastUiState.copy(status = "Ready • Director graph rejected safely", aiFallbackReason = reason.take(120)))
+                }
+            } else {
+                approve(session, appliedPlan, score, mode, captureProgram, aiFallbackReason, execution.receipts)
+            }
             return null
         } catch (_: StaleSession) {
+            directorSessionActive = false
+            liveDirector.stop()
             runCatching { tools.restoreUserState() }; return null
         } catch (t: CancellationException) {
+            directorSessionActive = false
+            liveDirector.stop()
             runCatching { tools.restoreUserState() }; throw t
         } catch (t: Throwable) {
+            directorSessionActive = false
+            liveDirector.stop()
             runCatching { tools.restoreUserState() }
             emit(session, lastUiState.copy(
                 stage = DirectorStage.ERROR, aiAvailable = false, status = "Sierra could not prepare this shot", error = t.message,
@@ -355,6 +411,50 @@ class DirectorOrchestrator(
     private suspend fun captureFinal(): Uri? {
         val state = approved ?: return null
         val session = generation.get()
+
+        if (state.plan.directorSpec != null && liveDirector.latest().running) {
+            directorSessionActive = true
+            val fresh = try {
+                liveDirector.reverify(
+                    thermalPressure = thermal.policy().thermalPressure,
+                    isCurrent = { isCurrent(session) }
+                ) { live ->
+                    emit(session, lastUiState.copy(stage = DirectorStage.CHECKING, status = live.status, liveDirector = live))
+                }
+            } finally {
+                directorSessionActive = false
+            }
+            if (!fresh.ready) {
+                assertCurrent(session)
+                directorSessionActive = true
+                val resumed = try {
+                    liveDirector.resumeUntilReady(
+                        thermalPressure = thermal.policy().thermalPressure,
+                        isCurrent = { isCurrent(session) }
+                    ) { live ->
+                        emit(session, lastUiState.copy(stage = DirectorStage.CHECKING, status = live.status, liveDirector = live))
+                    }
+                } finally {
+                    directorSessionActive = false
+                }
+                assertCurrent(session)
+                if (resumed.ready) {
+                    emit(session, lastUiState.copy(stage = DirectorStage.PREPARED, status = "Ready • hold there • press shutter", liveDirector = resumed.state))
+                } else {
+                    approved = null
+                    emit(session, lastUiState.copy(
+                        stage = DirectorStage.READY,
+                        status = "Live Director unavailable • re-prepare the shot",
+                        aiFallbackReason = resumed.reason?.take(120),
+                        liveDirector = liveDirector.stop()
+                    ))
+                }
+                return null
+            }
+        }
+
+        val clearedDirector = liveDirector.stop()
+        directorSessionActive = false
         var burst: SafeBurstExecutor.Result? = null
         var prifSafety: File? = null
         var prifBitmap: Bitmap? = null
@@ -366,7 +466,7 @@ class DirectorOrchestrator(
                 stage = DirectorStage.FINAL_CAPTURING,
                 status = if (plannedFrames > 1) "Capturing Sierra smart burst…" else "Capturing full quality…",
                 lastScore = state.score, camera = camera.uiState(), sierraMode = state.mode,
-                executionReceipts = state.receipts
+                executionReceipts = state.receipts, liveDirector = clearedDirector
             ))
             camera.awaitSettledState(550)
 
@@ -456,6 +556,8 @@ class DirectorOrchestrator(
             uri
         } catch (t: Throwable) {
             approved = null
+            directorSessionActive = false
+            liveDirector.stop()
             val fallbackUri = prifSafety?.takeIf { it.isFile && it.length() > 0L }?.let { runCatching { storage.saveRawJpeg(it) }.getOrNull() }
                 ?: burst?.selected?.file?.takeIf { it.isFile && it.length() > 0L }?.let { runCatching { storage.saveRawJpeg(it) }.getOrNull() }
             runCatching { tools.restoreUserState() }

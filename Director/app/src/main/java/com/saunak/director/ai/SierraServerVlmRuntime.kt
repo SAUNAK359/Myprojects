@@ -9,6 +9,8 @@ import com.saunak.director.camera.CapabilityRegistry
 import com.saunak.director.director.EvaluationOutput
 import com.saunak.director.director.PlanOutput
 import com.saunak.director.director.ToolCall
+import com.saunak.director.director.live.LiveDirectorValidator
+import com.saunak.director.director.live.SierraDirectorSpec
 import com.saunak.director.processing.PhotoQuality
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -41,6 +43,7 @@ class SierraServerVlmRuntime(
 
     @Volatile private var maxImageDimension = 704
     @Volatile private var activeJobId: String? = null
+    @Volatile private var latestDirectorSpec: SierraDirectorSpec? = null
 
     override suspend fun load(modelPath: String, projectorPath: String): Result<Unit> =
         if (isReady()) Result.success(Unit) else Result.failure(IllegalStateException("Add a Gemini API key in Sierra or sign in to Sierra Vision"))
@@ -49,9 +52,10 @@ class SierraServerVlmRuntime(
         if (geminiKeyStore.isConfigured()) directGemini.syncDeviceFoundation(profile) else Result.success(Unit)
 
     override suspend fun plan(image: Bitmap, capabilities: CapabilityRegistry, camera: CameraSnapshot, skillContext: String): Result<PlanOutput> {
+        latestDirectorSpec = null
         if (geminiKeyStore.isConfigured()) {
             directGemini.setMaxImageDimension(maxImageDimension)
-            return directGemini.plan(image, capabilities, camera, skillContext)
+            return directGemini.plan(image, capabilities, camera, skillContext).onSuccess { latestDirectorSpec = it.directorSpec }
         }
         if (!server.configured || !server.authenticated) return Result.failure(IllegalStateException("Sierra AI requires a Gemini API key or signed-in Sierra Server session"))
         return try {
@@ -64,9 +68,18 @@ class SierraServerVlmRuntime(
                 skillContext = skillContext, idempotencyKey = UUID.randomUUID().toString()
             ).getOrThrow()
             activeJobId = created.id
-            Result.success(VlmContractValidator.plan(toPlanOutput(awaitReady(created))))
+            val plan = VlmContractValidator.plan(toPlanOutput(awaitReady(created)))
+            val serverDirector = requireNotNull(plan.directorSpec) {
+                "Sierra Server omitted capability-aware Director spec"
+            }
+            val director = LiveDirectorValidator.validate(serverDirector, DirectorSchemaCompiler().compile())
+            val validated = plan.copy(directorSpec = director)
+            latestDirectorSpec = director
+            Result.success(validated)
         } catch (t: Throwable) {
+            activeJobId?.let { id -> scope.launch { server.cancel(id) } }
             activeJobId = null
+            latestDirectorSpec = null
             Result.failure(t)
         }
     }
@@ -110,6 +123,7 @@ class SierraServerVlmRuntime(
 
     override fun cancelCloudJob() {
         directGemini.cancel()
+        latestDirectorSpec = null
         val jobId = activeJobId ?: return
         activeJobId = null
         scope.launch { server.cancel(jobId) }
@@ -122,9 +136,10 @@ class SierraServerVlmRuntime(
     override fun setStreamProgressListener(listener: ((VlmStreamProgress) -> Unit)?) { directGemini.setStreamProgressListener(listener) }
     override fun cancel() = cancelCloudJob()
     override fun isReady(): Boolean = geminiKeyStore.isConfigured() || (server.configured && server.authenticated)
-    override fun waitForSemanticPlan(): Boolean = geminiKeyStore.isConfigured()
+    override fun waitForSemanticPlan(): Boolean = true
     override fun supportsFinalReview(): Boolean = geminiKeyStore.isConfigured()
     override fun diagnostics(): VlmDiagnostics = if (geminiKeyStore.isConfigured()) directGemini.diagnostics() else VlmDiagnostics("sierra_server")
+    override fun lastDirectorSpec(): SierraDirectorSpec? = if (geminiKeyStore.isConfigured()) directGemini.lastDirectorSpec() else latestDirectorSpec
     override fun unload() = cancelCloudJob()
     override fun close() { cancelCloudJob(); directGemini.close(); scope.cancel() }
 
@@ -151,6 +166,9 @@ class SierraServerVlmRuntime(
     private fun buildCameraContextJson(capabilities: CapabilityRegistry, camera: CameraSnapshot): String = JSONObject().apply {
         put("snapshot", camera.compactDescription()); put("lens_facing", capabilities.lensFacing)
         put("zoom", camera.zoomRatio); put("exposure_index", camera.exposureCompensationIndex); put("extension", camera.extension.wireName)
+        val director = DirectorSchemaCompiler().compile()
+        put("director_schema_version", director.version); put("director_schema_hash", director.hash)
+        put("director_goal_types", director.allowedGoalTypes.sorted().joinToString(","))
     }.toString()
 
     private suspend fun awaitReady(created: SierraJobDto): SierraJobDto {
@@ -174,7 +192,8 @@ class SierraServerVlmRuntime(
             referenceScore = dto.reference_score, referenceAccept = dto.reference_accept,
             toolCalls = dto.calls.map { ToolCall(id = it.id, value = it.value, x = it.x, y = it.y, stringValue = it.stringValue) },
             recapture = dto.recapture, aspectRatio = dto.aspect_ratio,
-            cropCenterX = dto.crop_center_x, cropCenterY = dto.crop_center_y, planner = "sierra_ai_server"
+            cropCenterX = dto.crop_center_x, cropCenterY = dto.crop_center_y,
+            directorSpec = dto.director_spec, planner = "sierra_ai_server"
         )
     }
 
