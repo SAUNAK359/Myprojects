@@ -5,6 +5,7 @@ import com.saunak.director.camera.CameraSnapshot
 import com.saunak.director.camera.CapabilityRegistry
 import com.saunak.director.director.EvaluationOutput
 import com.saunak.director.director.PlanOutput
+import com.saunak.director.director.PreShutterValidationOutput
 import com.saunak.director.director.live.SierraDirectorSpec
 
 data class VlmDiagnostics(
@@ -24,12 +25,21 @@ interface VlmRuntime {
     suspend fun load(modelPath: String, projectorPath: String): Result<Unit>
     suspend fun syncDeviceFoundation(profile: DeviceFoundationProfile): Result<Unit> = Result.success(Unit)
     suspend fun plan(image: Bitmap, capabilities: CapabilityRegistry, camera: CameraSnapshot, skillContext: String): Result<PlanOutput>
+    suspend fun validatePreShutter(
+        image: Bitmap,
+        originalPlan: PlanOutput,
+        camera: CameraSnapshot,
+        validationContext: String,
+        capabilities: CapabilityRegistry
+    ): Result<PreShutterValidationOutput> = Result.failure(UnsupportedOperationException("Pre-shutter validation unavailable"))
+    /** Legacy compatibility only. New Sierra AI flow must not use this after capture. */
     suspend fun evaluate(image: Bitmap, objective: String, attempt: Int, camera: CameraSnapshot, previousIssues: List<String>, evaluationContext: String, capabilities: CapabilityRegistry): Result<EvaluationOutput>
     fun setMaxImageDimension(pixels: Int)
     fun setStreamProgressListener(listener: ((VlmStreamProgress) -> Unit)?) {}
     fun cancel()
     fun isReady(): Boolean
     fun waitForSemanticPlan(): Boolean = false
+    fun supportsPreShutterValidation(): Boolean = false
     fun supportsFinalReview(): Boolean = false
     fun diagnostics(): VlmDiagnostics = VlmDiagnostics(provider = "unknown")
     fun lastDirectorSpec(): SierraDirectorSpec? = null
