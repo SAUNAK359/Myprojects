@@ -66,7 +66,27 @@ data class PlanOutput(
     @SerialName("crop_center_y") val cropCenterY: Double = 0.5,
     @SerialName("photographic_direction") val photographicDirection: PhotographicDirection = PhotographicDirection(),
     @SerialName("director_spec") val directorSpec: SierraDirectorSpec? = null,
+    @SerialName("render_spec") val renderSpec: SierraRenderSpec? = null,
     @SerialName("planner") val planner: String = "sierra_ai"
+)
+
+/**
+ * Gemini call #2. It may either accept the converged scene or issue exactly one bounded correction.
+ * It cannot author a second photographic concept and it cannot request a further Gemini round.
+ */
+@Serializable
+data class PreShutterValidationOutput(
+    @SerialName("accept") val accept: Boolean,
+    @SerialName("intent_match") val intentMatch: Double,
+    @SerialName("composition_match") val compositionMatch: Double,
+    @SerialName("subject_match") val subjectMatch: Double,
+    @SerialName("lighting_match") val lightingMatch: Double,
+    @SerialName("background_match") val backgroundMatch: Double,
+    @SerialName("camera_state_match") val cameraStateMatch: Double,
+    @SerialName("issues") val issues: List<String> = emptyList(),
+    @SerialName("correction_calls") val correctionCalls: List<ToolCall> = emptyList(),
+    @SerialName("corrected_director_spec") val correctedDirectorSpec: SierraDirectorSpec? = null,
+    @SerialName("reason") val reason: String = ""
 )
 
 @Serializable
