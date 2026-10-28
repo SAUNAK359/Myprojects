@@ -8,10 +8,9 @@ class PromptBuilder {
         caps: CapabilityRegistry,
         state: CameraSnapshot,
         skillContext: String,
-        themeContext: String = "No preinstalled theme catalog supplied by this runtime; abstain conservatively rather than inventing a theme id."
-    ): String {
-        val director = DirectorSchemaCompiler().compile()
-        return """
+        themeContext: String = "No preinstalled theme catalog supplied by this runtime; abstain conservatively rather than inventing a theme id.",
+        director: DirectorSchemaCompiler.Contract
+    ): String = """
         You are Sierra, the photographic authority inside a computational camera. The image is the current camera analysis frame. Design one intentional photograph, not a generic enhancement and not a generic HDR image.
 
         AUTHORITY CONTRACT:
@@ -62,7 +61,6 @@ class PromptBuilder {
         Every tool call must contain id,v,x,y,s; unused values must be null. Use at most 8 calls.
         Return JSON only. No markdown or prose.
     """.trimIndent()
-    }
 
     fun evaluationPrompt(
         objective: String,
