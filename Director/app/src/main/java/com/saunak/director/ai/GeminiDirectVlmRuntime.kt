@@ -22,9 +22,12 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * Optional personal-beta semantic supervisor used behind Sierra branding.
- * Transport/model preferences are asset-driven and the model is capability-checked at runtime.
- * Any discovery/network/schema failure is surfaced to the orchestrator, which falls back locally.
+ * Sierra's direct Gemini runtime.
+ *
+ * A full device/camera foundation is sent as a standalone stored Interactions API turn. Planning
+ * and review calls reference that interaction by previous_interaction_id, so the large hardware
+ * payload is not resent with every photograph. The foundation is rebuilt when the profile changes,
+ * gets old, or Gemini reports that the stored interaction is no longer available.
  */
 class GeminiDirectVlmRuntime(
     context: Context,
@@ -37,10 +40,12 @@ class GeminiDirectVlmRuntime(
     private val provider = GeminiProviderConfig.load(appContext)
     private val client = provider.newHttpClient()
     private val modelResolver = GeminiModelResolver(provider, client)
+    private val foundationPrefs = appContext.getSharedPreferences("sierra_device_foundation_v1", Context.MODE_PRIVATE)
 
     @Volatile private var maxImageDimension = 512
     @Volatile private var activeCall: Call? = null
     @Volatile private var lastDiagnostics = VlmDiagnostics("sierra-unresolved")
+    @Volatile private var lastFoundationProfile: DeviceFoundationProfile? = null
 
     override suspend fun load(modelPath: String, projectorPath: String): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
@@ -49,21 +54,99 @@ class GeminiDirectVlmRuntime(
         }.map { Unit }
     }
 
+    override suspend fun syncDeviceFoundation(profile: DeviceFoundationProfile): Result<Unit> = withContext(Dispatchers.IO) {
+        lastFoundationProfile = profile
+        val storedDigest = foundationPrefs.getString(KEY_FOUNDATION_DIGEST, null)
+        val storedId = foundationPrefs.getString(KEY_FOUNDATION_ID, null)
+        val storedAt = foundationPrefs.getLong(KEY_FOUNDATION_AT, 0L)
+        val fresh = storedDigest == profile.digest && !storedId.isNullOrBlank() &&
+            System.currentTimeMillis() - storedAt in 0 until FOUNDATION_REFRESH_MS
+        if (fresh) return@withContext Result.success(Unit)
+        createFoundation(profile)
+    }
+
+    private fun createFoundation(profile: DeviceFoundationProfile): Result<Unit> {
+        val started = android.os.SystemClock.elapsedRealtime()
+        var resolvedModel = "sierra-unresolved"
+        return runCatching {
+            val key = keyStore.read().takeIf(String::isNotBlank) ?: error("Sierra Intelligence API key is not configured")
+            resolvedModel = modelResolver.resolve(key)
+            val prompt = """
+                You are Sierra, the photographic authority inside Sierra Vision.
+                Store and use the following DEVICE FOUNDATION as the hard physical/API boundary for future camera plans.
+                Do not invent capabilities outside it. Sierra beta is the local perception/feasibility/execution layer; it may report physical impossibility but must not creatively overrule Sierra.
+                When an OEM extension conflicts with a direct valid Sierra control, the executor may leave that extension and return to the normal camera session.
+                A future camera plan must contain one unambiguous final state per control and at most one final photographic look.
+
+                ${profile.payload}
+
+                Acknowledge this foundation in one short sentence.
+            """.trimIndent()
+            val body = JSONObject()
+                .put("model", resolvedModel)
+                .put("input", prompt)
+                .put("generation_config", JSONObject()
+                    .put("thinking_level", provider.thinkingLevel)
+                    .put("max_output_tokens", 128))
+                .put("store", true)
+            val request = Request.Builder()
+                .url(provider.interactionsUrl)
+                .header("x-goog-api-key", key)
+                .header("Content-Type", "application/json")
+                .post(body.toString().toRequestBody(JSON_MEDIA))
+                .build()
+            val call = client.newCall(request)
+            activeCall = call
+            try {
+                call.execute().use { response ->
+                    val payload = response.body?.string().orEmpty()
+                    if (!response.isSuccessful) throw IOException(apiError(response.code, payload))
+                    val id = JSONObject(payload).optString("id").takeIf(String::isNotBlank)
+                        ?: throw IOException("Sierra device foundation returned no interaction id")
+                    foundationPrefs.edit()
+                        .putString(KEY_FOUNDATION_ID, id)
+                        .putString(KEY_FOUNDATION_DIGEST, profile.digest)
+                        .putLong(KEY_FOUNDATION_AT, System.currentTimeMillis())
+                        .apply()
+                }
+            } finally {
+                if (activeCall === call) activeCall = null
+            }
+        }.onSuccess {
+            lastDiagnostics = VlmDiagnostics(resolvedModel, android.os.SystemClock.elapsedRealtime() - started, null)
+        }.onFailure {
+            lastDiagnostics = VlmDiagnostics(resolvedModel, android.os.SystemClock.elapsedRealtime() - started, it.message?.take(160))
+        }
+    }
+
     override suspend fun plan(
         image: Bitmap,
         capabilities: CapabilityRegistry,
         camera: CameraSnapshot,
         skillContext: String
-    ): Result<PlanOutput> = request(
-        prompt = promptBuilder.planPrompt(capabilities, camera, skillContext, themeCatalog.compactDescription()),
-        image = image,
-        schema = planSchema(),
-        decode = { raw ->
-            val plan = VlmContractValidator.plan(json.decodeFromString<PlanOutput>(raw))
-            validateThemeReferences(plan)
-            plan
+    ): Result<PlanOutput> {
+        val call = suspend {
+            request(
+                prompt = promptBuilder.planPrompt(capabilities, camera, skillContext, themeCatalog.compactDescription()),
+                image = image,
+                schema = planSchema(),
+                previousInteractionId = currentFoundationId(),
+                decode = { raw ->
+                    val plan = VlmContractValidator.plan(json.decodeFromString<PlanOutput>(raw))
+                    validateThemeReferences(plan)
+                    plan
+                }
+            )
         }
-    )
+        val first = call()
+        if (first.isSuccess || !foundationContextFailure(first.exceptionOrNull())) return first
+
+        clearFoundation()
+        val profile = lastFoundationProfile ?: return first
+        val rebuilt = withContext(Dispatchers.IO) { createFoundation(profile) }
+        if (rebuilt.isFailure) return Result.failure(rebuilt.exceptionOrNull() ?: IllegalStateException("Device foundation rebuild failed"))
+        return call()
+    }
 
     override suspend fun evaluate(
         image: Bitmap,
@@ -77,6 +160,7 @@ class GeminiDirectVlmRuntime(
         prompt = promptBuilder.evaluationPrompt(objective, attempt, camera, previousIssues, evaluationContext, capabilities),
         image = image,
         schema = evaluationSchema(),
+        previousInteractionId = currentFoundationId(),
         decode = { VlmContractValidator.evaluation(json.decodeFromString<EvaluationOutput>(it)) }
     )
 
@@ -95,6 +179,7 @@ class GeminiDirectVlmRuntime(
         prompt: String,
         image: Bitmap,
         schema: JSONObject,
+        previousInteractionId: String?,
         decode: (String) -> T
     ): Result<T> = withContext(Dispatchers.IO) {
         val started = android.os.SystemClock.elapsedRealtime()
@@ -102,7 +187,7 @@ class GeminiDirectVlmRuntime(
         runCatching {
             val key = keyStore.read().takeIf(String::isNotBlank) ?: error("Sierra Intelligence API key is not configured")
             resolvedModel = modelResolver.resolve(key)
-            val body = buildInteractionBody(resolvedModel, prompt, encode(image), schema)
+            val body = buildInteractionBody(resolvedModel, prompt, encode(image), schema, previousInteractionId)
             val request = Request.Builder()
                 .url(provider.interactionsUrl)
                 .header("x-goog-api-key", key)
@@ -116,7 +201,7 @@ class GeminiDirectVlmRuntime(
                     val payload = response.body?.string().orEmpty()
                     if (!response.isSuccessful) {
                         if (response.code == 404 || response.code == 400) modelResolver.invalidate()
-                        throw IOException(apiError(response.code, payload))
+                        throw IOException("http=${response.code};${apiError(response.code, payload)}")
                     }
                     decode(extractInteractionText(payload))
                 }
@@ -130,8 +215,6 @@ class GeminiDirectVlmRuntime(
         }
     }
 
-    // Planning normally uses 384–640 px. Final same-capture comparison is allowed up to 896 px so
-    // each evidence/render half retains enough material, skin and text detail for the critic.
     override fun setMaxImageDimension(pixels: Int) { maxImageDimension = pixels.coerceIn(384, 896) }
     override fun cancel() { activeCall?.cancel(); activeCall = null }
     override fun isReady(): Boolean = keyStore.isConfigured()
@@ -141,7 +224,25 @@ class GeminiDirectVlmRuntime(
     override fun unload() = cancel()
     override fun close() = cancel()
 
-    private fun buildInteractionBody(model: String, prompt: String, image: ByteArray, schema: JSONObject): JSONObject {
+    private fun currentFoundationId(): String? = foundationPrefs.getString(KEY_FOUNDATION_ID, null)?.takeIf(String::isNotBlank)
+
+    private fun clearFoundation() {
+        foundationPrefs.edit().remove(KEY_FOUNDATION_ID).remove(KEY_FOUNDATION_DIGEST).remove(KEY_FOUNDATION_AT).apply()
+    }
+
+    private fun foundationContextFailure(t: Throwable?): Boolean {
+        val message = t?.message?.lowercase().orEmpty()
+        return "previous_interaction" in message || "interaction" in message && ("not found" in message || "expired" in message) ||
+            message.startsWith("http=404")
+    }
+
+    private fun buildInteractionBody(
+        model: String,
+        prompt: String,
+        image: ByteArray,
+        schema: JSONObject,
+        previousInteractionId: String?
+    ): JSONObject {
         val input = JSONArray()
             .put(JSONObject().put("type", "text").put("text", prompt))
             .put(JSONObject()
@@ -152,6 +253,8 @@ class GeminiDirectVlmRuntime(
         return JSONObject()
             .put("model", model)
             .put("input", input)
+            .put("store", true)
+            .apply { previousInteractionId?.let { put("previous_interaction_id", it) } }
             .put("generation_config", JSONObject()
                 .put("thinking_level", provider.thinkingLevel)
                 .put("max_output_tokens", provider.maxOutputTokens))
@@ -222,5 +325,10 @@ class GeminiDirectVlmRuntime(
 
     companion object {
         private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
+        private const val KEY_FOUNDATION_ID = "interaction_id"
+        private const val KEY_FOUNDATION_DIGEST = "profile_digest"
+        private const val KEY_FOUNDATION_AT = "created_at_ms"
+        // Free-tier Interactions may be retained for only one day. Refresh before that boundary.
+        private const val FOUNDATION_REFRESH_MS = 20L * 60L * 60L * 1000L
     }
 }
