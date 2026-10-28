@@ -1,18 +1,16 @@
 package com.saunak.director.ai
 
 import android.os.SystemClock
+import com.saunak.director.director.DirectorStrategy
+import com.saunak.director.director.InterventionPolicy
+import com.saunak.director.director.live.DirectorGoalTypes
 import com.saunak.director.engine.SierraEngine
 import com.saunak.director.engine.models.SierraShippingManifests
-import com.saunak.director.director.live.DirectorGoalTypes
 import java.security.MessageDigest
 import org.json.JSONArray
 import org.json.JSONObject
 
-/**
- * Single capability-aware source of truth for Gemini Director output and local validation.
- * Model presence stays checksum-gated. A short process cache avoids repeatedly hashing large ONNX
- * artifacts on planning/UI paths while still allowing newly provisioned capabilities to appear soon.
- */
+/** Single capability-aware source of truth for Gemini Director output and local validation. */
 class DirectorSchemaCompiler(private val engine: SierraEngine = SierraEngine.get()) {
     data class Contract(
         val version: String,
@@ -46,6 +44,8 @@ class DirectorSchemaCompiler(private val engine: SierraEngine = SierraEngine.get
             DirectorGoalTypes.ENTITY_VISIBILITY,
             DirectorGoalTypes.SUBJECT_LUMINANCE,
             DirectorGoalTypes.LIGHT_BALANCE_X,
+            DirectorGoalTypes.SUBJECT_BACKGROUND_EV,
+            DirectorGoalTypes.BACKGROUND_DISTRACTION,
             DirectorGoalTypes.MOTION_STABILITY,
             DirectorGoalTypes.TECHNICAL_SHARPNESS
         )
@@ -70,13 +70,18 @@ class DirectorSchemaCompiler(private val engine: SierraEngine = SierraEngine.get
             promptContract = buildString {
                 appendLine("SIERRA DIRECTOR CONTRACT $VERSION hash=$hash")
                 appendLine("allowed_goal_types=${goals.sorted().joinToString()}")
+                appendLine("strategies=${DirectorStrategy.entries.joinToString()}")
+                appendLine("intervention_policies=${InterventionPolicy.entries.joinToString()}")
                 appendLine("face_landmarks=$face; pose_landmarks=$pose; relative_depth=$depth; person_mask=$segmentation")
-                appendLine("Gemini defines targets; Sierra beta only measures, compares, coaches and gates readiness.")
+                appendLine("Gemini defines targets and strategy; Sierra beta only measures, compares, coaches and gates readiness.")
                 appendLine("Unknown evidence is never success. Do not emit a goal type absent from allowed_goal_types.")
                 appendLine("Use normalized final-composition coordinates 0..1. Never output screen pixels or metric distance unless a metric sensor capability is explicitly present.")
                 appendLine("Every target must include ideal/acceptable tolerance, confidence floor, priority and stability duration.")
-                appendLine("Primary entity current_box must locate the exact entity in THIS analysis frame; target_box is where that same entity should be in the intended photograph.")
-                appendLine("Use at most $MAX_GOALS goal nodes and at most $MAX_GRAPH_EDGES dependencies/invalidations per node; include only goals that materially affect this photograph.")
+                appendLine("Primary entity current_box must locate the exact entity in THIS frame; target_box is where the same entity should be in the intended photograph.")
+                appendLine("CANDID with OBSERVE/MINIMAL must preserve the moment: no hard/required pose goal and no blocking subject-reposition goal. Prefer photographer movement, framing, timing, exposure and motion safety.")
+                appendLine("BACKGROUND_DISTRACTION is an observable clutter/saliency target; do not imply generative object removal. Sierra coaches physical reframing/repositioning only.")
+                appendLine("SUBJECT_BACKGROUND_EV is measured image-space luminance separation, not a fabricated light meter reading.")
+                appendLine("Use at most $MAX_GOALS goal nodes and at most $MAX_GRAPH_EDGES dependencies/invalidations per node; include only materially useful goals.")
             }.trim()
         )
     }
@@ -125,16 +130,25 @@ class DirectorSchemaCompiler(private val engine: SierraEngine = SierraEngine.get
             )
         )
         return obj(
-            listOf("schema_version","schema_hash","goal_summary","primary_entity","goals","readiness"),
-            mapOf("schema_version" to enum(listOf(version)), "schema_hash" to enum(listOf(hash)), "goal_summary" to string(), "primary_entity" to entity, "goals" to array(goal, MAX_GOALS), "readiness" to readiness)
+            listOf("schema_version","schema_hash","goal_summary","strategy","intervention_policy","primary_entity","goals","readiness"),
+            mapOf(
+                "schema_version" to enum(listOf(version)),
+                "schema_hash" to enum(listOf(hash)),
+                "goal_summary" to string(),
+                "strategy" to enum(DirectorStrategy.entries.map { it.name }),
+                "intervention_policy" to enum(InterventionPolicy.entries.map { it.name }),
+                "primary_entity" to entity,
+                "goals" to array(goal, MAX_GOALS),
+                "readiness" to readiness
+            )
         )
     }
 
     private data class CachedContract(val createdAtMs: Long, val contract: Contract)
 
     companion object {
-        const val VERSION = "director.v1"
-        const val MAX_GOALS = 12
+        const val VERSION = "director.v2"
+        const val MAX_GOALS = 14
         const val MAX_GRAPH_EDGES = 8
         const val MAX_POSE_KEYPOINTS = 17
         private const val CACHE_TTL_MS = 15_000L
