@@ -3,6 +3,7 @@ package com.saunak.director.ai
 import com.saunak.director.camera.CapabilityRegistry
 import com.saunak.director.director.PreShutterValidationOutput
 import com.saunak.director.director.live.LiveDirectorValidator
+import com.saunak.director.tools.ToolIds
 import com.saunak.director.tools.ToolValidator
 
 /** Fail-closed validator for Gemini call #2. */
@@ -18,6 +19,9 @@ object PreShutterValidator {
         )
         require(scores.all(Double::isFinite)) { "Invalid pre-shutter semantic score" }
         require(value.correctionCalls.size <= 8) { "Too many pre-shutter correction calls" }
+        require(value.correctionCalls.all { it.id in ToolIds.CAMERA_IDS }) {
+            "Pre-shutter call #2 may correct physical camera controls only"
+        }
 
         if (value.accept) {
             require(value.correctionCalls.isEmpty()) { "Accepted pre-shutter result cannot request camera corrections" }
