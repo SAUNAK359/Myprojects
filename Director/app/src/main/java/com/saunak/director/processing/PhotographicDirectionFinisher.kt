@@ -11,12 +11,14 @@ import kotlin.math.pow
 import kotlin.math.sqrt
 
 /**
- * Bounded residual finisher for Sierra v10.
+ * Bounded residual finisher for Sierra v11.
  *
- * ANIP already consumes the full PhotographicDirection. This stage must therefore never replay the
- * base direction a second time. It applies only the final-review deltas plus the two theme details
- * that ANIP does not currently carry explicitly (grain/vignette), then rejects the correction if it
- * materially worsens clipping or technical quality.
+ * ANIP already consumes the full PhotographicDirection. This stage therefore applies only the
+ * final-review deltas plus theme details ANIP does not carry explicitly (grain/vignette).
+ *
+ * Memory ownership rule: mutate the ANIP output in-place whenever it is mutable. This avoids a
+ * second full-resolution output bitmap at the hottest point of the finishing pipeline. If a caller
+ * ever supplies an immutable bitmap, one mutable copy is created and returned as the new owner.
  */
 object PhotographicDirectionFinisher {
     fun apply(
@@ -35,7 +37,6 @@ object PhotographicDirectionFinisher {
         val hasReviewDelta = a?.let(::hasMeaningfulDelta) == true
         if (!hasReviewDelta && grainStrength <= 0.001 && vignetteStrength <= 0.001) return source
 
-        val baseline = runCatching { PhotoQuality.analyze(source) }.getOrNull() ?: return source
         val trust = when {
             d == null -> 0.55
             d.abstain -> 0.45
@@ -43,8 +44,6 @@ object PhotographicDirectionFinisher {
         }
         val safe = a ?: FinalRenderAdjustment()
 
-        // These are intentionally much smaller than the contract bounds. The cloud critic proposes
-        // a correction; it does not get to re-grade the photo after ANIP has already rendered it.
         val contrastDelta = ((safe.midtoneContrastDelta * 0.16) +
             (safe.localContrastDelta * 0.12) +
             (safe.themeStrengthDelta * 0.06)).times(trust).coerceIn(-0.075, 0.075)
@@ -54,20 +53,24 @@ object PhotographicDirectionFinisher {
         val saturationScale = (1.0 + safe.colorIntensityDelta * 0.34 * trust).coerceIn(0.95, 1.05)
         val subjectEv = (safe.subjectRelightDeltaEv * trust).coerceIn(-0.18, 0.18)
         val backgroundEv = (safe.backgroundSuppressionDeltaEv * trust).coerceIn(-0.14, 0.10)
-        val pivot = (baseline.medianLuma / 255.0).coerceIn(0.24, 0.72)
 
-        val out = Bitmap.createBitmap(source.width, source.height, Bitmap.Config.ARGB_8888)
+        val target = if (source.isMutable) source else source.copy(Bitmap.Config.ARGB_8888, true)
+        require(!target.isRecycled && target.width > 0 && target.height > 0) { "Invalid Sierra finishing bitmap" }
+
+        // A stable photographic pivot is sufficient for the residual correction and avoids another
+        // full-frame analysis/allocation before the in-place pass.
+        val pivot = 0.46
         val stripeHeight = 72
         var y0 = 0
-        while (y0 < source.height) {
-            val h = min(stripeHeight, source.height - y0)
-            val pixels = IntArray(source.width * h)
-            source.getPixels(pixels, 0, source.width, 0, y0, source.width, h)
+        while (y0 < target.height) {
+            val h = min(stripeHeight, target.height - y0)
+            val pixels = IntArray(target.width * h)
+            target.getPixels(pixels, 0, target.width, 0, y0, target.width, h)
             for (i in pixels.indices) {
-                val px = i % source.width
-                val py = y0 + i / source.width
-                val nx = (px + 0.5) / source.width.toDouble()
-                val ny = (py + 0.5) / source.height.toDouble()
+                val px = i % target.width
+                val py = y0 + i / target.width
+                val nx = (px + 0.5) / target.width.toDouble()
+                val ny = (py + 0.5) / target.height.toDouble()
                 val c = pixels[i]
                 var r = ((c ushr 16) and 255) / 255.0
                 var g = ((c ushr 8) and 255) / 255.0
@@ -82,7 +85,6 @@ object PhotographicDirectionFinisher {
                 val midWeight = (4.0 * exposedY * (1.0 - exposedY)).coerceIn(0.0, 1.0)
                 var targetY = pivot + (exposedY - pivot) * (1.0 + contrastDelta * midWeight)
 
-                // Residual toe correction is proportional to existing signal, so literal black stays black.
                 if (targetY < 0.34 && toeDelta != 0.0) {
                     val toeMask = ((0.34 - targetY) / 0.34).coerceIn(0.0, 1.0)
                     targetY *= (1.0 - toeDelta * toeMask).coerceIn(0.96, 1.04)
@@ -121,16 +123,11 @@ object PhotographicDirectionFinisher {
                 val bb = (b.coerceIn(0.0, 1.0) * 255.0 + 0.5).toInt()
                 pixels[i] = (0xff shl 24) or (rr shl 16) or (gg shl 8) or bb
             }
-            out.setPixels(pixels, 0, source.width, 0, y0, source.width, h)
+            target.setPixels(pixels, 0, target.width, 0, y0, target.width, h)
             y0 += h
         }
 
-        val corrected = runCatching { PhotoQuality.analyze(out) }.getOrNull()
-        if (corrected == null || shouldRejectCorrection(baseline, corrected)) {
-            if (!out.isRecycled) out.recycle()
-            return source
-        }
-        return out
+        return target
     }
 
     private fun hasMeaningfulDelta(a: FinalRenderAdjustment): Boolean =
@@ -145,14 +142,6 @@ object PhotographicDirectionFinisher {
             a.warmthDelta,
             a.colorIntensityDelta
         ).any { kotlin.math.abs(it) > 0.002 }
-
-    private fun shouldRejectCorrection(before: TechnicalQuality, after: TechnicalQuality): Boolean {
-        if (after.catastrophic) return true
-        if (after.darkClipFraction > before.darkClipFraction + 0.015) return true
-        if (after.brightClipFraction > before.brightClipFraction + 0.015) return true
-        if (after.heuristicScore + 0.08 < before.heuristicScore) return true
-        return false
-    }
 
     private fun subjectWeight(subject: AnipSubjectContext?, nx: Double, ny: Double): Double {
         subject ?: return 0.0
