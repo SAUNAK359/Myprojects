@@ -12,6 +12,7 @@ on:
       - director-sierra-v8-anip
       - director-sierra-v10-cognition
       - director-sierra-v10-demo-photographic-engine
+      - director-sierra-v11-memory-anip-fix
     paths:
       - 'Director/**'
       - '.github/workflows/director-android.yml'
