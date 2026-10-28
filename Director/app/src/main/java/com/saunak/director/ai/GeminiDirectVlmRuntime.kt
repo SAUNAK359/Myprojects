@@ -7,6 +7,7 @@ import com.saunak.director.camera.CameraSnapshot
 import com.saunak.director.camera.CapabilityRegistry
 import com.saunak.director.director.EvaluationOutput
 import com.saunak.director.director.PlanOutput
+import com.saunak.director.director.PreShutterValidationOutput
 import com.saunak.director.director.live.LiveDirectorValidator
 import com.saunak.director.director.live.SierraDirectorSpec
 import java.io.ByteArrayOutputStream
@@ -46,6 +47,7 @@ class GeminiDirectVlmRuntime(
     @Volatile private var progressListener: ((VlmStreamProgress) -> Unit)? = null
     @Volatile private var lastPlanInteractionId: String? = null
     @Volatile private var latestDirectorSpec: SierraDirectorSpec? = null
+    @Volatile private var lastDirectorContract: DirectorSchemaCompiler.Contract? = null
 
     override suspend fun load(modelPath: String, projectorPath: String): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching { modelResolver.resolve(keyStore.read().takeIf(String::isNotBlank) ?: error("Add the Sierra Intelligence API key in Sierra settings")) }.map { Unit }
@@ -75,11 +77,11 @@ class GeminiDirectVlmRuntime(
                 .put("model", resolvedModel)
                 .put("input", """
                     You are Sierra, the photographic authority and final colorist inside Sierra Vision.
-                    Store this DEVICE FOUNDATION as the hard physical/API/render-executor boundary for future camera plans and final render specifications.
+                    Store this DEVICE FOUNDATION as the hard physical/API/render-executor boundary for future camera plans and render specifications.
                     Sierra beta may enforce physical feasibility but must not creatively replace Sierra's valid decisions.
                     Device limits change execution, not photographic intent. Never invent unsupported camera or render capabilities.
                     Preserve identity, geometry, text, material truth and scene evidence.
-
+                
                     ${profile.payload}
                 """.trimIndent())
                 .put("generation_config", JSONObject().put("thinking_level", provider.thinkingLevel).put("max_output_tokens", 128))
@@ -94,6 +96,7 @@ class GeminiDirectVlmRuntime(
                     foundationPrefs.edit().putString(KEY_FOUNDATION_ID, id).putString(KEY_FOUNDATION_DIGEST, profile.digest).putLong(KEY_FOUNDATION_AT, System.currentTimeMillis()).apply()
                     lastPlanInteractionId = null
                     latestDirectorSpec = null
+                    lastDirectorContract = null
                 }
             } finally { if (activeCall === call) activeCall = null }
         }.onSuccess {
@@ -105,7 +108,9 @@ class GeminiDirectVlmRuntime(
 
     override suspend fun plan(image: Bitmap, capabilities: CapabilityRegistry, camera: CameraSnapshot, skillContext: String): Result<PlanOutput> {
         latestDirectorSpec = null
-        val directorContract = DirectorSchemaCompiler().compile()
+        lastPlanInteractionId = null
+        val directorContract = withContext(Dispatchers.IO) { DirectorSchemaCompiler().compile() }
+        lastDirectorContract = directorContract
         suspend fun execute(): Result<PlanOutput> {
             val result = streamRequest(
                 promptBuilder.planPrompt(capabilities, camera, skillContext, themeCatalog.compactDescription(), directorContract),
@@ -116,8 +121,10 @@ class GeminiDirectVlmRuntime(
             ) { raw ->
                 val decoded = VlmContractValidator.plan(json.decodeFromString<PlanOutput>(raw))
                 val director = requireNotNull(decoded.directorSpec) { "Sierra omitted required Director spec" }
+                val render = requireNotNull(decoded.renderSpec) { "Sierra omitted required Render spec" }
                 val validatedDirector = LiveDirectorValidator.validate(director, directorContract)
-                decoded.copy(directorSpec = validatedDirector).also(::validateThemeReferences)
+                val validatedRender = VlmContractValidator.renderSpec(render)
+                decoded.copy(directorSpec = validatedDirector, renderSpec = validatedRender).also(::validateThemeReferences)
             }
             result.onSuccess { latestDirectorSpec = it.directorSpec }
             return result
@@ -131,6 +138,28 @@ class GeminiDirectVlmRuntime(
         return execute()
     }
 
+    override suspend fun validatePreShutter(
+        image: Bitmap,
+        originalPlan: PlanOutput,
+        camera: CameraSnapshot,
+        validationContext: String,
+        capabilities: CapabilityRegistry
+    ): Result<PreShutterValidationOutput> {
+        val interaction = lastPlanInteractionId
+            ?: return Result.failure(IllegalStateException("No validated Sierra planning interaction for pre-shutter call"))
+        val contract = lastDirectorContract
+            ?: return Result.failure(IllegalStateException("Director capability contract unavailable"))
+        return streamRequest(
+            promptBuilder.preShutterValidationPrompt(originalPlan, camera, validationContext, capabilities, contract),
+            image,
+            SierraGeminiSchemas.preShutterValidation(contract),
+            interaction
+        ) { raw ->
+            val decoded = json.decodeFromString<PreShutterValidationOutput>(raw)
+            PreShutterValidator.validate(decoded, capabilities, contract)
+        }
+    }
+
     override suspend fun evaluate(
         image: Bitmap,
         objective: String,
@@ -139,10 +168,9 @@ class GeminiDirectVlmRuntime(
         previousIssues: List<String>,
         evaluationContext: String,
         capabilities: CapabilityRegistry
-    ): Result<EvaluationOutput> = streamRequest(
-        promptBuilder.evaluationPrompt(objective, attempt, camera, previousIssues, evaluationContext, capabilities), image,
-        SierraGeminiSchemas.evaluation(), lastPlanInteractionId ?: currentFoundationId()
-    ) { raw -> VlmContractValidator.evaluation(json.decodeFromString<EvaluationOutput>(raw)) }
+    ): Result<EvaluationOutput> = Result.failure(
+        UnsupportedOperationException("Post-capture Gemini evaluation disabled; Render Spec is authored in call #1")
+    )
 
     private suspend fun <T> streamRequest(
         prompt: String,
@@ -214,7 +242,8 @@ class GeminiDirectVlmRuntime(
     override fun cancel() { activeCall?.cancel(); activeCall = null; latestDirectorSpec = null }
     override fun isReady(): Boolean = keyStore.isConfigured()
     override fun waitForSemanticPlan(): Boolean = true
-    override fun supportsFinalReview(): Boolean = true
+    override fun supportsPreShutterValidation(): Boolean = true
+    override fun supportsFinalReview(): Boolean = false
     override fun diagnostics(): VlmDiagnostics = lastDiagnostics
     override fun lastDirectorSpec(): SierraDirectorSpec? = latestDirectorSpec
     override fun unload() = cancel()
@@ -225,6 +254,7 @@ class GeminiDirectVlmRuntime(
         foundationPrefs.edit().remove(KEY_FOUNDATION_ID).remove(KEY_FOUNDATION_DIGEST).remove(KEY_FOUNDATION_AT).apply()
         lastPlanInteractionId = null
         latestDirectorSpec = null
+        lastDirectorContract = null
     }
     private fun foundationContextFailure(t: Throwable?): Boolean {
         val m = t?.message?.lowercase().orEmpty()
