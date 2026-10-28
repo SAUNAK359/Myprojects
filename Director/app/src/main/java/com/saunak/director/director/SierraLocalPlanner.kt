@@ -5,7 +5,7 @@ import com.saunak.director.camera.DirectorExtension
 import com.saunak.director.processing.TechnicalQuality
 import com.saunak.director.tools.ToolIds
 
-/** Deterministic on-device planner used by Sierra beta. */
+/** Deterministic on-device camera planner used by Sierra beta. Rendering is planned separately. */
 object SierraLocalPlanner {
     fun plan(
         quality: TechnicalQuality,
@@ -23,14 +23,10 @@ object SierraLocalPlanner {
         }
         val branch = signals?.branch ?: fallbackBranch
         val lowLight = branch == "low_light"
-        val brightSky = signals?.brightSky == true || (
-            quality.highlightP95 >= 218.0 && quality.topMeanLuma - quality.bottomMeanLuma >= 28.0
-        )
-        val highDynamicRange = brightSky || quality.lumaStdDev > 52.0 ||
-            quality.highlightP95 - quality.shadowP05 > 150.0
+        val brightSky = signals?.brightSky == true || (quality.highlightP95 >= 218.0 && quality.topMeanLuma - quality.bottomMeanLuma >= 28.0)
+        val highDynamicRange = brightSky || quality.lumaStdDev > 52.0 || quality.highlightP95 - quality.shadowP05 > 150.0
         val environmental = branch == "landscape" || branch == "architecture"
         val portraitSubject = branch == "portrait" || branch == "selfie" || branch == "group"
-        val flat = quality.lumaStdDev < 24.0
 
         val aspectRatio = when {
             portraitSubject -> if (frameHeight >= frameWidth) "4:5" else "3:2"
@@ -38,22 +34,6 @@ object SierraLocalPlanner {
             environmental && frameHeight > frameWidth * 1.12 -> "4:5"
             frameHeight > frameWidth * 1.18 -> "4:5"
             else -> "4:3"
-        }
-
-        val lookId = when {
-            lowLight -> ToolIds.LOOK_CINEMATIC_COOL
-            portraitSubject -> ToolIds.LOOK_CLEAN_PORTRAIT
-            branch == "architecture" || branch == "landscape" -> ToolIds.LOOK_LANDSCAPE_VIVID
-            flat -> ToolIds.LOOK_SOCIAL_POP
-            else -> ToolIds.LOOK_NATURAL
-        }
-        val lookStrength = when {
-            branch == "architecture" -> 0.30
-            branch == "landscape" -> 0.36
-            portraitSubject -> 0.40
-            lowLight -> 0.42
-            flat -> 0.28
-            else -> 0.0
         }
 
         val severeHighlights = quality.highlightP95 >= 248.0 || quality.brightClipFraction > 0.03
@@ -66,26 +46,15 @@ object SierraLocalPlanner {
             else -> null
         }
 
-        val hdrSupported = capabilities?.let {
-            DirectorExtension.HDR in it.extensions && ToolIds.EXTENSION in it.allowedToolIds
-        } == true
+        val hdrSupported = capabilities?.let { DirectorExtension.HDR in it.extensions && ToolIds.EXTENSION in it.allowedToolIds } == true
         val useHdr = environmental && highDynamicRange && hdrSupported
-
         val calls = buildList {
-            if (useHdr) {
-                add(ToolCall(id = ToolIds.EXTENSION, stringValue = DirectorExtension.HDR.wireName))
-            } else if (exposureEv != null) {
-                add(ToolCall(id = ToolIds.EXPOSURE_EV, value = exposureEv))
-            }
-            if (lookId != ToolIds.LOOK_NATURAL || lookStrength > 0.0) {
-                add(ToolCall(id = lookId, value = lookStrength))
-            }
+            if (useHdr) add(ToolCall(id = ToolIds.EXTENSION, stringValue = DirectorExtension.HDR.wireName))
+            else if (exposureEv != null) add(ToolCall(id = ToolIds.EXPOSURE_EV, value = exposureEv))
         }
 
         val objective = buildString {
-            append("Sierra beta ")
-            append(branch.replace('_', ' '))
-            append(" capture")
+            append("Sierra beta ").append(branch.replace('_', ' ')).append(" capture")
             if (brightSky) append(" with sky highlight protection and preserved foreground detail")
             else if (highDynamicRange) append(" with controlled dynamic range")
             if (branch == "architecture") append(" and neutral structural detail")
