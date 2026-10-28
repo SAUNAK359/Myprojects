@@ -51,12 +51,15 @@ class CameraStateVerifier(private val camera: CameraEngine) {
         camera.awaitSettledState(settleMs)
         val snapshot = camera.snapshot()
         val sensor = camera.sensorTelemetry()
-        val afState = afName(sensor?.afState)
-        val aeState = aeName(sensor?.aeState)
-        val awbState = awbName(sensor?.awbState)
-        val afSettled = sensor?.afState == null || sensor.afState in AF_SETTLED
-        val aeSettled = sensor?.aeState == null || sensor.aeState in AE_SETTLED
-        val awbSettled = sensor?.awbState == null || sensor.awbState in AWB_SETTLED
+        val afValue = sensor?.afState
+        val aeValue = sensor?.aeState
+        val awbValue = sensor?.awbState
+        val afState = afName(afValue)
+        val aeState = aeName(aeValue)
+        val awbState = awbName(awbValue)
+        val afSettled = afValue == null || afValue in AF_SETTLED
+        val aeSettled = aeValue == null || aeValue in AE_SETTLED
+        val awbSettled = awbValue == null || awbValue in AWB_SETTLED
         val settled = afSettled && aeSettled && awbSettled
         val retry = mutableListOf<ToolCall>()
 
@@ -64,10 +67,11 @@ class CameraStateVerifier(private val camera: CameraEngine) {
             when (call.id) {
                 ToolIds.ZOOM -> {
                     val target = call.value ?: snapshot.zoomRatio.toDouble()
-                    val delta = abs(snapshot.zoomRatio - target)
+                    val actual = snapshot.zoomRatio.toDouble()
+                    val delta = abs(actual - target)
                     val ok = delta <= maxOf(0.02, target * 0.015)
                     if (!ok) retry += call
-                    Item(call.id, fmt(target) + "x", fmt(snapshot.zoomRatio.toDouble()) + "x", if (ok) Status.VERIFIED else Status.FAILED,
+                    Item(call.id, fmt(target) + "x", fmt(actual) + "x", if (ok) Status.VERIFIED else Status.FAILED,
                         if (ok) null else "zoom state differs after execution")
                 }
                 ToolIds.EXPOSURE_EV -> {
@@ -83,10 +87,10 @@ class CameraStateVerifier(private val camera: CameraEngine) {
                 }
                 ToolIds.FOCUS -> {
                     val status = when {
-                        sensor?.afState == null -> Status.UNKNOWN
-                        sensor.afState in AF_GOOD -> Status.VERIFIED
-                        sensor.afState in AF_SEARCHING -> Status.SEARCHING
-                        sensor.afState in AF_SETTLED -> Status.VERIFIED_CLOSEST
+                        afValue == null -> Status.UNKNOWN
+                        afValue in AF_GOOD -> Status.VERIFIED
+                        afValue in AF_SEARCHING -> Status.SEARCHING
+                        afValue in AF_SETTLED -> Status.VERIFIED_CLOSEST
                         else -> Status.UNKNOWN
                     }
                     if (status == Status.SEARCHING) retry += call
