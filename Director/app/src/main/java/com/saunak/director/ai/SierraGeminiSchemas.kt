@@ -1,5 +1,6 @@
 package com.saunak.director.ai
 
+import com.saunak.director.tools.ToolIds
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -15,10 +16,11 @@ internal object SierraGeminiSchemas {
         .put("properties", JSONObject(properties))
         .put("additionalProperties", false)
 
-    private fun toolCall(): JSONObject {
+    private fun toolCall(allowedIds: Set<Int>? = null): JSONObject {
         val nullableNumber = JSONObject().put("type", JSONArray(listOf("number", "null")))
         val nullableString = JSONObject().put("type", JSONArray(listOf("string", "null")))
-        return obj(listOf("id","v","x","y","s"), mapOf("id" to integer(), "v" to nullableNumber, "x" to nullableNumber, "y" to nullableNumber, "s" to nullableString))
+        val idSchema = integer().apply { allowedIds?.let { put("enum", JSONArray(it.sorted())) } }
+        return obj(listOf("id","v","x","y","s"), mapOf("id" to idSchema, "v" to nullableNumber, "x" to nullableNumber, "y" to nullableNumber, "s" to nullableString))
     }
 
     private fun renderSpec(): JSONObject {
@@ -76,15 +78,12 @@ internal object SierraGeminiSchemas {
             "background_match" to number(),
             "camera_state_match" to number(),
             "issues" to array(string(), 8),
-            "correction_calls" to array(toolCall(), 8),
-            // Structured output remains simple and reliable: when no Director correction is required,
-            // Gemini echoes the original graph unchanged. The runtime ignores it when accept=true.
+            "correction_calls" to array(toolCall(ToolIds.CAMERA_IDS), 8),
             "corrected_director_spec" to directorContract.jsonSchema,
             "reason" to string()
         ))
     }
 
-    /** Legacy compatibility schema only. */
     fun evaluation(): JSONObject {
         fun section(keys: List<String>): JSONObject = obj(keys, keys.associateWith { number() })
         val adjustmentKeys = listOf("theme_strength_delta","midtone_contrast_delta","local_contrast_delta","shadow_depth_delta","highlight_protection_delta","subject_relight_delta_ev","background_suppression_delta_ev","warmth_delta","color_intensity_delta")
