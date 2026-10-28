@@ -64,6 +64,7 @@ class DirectorSchemaCompiler(private val engine: SierraEngine = SierraEngine.get
                 appendLine("Use normalized final-composition coordinates 0..1. Never output screen pixels or metric distance unless a metric sensor capability is explicitly present.")
                 appendLine("Every target must include ideal/acceptable tolerance, confidence floor, priority and stability duration.")
                 appendLine("Primary entity current_box must locate the exact entity in THIS analysis frame; target_box is where that same entity should be in the intended photograph.")
+                appendLine("Use at most $MAX_GOALS goal nodes and at most $MAX_GRAPH_EDGES dependencies/invalidations per node; include only goals that materially affect this photograph.")
             }.trim()
         )
     }
@@ -106,9 +107,9 @@ class DirectorSchemaCompiler(private val engine: SierraEngine = SierraEngine.get
                 "priority" to enum(listOf("HARD","IMPORTANT","PREFERENCE")), "required" to bool(), "weight" to number(0.0,10.0),
                 "entity_id" to nullableString(), "target_min" to nullableNumber(), "target_max" to nullableNumber(),
                 "ideal_tolerance" to number(0.0,1.0), "acceptable_tolerance" to number(0.0,2.0), "min_confidence" to number(0.0,1.0),
-                "target_keypoints" to array(keypoint, 17), "actor" to enum(listOf("PHOTOGRAPHER","SUBJECT","OBJECT","ANY","NONE")),
+                "target_keypoints" to array(keypoint, MAX_POSE_KEYPOINTS), "actor" to enum(listOf("PHOTOGRAPHER","SUBJECT","OBJECT","ANY","NONE")),
                 "instruction_low" to string(), "instruction_high" to string(), "instruction_hold" to string(),
-                "depends_on" to array(string(), 12), "invalidates" to array(string(), 12), "stability_ms" to integer(100)
+                "depends_on" to array(string(), MAX_GRAPH_EDGES), "invalidates" to array(string(), MAX_GRAPH_EDGES), "stability_ms" to integer(100)
             )
         )
         val readiness = obj(
@@ -122,13 +123,16 @@ class DirectorSchemaCompiler(private val engine: SierraEngine = SierraEngine.get
             listOf("schema_version","schema_hash","goal_summary","primary_entity","goals","readiness"),
             mapOf(
                 "schema_version" to enum(listOf(version)), "schema_hash" to enum(listOf(hash)), "goal_summary" to string(),
-                "primary_entity" to entity, "goals" to array(goal, 18), "readiness" to readiness
+                "primary_entity" to entity, "goals" to array(goal, MAX_GOALS), "readiness" to readiness
             )
         )
     }
 
     companion object {
         const val VERSION = "director.v1"
+        const val MAX_GOALS = 12
+        const val MAX_GRAPH_EDGES = 8
+        const val MAX_POSE_KEYPOINTS = 17
         private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
             .digest(value.toByteArray()).joinToString("") { "%02x".format(it) }
     }
