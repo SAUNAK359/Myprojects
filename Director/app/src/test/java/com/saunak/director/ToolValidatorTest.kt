@@ -32,37 +32,42 @@ class ToolValidatorTest {
         assertEquals(-1.0, result.accepted.first { it.id == ToolIds.EXPOSURE_EV }.value!!, .0001)
     }
 
-    @Test fun extensionRejectsAllNormalCameraMutations() {
+    @Test fun exposureIsQuantizedToRealDeviceStep() {
+        val result = ToolValidator().validate(listOf(ToolCall(ToolIds.EXPOSURE_EV, value = -.62)), caps)
+        assertEquals(-.5, result.accepted.single().value!!, .0001)
+    }
+
+    @Test fun extensionAndDirectControlsFailClosedAsAmbiguous() {
         val result = ToolValidator().validate(
             listOf(
                 ToolCall(ToolIds.ZOOM, value = 2.0),
                 ToolCall(ToolIds.EXPOSURE_EV, value = .5),
-                ToolCall(ToolIds.TORCH, value = 1.0),
-                ToolCall(ToolIds.FLASH, stringValue = "on"),
+                ToolCall(ToolIds.TORCH, value = 0.0),
+                ToolCall(ToolIds.FLASH, stringValue = "off"),
                 ToolCall(ToolIds.EXTENSION, stringValue = "hdr")
             ), caps)
-        assertTrue(result.accepted.any { it.id == ToolIds.EXTENSION })
-        assertTrue(result.accepted.none { it.id in setOf(ToolIds.ZOOM, ToolIds.EXPOSURE_EV, ToolIds.TORCH, ToolIds.FLASH) })
-        assertTrue(result.rejected.count { it.reason == "extension_conflict" } >= 4)
+        assertTrue(result.accepted.none { it.id in ToolIds.CAMERA_IDS })
+        assertTrue(result.rejected.count { it.reason == "ambiguous_plan" } == 5)
     }
 
-    @Test fun stillFlashSuppressesTorchOn() {
+    @Test fun flashAndTorchConflictFailsClosedRatherThanChoosingCreatively() {
         val result = ToolValidator().validate(listOf(ToolCall(ToolIds.TORCH, value = 1.0), ToolCall(ToolIds.FLASH, stringValue = "auto")), caps)
-        assertTrue(result.accepted.none { it.id == ToolIds.TORCH })
-        assertTrue(result.accepted.any { it.id == ToolIds.FLASH })
-        assertTrue(result.rejected.any { it.reason == "flash_torch_conflict" })
+        assertTrue(result.accepted.none { it.id in setOf(ToolIds.TORCH, ToolIds.FLASH) })
+        assertEquals(2, result.rejected.count { it.reason == "ambiguous_plan" })
     }
 
-    @Test fun activeExtensionBlocksNormalCameraMutation() {
+    @Test fun explicitExtensionReleaseAllowsDirectControlPlanToBeValidated() {
         val active = caps.copy(activeExtension = DirectorExtension.HDR)
         val result = ToolValidator().validate(listOf(ToolCall(ToolIds.ZOOM, value = 2.0), ToolCall(ToolIds.EXTENSION, stringValue = "none")), active)
-        assertTrue(result.rejected.any { it.call.id == ToolIds.ZOOM && it.reason == "extension_active" })
+        assertTrue(result.rejected.isEmpty())
+        assertTrue(result.accepted.any { it.id == ToolIds.ZOOM && it.value == 2.0 })
         assertTrue(result.accepted.any { it.id == ToolIds.EXTENSION && it.stringValue == "none" })
     }
 
-    @Test fun rejectsUnknownToolAndSupersedesOldLook() {
+    @Test fun rejectsUnknownToolAndMultipleLegacyLooksAsAmbiguous() {
         val result = ToolValidator().validate(listOf(ToolCall(999), ToolCall(ToolIds.LOOK_WARM, value = .5), ToolCall(ToolIds.LOOK_COOL, value = .4)), caps)
-        assertTrue(result.rejected.any { it.call.id == 999 })
-        assertEquals(ToolIds.LOOK_COOL, result.accepted.single { it.id in ToolIds.LOOK_IDS }.id)
+        assertTrue(result.rejected.any { it.call.id == 999 && it.reason == "unsupported_tool" })
+        assertEquals(2, result.rejected.count { it.call.id in ToolIds.LOOK_IDS && it.reason == "ambiguous_plan" })
+        assertTrue(result.accepted.none { it.id in ToolIds.LOOK_IDS })
     }
 }
