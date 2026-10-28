@@ -25,7 +25,6 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 
-/** Direct Gemini Interactions runtime with stored device foundation and structured SSE streaming. */
 class GeminiDirectVlmRuntime(
     context: Context,
     private val keyStore: GeminiApiKeyStore = GeminiApiKeyStore(context),
@@ -49,10 +48,7 @@ class GeminiDirectVlmRuntime(
     @Volatile private var latestDirectorSpec: SierraDirectorSpec? = null
 
     override suspend fun load(modelPath: String, projectorPath: String): Result<Unit> = withContext(Dispatchers.IO) {
-        runCatching {
-            val key = keyStore.read().takeIf(String::isNotBlank) ?: error("Add the Sierra Intelligence API key in Sierra settings")
-            modelResolver.resolve(key)
-        }.map { Unit }
+        runCatching { modelResolver.resolve(keyStore.read().takeIf(String::isNotBlank) ?: error("Add the Sierra Intelligence API key in Sierra settings")) }.map { Unit }
     }
 
     override suspend fun syncDeviceFoundation(profile: DeviceFoundationProfile): Result<Unit> = withContext(Dispatchers.IO) {
@@ -66,8 +62,7 @@ class GeminiDirectVlmRuntime(
         val storedDigest = foundationPrefs.getString(KEY_FOUNDATION_DIGEST, null)
         val storedId = foundationPrefs.getString(KEY_FOUNDATION_ID, null)
         val storedAt = foundationPrefs.getLong(KEY_FOUNDATION_AT, 0L)
-        return storedDigest == profile.digest && !storedId.isNullOrBlank() &&
-            System.currentTimeMillis() - storedAt in 0 until FOUNDATION_REFRESH_MS
+        return storedDigest == profile.digest && !storedId.isNullOrBlank() && System.currentTimeMillis() - storedAt in 0 until FOUNDATION_REFRESH_MS
     }
 
     private fun createFoundation(profile: DeviceFoundationProfile): Result<Unit> {
@@ -89,17 +84,14 @@ class GeminiDirectVlmRuntime(
                 """.trimIndent())
                 .put("generation_config", JSONObject().put("thinking_level", provider.thinkingLevel).put("max_output_tokens", 128))
                 .put("store", true)
-            val request = baseRequest(key).post(body.toString().toRequestBody(JSON_MEDIA)).build()
-            val call = client.newCall(request)
+            val call = client.newCall(baseRequest(key).post(body.toString().toRequestBody(JSON_MEDIA)).build())
             activeCall = call
             try {
                 call.execute().use { response ->
                     val payload = response.body?.string().orEmpty()
                     if (!response.isSuccessful) throw IOException(apiError(response.code, payload))
-                    val id = JSONObject(payload).optString("id").takeIf(String::isNotBlank)
-                        ?: throw IOException("Sierra device foundation returned no interaction id")
-                    foundationPrefs.edit().putString(KEY_FOUNDATION_ID, id).putString(KEY_FOUNDATION_DIGEST, profile.digest)
-                        .putLong(KEY_FOUNDATION_AT, System.currentTimeMillis()).apply()
+                    val id = JSONObject(payload).optString("id").takeIf(String::isNotBlank) ?: throw IOException("Sierra device foundation returned no interaction id")
+                    foundationPrefs.edit().putString(KEY_FOUNDATION_ID, id).putString(KEY_FOUNDATION_DIGEST, profile.digest).putLong(KEY_FOUNDATION_AT, System.currentTimeMillis()).apply()
                     lastPlanInteractionId = null
                     latestDirectorSpec = null
                 }
@@ -116,8 +108,10 @@ class GeminiDirectVlmRuntime(
         val directorContract = DirectorSchemaCompiler().compile()
         suspend fun execute(): Result<PlanOutput> {
             val result = streamRequest(
-                promptBuilder.planPrompt(capabilities, camera, skillContext, themeCatalog.compactDescription()), image,
-                SierraGeminiSchemas.plan(), currentFoundationId(),
+                promptBuilder.planPrompt(capabilities, camera, skillContext, themeCatalog.compactDescription(), directorContract),
+                image,
+                SierraGeminiSchemas.plan(directorContract),
+                currentFoundationId(),
                 onInteractionCompleted = { lastPlanInteractionId = it }
             ) { raw ->
                 val decoded = VlmContractValidator.plan(json.decodeFromString<PlanOutput>(raw))
@@ -165,11 +159,7 @@ class GeminiDirectVlmRuntime(
             resolvedModel = modelResolver.resolve(key)
             val body = buildInteractionBody(resolvedModel, prompt, encode(image), schema, previousInteractionId).put("stream", true)
             val request = baseRequest(key).header("Accept", "text/event-stream").post(body.toString().toRequestBody(JSON_MEDIA)).build()
-            val streamer = GeminiInteractionStreamer(
-                client = client,
-                onProgress = { progressListener?.invoke(it) },
-                onActiveCall = { call -> activeCall = call }
-            )
+            val streamer = GeminiInteractionStreamer(client, { progressListener?.invoke(it) }, { call -> activeCall = call })
             try {
                 val streamed = streamer.execute(request)
                 val decoded = decode(streamed.text)
@@ -197,16 +187,12 @@ class GeminiDirectVlmRuntime(
         direction.themeBlend.forEach { themeCatalog.requireInstalled(it.themeId) }
     }
 
-    private fun baseRequest(key: String): Request.Builder = Request.Builder()
-        .url(provider.interactionsUrl)
-        .header("x-goog-api-key", key)
-        .header("Content-Type", "application/json")
+    private fun baseRequest(key: String): Request.Builder = Request.Builder().url(provider.interactionsUrl).header("x-goog-api-key", key).header("Content-Type", "application/json")
 
     private fun buildInteractionBody(model: String, prompt: String, image: ByteArray, schema: JSONObject, previousInteractionId: String?): JSONObject {
         val input = JSONArray()
             .put(JSONObject().put("type", "text").put("text", prompt))
-            .put(JSONObject().put("type", "image").put("data", Base64.encodeToString(image, Base64.NO_WRAP))
-                .put("mime_type", "image/jpeg").put("resolution", "medium"))
+            .put(JSONObject().put("type", "image").put("data", Base64.encodeToString(image, Base64.NO_WRAP)).put("mime_type", "image/jpeg").put("resolution", "medium"))
         return JSONObject().put("model", model).put("input", input).put("store", true)
             .apply { previousInteractionId?.let { put("previous_interaction_id", it) } }
             .put("generation_config", JSONObject().put("thinking_level", provider.thinkingLevel).put("max_output_tokens", provider.maxOutputTokens))
@@ -225,11 +211,7 @@ class GeminiDirectVlmRuntime(
 
     override fun setMaxImageDimension(pixels: Int) { maxImageDimension = pixels.coerceIn(384, 896) }
     override fun setStreamProgressListener(listener: ((VlmStreamProgress) -> Unit)?) { progressListener = listener }
-    override fun cancel() {
-        activeCall?.cancel()
-        activeCall = null
-        latestDirectorSpec = null
-    }
+    override fun cancel() { activeCall?.cancel(); activeCall = null; latestDirectorSpec = null }
     override fun isReady(): Boolean = keyStore.isConfigured()
     override fun waitForSemanticPlan(): Boolean = true
     override fun supportsFinalReview(): Boolean = true
@@ -248,8 +230,7 @@ class GeminiDirectVlmRuntime(
         val m = t?.message?.lowercase().orEmpty()
         return "previous_interaction" in m || ("interaction" in m && ("not found" in m || "expired" in m)) || m.startsWith("http=404")
     }
-    private fun apiError(code: Int, payload: String): String = runCatching { JSONObject(payload).optJSONObject("error")?.optString("message") }
-        .getOrNull()?.takeIf(String::isNotBlank)?.take(180) ?: "Sierra interaction failed ($code)"
+    private fun apiError(code: Int, payload: String): String = runCatching { JSONObject(payload).optJSONObject("error")?.optString("message") }.getOrNull()?.takeIf(String::isNotBlank)?.take(180) ?: "Sierra interaction failed ($code)"
 
     companion object {
         private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
