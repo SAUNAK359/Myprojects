@@ -15,11 +15,13 @@ import com.saunak.director.camera.StillFlashMode
 import com.saunak.director.director.DirectorOrchestrator
 import com.saunak.director.director.DirectorStage
 import com.saunak.director.director.DirectorUiState
+import com.saunak.director.director.ShotObservability
 import com.saunak.director.director.SierraMode
 import com.saunak.director.platform.ThermalMonitor
 import com.saunak.director.skills.SkillEngine
 import com.saunak.director.storage.PhotoRepository
 import com.saunak.director.storage.RecipeMemory
+import com.saunak.director.storage.ShotAuditStore
 import com.saunak.director.storage.SierraCropPolicy
 import com.saunak.director.tools.ToolExecutionStatus
 import com.saunak.director.tools.ToolExecutor
@@ -42,6 +44,8 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
     private val deviceConfigSkill = DeviceConfigSkill(app)
     private val runtime = SierraServerVlmRuntime(app, server = server, deviceSkill = deviceConfigSkill)
     private val repository = PhotoRepository(app)
+    private val auditStore = ShotAuditStore(app)
+    private val observability = ShotObservability()
     private val toolExecutor = ToolExecutor(camera)
     private val preferences = app.getSharedPreferences("sierra_vision_preferences", Application.MODE_PRIVATE)
     private val initialPrivateMode = preferences.getBoolean("private_mode", false)
@@ -50,6 +54,7 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
     private val initialKeepOriginal = preferences.getBoolean("keep_original", false)
     private val initialSession = server.session()
     private val directAiReadyAtStart = runtime.isReady() && initialSession == null
+    @Volatile private var lastAuditedUri: String? = null
 
     private val orchestrator = DirectorOrchestrator(
         camera = camera,
@@ -61,12 +66,20 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
         thermal = ThermalMonitor(app)
     ) { state ->
         val current = _ui.value
+        val timeline = observability.observe(state, current)
         val failure = state.executionReceipts.firstOrNull { it.status == ToolExecutionStatus.FAILED || it.status == ToolExecutionStatus.REJECTED }
         val successfulControls = state.executionReceipts
             .filter { it.status == ToolExecutionStatus.APPLIED || it.status == ToolExecutionStatus.CLAMPED }
             .take(3).joinToString(" • ") { it.compactDescription().substringAfter(" • ") }
         val surfacedStatus = if (state.stage == DirectorStage.PREPARED && successfulControls.isNotBlank()) "${state.status} • $successfulControls" else state.status
-        _ui.value = state.copy(
+        val newShot = state.stage == DirectorStage.ANALYZING && current.stage !in setOf(DirectorStage.ANALYZING, DirectorStage.PLANNING)
+        val newSave = state.lastSavedUri != null && state.lastSavedUri != current.lastSavedUri
+        val comparisonPath = when {
+            newSave -> repository.consumeComparisonReferencePath()
+            newShot -> null
+            else -> current.comparisonReferencePath
+        }
+        val merged = state.copy(
             status = surfacedStatus,
             error = state.error ?: failure?.reason,
             camera = runCatching { camera.uiState() }.getOrDefault(state.camera),
@@ -86,9 +99,20 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
             accountName = current.accountName,
             creditsAvailable = server.session()?.creditsAvailable ?: current.creditsAvailable,
             authBusy = current.authBusy,
-            authError = current.authError
+            authError = current.authError,
+            timeline = timeline,
+            showTimeline = current.showTimeline,
+            comparisonReferencePath = comparisonPath,
+            showCompletion = when { newShot -> false; newSave -> true; else -> current.showCompletion }
         )
-        if (state.lastSavedUri != null && state.stage == DirectorStage.READY) refreshGallery()
+        _ui.value = merged
+        if (newSave) {
+            refreshGallery()
+            if (merged.lastSavedUri != lastAuditedUri) {
+                lastAuditedUri = merged.lastSavedUri
+                viewModelScope.launch(Dispatchers.IO) { auditStore.persist(merged, timeline) }
+            }
+        }
     }
 
     private val _ui = MutableStateFlow(
@@ -124,7 +148,7 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val recovered = orchestrator.recoverPendingReferences()
             if (recovered.isNotEmpty()) {
-                _ui.value = _ui.value.copy(status = "Recovered ${recovered.size} protected photo${if (recovered.size == 1) "" else "s"}", lastSavedUri = recovered.last().toString())
+                _ui.value = _ui.value.copy(status = "Recovered ${recovered.size} protected photo${if (recovered.size == 1) "" else "s"}", lastSavedUri = recovered.last().toString(), showCompletion = true)
                 refreshGallery()
             }
         }
@@ -204,16 +228,10 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
                     if (saved != null) {
                         val captureId = "capture-${UUID.randomUUID()}"
                         runtime.completeFinalCapture(captureId).onSuccess { refreshCredits() }.onFailure { _ui.value = _ui.value.copy(status = "Sierra photo saved • account sync pending") }
-                    } else if (!orchestrator.isPrepared()) {
-                        // A stale Director READY may re-enter coaching and return PREPARED without
-                        // saving yet. Preserve the reserved cloud job in that case; cancel only when
-                        // the shot is actually abandoned.
-                        runtime.cancelCloudJob()
-                    }
+                    } else if (!orchestrator.isPrepared()) runtime.cancelCloudJob()
                 }
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (oom: OutOfMemoryError) {
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (oom: OutOfMemoryError) {
                 runtime.cancel(); _ui.value = _ui.value.copy(stage = DirectorStage.ERROR, aiAvailable = runtime.isReady() && !_ui.value.privateMode, status = "Sierra memory pressure • try again", error = "Analysis used too much memory")
             } catch (t: Throwable) {
                 runtime.cancel(); _ui.value = _ui.value.copy(stage = DirectorStage.ERROR, aiAvailable = runtime.isReady() && !_ui.value.privateMode, status = "Sierra could not prepare the shot", error = t.message ?: t::class.java.simpleName)
@@ -267,8 +285,11 @@ class DirectorViewModel(app: Application) : AndroidViewModel(app) {
         _ui.value = _ui.value.copy(keepOriginal = enabled, status = if (enabled) "Originals will also be saved" else "Saving Sierra final only")
     }
 
-    fun openGallery() { refreshGallery(); _ui.value = _ui.value.copy(showGallery = true, showTools = false, showSettings = false) }
+    fun openGallery() { refreshGallery(); _ui.value = _ui.value.copy(showGallery = true, showTools = false, showSettings = false, showCompletion = false) }
     fun closeGallery() { _ui.value = _ui.value.copy(showGallery = false) }
+    fun toggleTimeline() { _ui.value = _ui.value.copy(showTimeline = !_ui.value.showTimeline) }
+    fun dismissTimeline() { _ui.value = _ui.value.copy(showTimeline = false) }
+    fun dismissCompletion() { _ui.value = _ui.value.copy(showCompletion = false) }
 
     fun refreshGallery() {
         viewModelScope.launch(Dispatchers.IO) {
