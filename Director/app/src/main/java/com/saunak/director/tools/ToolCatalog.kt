@@ -28,6 +28,7 @@ object ToolIds {
     const val LOOK_NIGHT_NEON = 43
 
     val CAMERA_IDS = setOf(FOCUS, ZOOM, EXPOSURE_EV, TORCH, FLASH, EXTENSION)
+    val V11_EXECUTABLE_CAMERA_IDS = setOf(FOCUS, ZOOM, EXPOSURE_EV, TORCH, FLASH)
     val LOOK_IDS = setOf(
         LOOK_NATURAL,
         LOOK_WARM,
@@ -48,23 +49,17 @@ object ToolIds {
 
 object ToolCatalog {
     fun contract(c: CapabilityRegistry, activeExtension: DirectorExtension = c.activeExtension): String = buildList {
-        // Direct controls remain visible even when an OEM extension is active. Sierra may request a
-        // direct control; Sierra beta will leave the extension and return to the normal camera
-        // session before executing it.
         if (ToolIds.FOCUS in c.allowedToolIds) add("1 focus(x:0..1,y:0..1) recapture")
         if (ToolIds.ZOOM in c.allowedToolIds) add("2 zoom(v:${fmt(c.minZoom)}..${fmt(c.maxZoom)}) recapture")
         if (ToolIds.EXPOSURE_EV in c.allowedToolIds) add("3 exposure_ev(v:${fmt(c.minExposureEv)}..${fmt(c.maxExposureEv)}) recapture")
         if (ToolIds.TORCH in c.allowedToolIds) add("4 torch(v:0|1) recapture")
         if (ToolIds.FLASH in c.allowedToolIds) add("5 still_flash(s:off|auto|on) recapture; exclusive with torch-on")
 
-        if (ToolIds.EXTENSION in c.allowedToolIds) {
-            val modes = buildList {
-                add("none")
-                addAll(c.extensions.map { it.wireName })
-            }.distinct()
-            if (modes.isNotEmpty()) {
-                add("6 extension(s:${modes.joinToString("|")}) recapture; choose ONE extension strategy OR direct focus/zoom/exposure/torch/flash, never both in the same plan; active=${activeExtension.wireName}")
-            }
+        // OEM extension capability remains visible in the Device Foundation inventory, but it is
+        // intentionally not an executable Sierra v11 MVP tool. CameraX extension sessions currently
+        // conflict with the ImageAnalysis stream required by deterministic Live Director readiness.
+        if (c.extensions.isNotEmpty()) {
+            add("oem_extensions_detected=${c.extensions.joinToString("|") { it.wireName }}; execution_disabled_in_v11_live_director; active=${activeExtension.wireName}")
         }
 
         add("7 composition(s:4:3|3:2|4:5|1:1|16:9|9:16|2.39:1,x:0..1 optional crop center,y:0..1 optional crop center) no recapture")
