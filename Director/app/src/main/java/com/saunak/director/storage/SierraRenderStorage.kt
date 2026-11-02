@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import android.net.Uri
 import com.saunak.director.director.SierraRenderSpec
 import com.saunak.director.engine.SierraEngine
+import com.saunak.director.processing.RenderSafetyGate
 import com.saunak.director.processing.SierraRenderExecutor
 import java.io.File
 import kotlin.math.max
@@ -36,7 +37,12 @@ suspend fun PhotoRepository.saveSierraRenderFinal(
                 protectSource = false
             ).bitmap
         }
-        saveProcessed(checkNotNull(rendered), file)
+        val safety = withContext(Dispatchers.Default) {
+            RenderSafetyGate.evaluate(checkNotNull(cropped), checkNotNull(rendered))
+        }
+        recordRenderSafetyStatus(safety.compactDescription())
+        if (safety.accepted) saveProcessed(checkNotNull(rendered), file)
+        else saveProcessed(checkNotNull(cropped), file)
     } finally {
         rendered?.let { if (!it.isRecycled) it.recycle() }
         cropped?.let { if (it !== rendered && !it.isRecycled) it.recycle() }
@@ -86,7 +92,12 @@ suspend fun PhotoRepository.savePrifSierraRenderFinal(
                 protectSource = cropped === bitmap
             ).bitmap
         }
-        saveProcessed(checkNotNull(rendered), sourceJpeg)
+        val safety = withContext(Dispatchers.Default) {
+            RenderSafetyGate.evaluate(checkNotNull(cropped), checkNotNull(rendered))
+        }
+        recordRenderSafetyStatus(safety.compactDescription())
+        if (safety.accepted) saveProcessed(checkNotNull(rendered), sourceJpeg)
+        else saveProcessed(checkNotNull(cropped), sourceJpeg)
     } catch (t: Throwable) {
         transactionIds.forEach(evidenceLedger::remove)
         throw t
