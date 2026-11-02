@@ -47,7 +47,7 @@ class SierraServerVlmRuntime(
     @Volatile private var latestDirectorSpec: SierraDirectorSpec? = null
 
     override suspend fun load(modelPath: String, projectorPath: String): Result<Unit> =
-        if (isReady()) Result.success(Unit) else Result.failure(IllegalStateException("Add a Gemini API key in Sierra or sign in to Sierra Vision"))
+        if (isReady()) Result.success(Unit) else Result.failure(IllegalStateException("Sierra v11 AI requires a configured Gemini API key; server-only authority is not v11-qualified"))
 
     override suspend fun syncDeviceFoundation(profile: DeviceFoundationProfile): Result<Unit> =
         if (geminiKeyStore.isConfigured()) directGemini.syncDeviceFoundation(profile) else Result.success(Unit)
@@ -58,31 +58,9 @@ class SierraServerVlmRuntime(
             directGemini.setMaxImageDimension(maxImageDimension)
             return directGemini.plan(image, capabilities, camera, skillContext).onSuccess { latestDirectorSpec = it.directorSpec }
         }
-        if (!server.configured || !server.authenticated) return Result.failure(IllegalStateException("Sierra AI requires a Gemini API key or signed-in Sierra Server session"))
-        return try {
-            val capabilityJson = readCapabilitySnapshot(capabilities, camera)
-            val localQualityJson = buildQualityJson(image)
-            val cameraContextJson = buildCameraContextJson(capabilities, camera)
-            val created = server.createAnalysisJob(
-                imageJpeg = encode(image), cameraContextJson = cameraContextJson,
-                deviceCapabilitiesJson = capabilityJson, localQualityJson = localQualityJson,
-                skillContext = skillContext, idempotencyKey = UUID.randomUUID().toString()
-            ).getOrThrow()
-            activeJobId = created.id
-            val plan = VlmContractValidator.plan(toPlanOutput(awaitReady(created)))
-            val serverDirector = requireNotNull(plan.directorSpec) { "Sierra Server omitted capability-aware Director spec" }
-            requireNotNull(plan.renderSpec) { "Sierra Server is not upgraded for pre-shutter Render Spec authority" }
-            val director = LiveDirectorValidator.validate(serverDirector, withContext(Dispatchers.IO) { DirectorSchemaCompiler().compile() })
-            val render = VlmContractValidator.renderSpec(plan.renderSpec)
-            val validated = plan.copy(directorSpec = director, renderSpec = render)
-            latestDirectorSpec = director
-            Result.success(validated)
-        } catch (t: Throwable) {
-            activeJobId?.let { id -> scope.launch { server.cancel(id) } }
-            activeJobId = null
-            latestDirectorSpec = null
-            Result.failure(t)
-        }
+        return Result.failure(UnsupportedOperationException(
+            "Sierra Server account is connected, but server-only v11 photographic authority is not qualified; use Sierra beta or configure Gemini"
+        ))
     }
 
     override suspend fun validatePreShutter(
@@ -95,7 +73,7 @@ class SierraServerVlmRuntime(
         directGemini.setMaxImageDimension(maxImageDimension)
         directGemini.validatePreShutter(image, originalPlan, camera, validationContext, capabilities)
     } else Result.failure(UnsupportedOperationException(
-        "Connected Sierra Server does not expose v11 pre-shutter validation in this client; local beta must take over safely"
+        "Connected Sierra Server does not expose v11 pre-shutter validation in this client"
     ))
 
     override suspend fun evaluate(
@@ -148,11 +126,11 @@ class SierraServerVlmRuntime(
     }
     override fun setStreamProgressListener(listener: ((VlmStreamProgress) -> Unit)?) { directGemini.setStreamProgressListener(listener) }
     override fun cancel() = cancelCloudJob()
-    override fun isReady(): Boolean = geminiKeyStore.isConfigured() || (server.configured && server.authenticated)
+    override fun isReady(): Boolean = geminiKeyStore.isConfigured()
     override fun waitForSemanticPlan(): Boolean = true
     override fun supportsPreShutterValidation(): Boolean = geminiKeyStore.isConfigured()
     override fun supportsFinalReview(): Boolean = false
-    override fun diagnostics(): VlmDiagnostics = if (geminiKeyStore.isConfigured()) directGemini.diagnostics() else VlmDiagnostics("sierra_server")
+    override fun diagnostics(): VlmDiagnostics = if (geminiKeyStore.isConfigured()) directGemini.diagnostics() else VlmDiagnostics("sierra_server_v11_unqualified")
     override fun lastDirectorSpec(): SierraDirectorSpec? = if (geminiKeyStore.isConfigured()) directGemini.lastDirectorSpec() else latestDirectorSpec
     override fun unload() = cancelCloudJob()
     override fun close() { cancelCloudJob(); directGemini.close(); scope.cancel() }
