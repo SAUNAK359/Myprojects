@@ -27,7 +27,7 @@ commands:
   stub-ui:
     steps:
       - run:
-          name: Stub Sierra UI for compile isolation
+          name: Stub Sierra UI and app shell for compile isolation
           command: |
             set -euo pipefail
             printf '%s\n' \
@@ -41,6 +41,16 @@ commands:
               'import androidx.compose.runtime.Composable' \
               '@Composable fun SierraVisionApp() = Unit' \
               > Director/app/src/main/java/com/saunak/director/ui/SierraVisionApp.kt
+            printf '%s\n' \
+              'package com.saunak.director' \
+              'import android.os.Bundle' \
+              'import androidx.activity.ComponentActivity' \
+              'class MainActivity : ComponentActivity() {' \
+              '  override fun onCreate(savedInstanceState: Bundle?) {' \
+              '    super.onCreate(savedInstanceState)' \
+              '  }' \
+              '}' \
+              > Director/app/src/main/java/com/saunak/director/MainActivity.kt
 
   compile-kotlin:
     steps:
@@ -69,8 +79,6 @@ jobs:
             SOURCE='Director/app/src/main/java'
             case "${CIRCLE_BRANCH:-}" in
               director-sierra-v10-cognition|director-sierra-v11-memory-anip-fix)
-                # v10/v11 BYOK builds permit exactly one direct Gemini path. Credentials must be
-                # user-entered at runtime, Android-Keystore encrypted, and never compiled into APK.
                 FORBIDDEN='api\.groq\.com|openrouter\.ai|integrate\.api\.nvidia\.com|SecureApiKeyStore|AiProviderPreset|MultiProviderVlmRuntime|NvidiaNemotronVlmRuntime'
                 if grep -RniE "$FORBIDDEN" "$SOURCE"; then
                   echo 'ERROR: unsupported direct AI provider path found in Sierra.'
@@ -96,7 +104,6 @@ jobs:
                   echo 'ERROR: Gemini credential must not be compiled into BuildConfig or source.'
                   exit 1
                 fi
-                # v11 production authority invariants.
                 if [ "${CIRCLE_BRANCH:-}" = 'director-sierra-v11-memory-anip-fix' ]; then
                   test -f Director/app/src/main/java/com/saunak/director/director/PreShutterAuthority.kt
                   test -f Director/app/src/main/java/com/saunak/director/processing/RenderSafetyGate.kt
