@@ -26,10 +26,14 @@ class PhotoRepository(private val context: Context) {
     private val attemptDir = File(context.cacheDir, "sierra_attempts").apply { mkdirs() }
     private val comparisonDir = File(context.cacheDir, "sierra_compare").apply { mkdirs() }
     @Volatile private var lastComparisonReferencePath: String? = null
+    @Volatile private var lastRenderSafetyStatus: String? = null
 
     fun newPendingReference(sessionId: Long): File = File(pendingDir, "reference_${sessionId}_${System.currentTimeMillis()}.jpg")
     fun newAttempt(sessionId: Long, index: Int): File = File(attemptDir, "attempt_${sessionId}_${index}_${System.nanoTime()}.jpg")
     fun hasWorkingSpace(requiredBytes: Long = 96L * 1024L * 1024L): Boolean = runCatching { StatFs(context.filesDir.absolutePath).availableBytes >= requiredBytes }.getOrDefault(true)
+
+    internal fun recordRenderSafetyStatus(status: String) { lastRenderSafetyStatus = status }
+    fun consumeRenderSafetyStatus(): String? = lastRenderSafetyStatus.also { lastRenderSafetyStatus = null }
 
     suspend fun decodeOriented(file: File, maxDimension: Int = AI_DECODE_MAX_DIMENSION): Bitmap = withContext(Dispatchers.IO) {
         require(maxDimension >= 256) { "Invalid decode bound" }
