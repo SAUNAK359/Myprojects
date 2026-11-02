@@ -1,4 +1,4 @@
-name: Build Director APK
+name: Director Android Qualification
 
 on:
   push:
@@ -12,7 +12,6 @@ on:
       - director-sierra-v8-anip
       - director-sierra-v10-cognition
       - director-sierra-v10-demo-photographic-engine
-      - director-sierra-v11-memory-anip-fix
     paths:
       - 'Director/**'
       - '.github/workflows/director-android.yml'
@@ -23,6 +22,12 @@ on:
       - 'Director/**'
       - '.github/workflows/director-android.yml'
   workflow_dispatch:
+    inputs:
+      release_qualification:
+        description: 'Build and verify signed release APK/AAB'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -34,6 +39,7 @@ concurrency:
 jobs:
   build-debug-apk:
     name: Test, lint and build debug APK
+    if: github.event_name != 'workflow_dispatch' || inputs.release_qualification == false
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
@@ -83,21 +89,13 @@ jobs:
 
       - name: Compile Kotlin first
         shell: bash
-        run: |
-          set -euo pipefail
-          ./gradlew --no-daemon --stacktrace --max-workers=3 compileDebugKotlin
+        run: ./gradlew --no-daemon --stacktrace --max-workers=3 compileDebugKotlin
 
       - name: Unit tests, lint and APK build
         shell: bash
         run: |
           set -euo pipefail
-          ./gradlew \
-            --no-daemon \
-            --stacktrace \
-            --max-workers=4 \
-            testDebugUnitTest \
-            lintDebug \
-            assembleDebug
+          ./gradlew --no-daemon --stacktrace --max-workers=4 testDebugUnitTest lintDebug assembleDebug
 
       - name: Verify APK
         shell: bash
@@ -128,6 +126,112 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Director-build-diagnostics
+          path: |
+            Director/app/build/reports/**
+            Director/app/build/test-results/**
+          if-no-files-found: ignore
+          retention-days: 3
+
+  build-release:
+    name: Signed release APK/AAB qualification
+    if: github.event_name == 'workflow_dispatch' && inputs.release_qualification == true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+      CI: 'true'
+      CM_KEYSTORE_PASSWORD: ${{ secrets.DIRECTOR_KEYSTORE_PASSWORD }}
+      CM_KEY_ALIAS: ${{ secrets.DIRECTOR_KEY_ALIAS }}
+      CM_KEY_PASSWORD: ${{ secrets.DIRECTOR_KEY_PASSWORD }}
+
+    defaults:
+      run:
+        working-directory: Director
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17 + Gradle cache
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+          cache-dependency-path: |
+            Director/**/*.gradle*
+            Director/gradle.properties
+            Director/settings.gradle.kts
+
+      - name: Configure Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -d "$ANDROID_SDK_ROOT/platforms/android-36"
+          test -x "$ANDROID_SDK_ROOT/build-tools/36.0.0/apksigner"
+          printf 'sdk.dir=%s\n' "$ANDROID_SDK_ROOT" > local.properties
+          chmod +x gradlew
+
+      - name: Materialize signing keystore
+        shell: bash
+        env:
+          DIRECTOR_KEYSTORE_BASE64: ${{ secrets.DIRECTOR_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          test -n "${DIRECTOR_KEYSTORE_BASE64:-}"
+          test -n "${CM_KEYSTORE_PASSWORD:-}"
+          test -n "${CM_KEY_ALIAS:-}"
+          test -n "${CM_KEY_PASSWORD:-}"
+          KEYSTORE="$RUNNER_TEMP/director-release.jks"
+          printf '%s' "$DIRECTOR_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE"
+          test -s "$KEYSTORE"
+          echo "CM_KEYSTORE_PATH=$KEYSTORE" >> "$GITHUB_ENV"
+          keytool -list -keystore "$KEYSTORE" -storepass "$CM_KEYSTORE_PASSWORD" -alias "$CM_KEY_ALIAS" >/dev/null
+
+      - name: Release tests and lint
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew --no-daemon --stacktrace --max-workers=4 testDebugUnitTest lintRelease
+
+      - name: Build signed release APK and AAB
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew --no-daemon --stacktrace --max-workers=4 assembleRelease bundleRelease
+
+      - name: Verify signed release artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="$(find app/build/outputs/apk/release -type f -name '*.apk' -print -quit)"
+          AAB="$(find app/build/outputs/bundle/release -type f -name '*.aab' -print -quit)"
+          test -n "$APK" && test -s "$APK"
+          test -n "$AAB" && test -s "$AAB"
+          "$ANDROID_SDK_ROOT/build-tools/36.0.0/apksigner" verify --verbose --print-certs "$APK"
+          "$ANDROID_SDK_ROOT/build-tools/36.0.0/zipalign" -c -P 16 -v 4 "$APK" >/dev/null
+          jarsigner -verify -strict "$AAB" >/dev/null
+          unzip -t "$APK" >/dev/null
+          unzip -t "$AAB" >/dev/null
+          mkdir -p "$GITHUB_WORKSPACE/release-artifacts"
+          cp "$APK" "$GITHUB_WORKSPACE/release-artifacts/Director-release.apk"
+          cp "$AAB" "$GITHUB_WORKSPACE/release-artifacts/Director-release.aab"
+          sha256sum "$GITHUB_WORKSPACE/release-artifacts/Director-release.apk" "$GITHUB_WORKSPACE/release-artifacts/Director-release.aab" | tee "$GITHUB_WORKSPACE/release-artifacts/SHA256SUMS.txt"
+
+      - name: Upload signed release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Director-signed-release
+          path: release-artifacts/**
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload release diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Director-release-diagnostics
           path: |
             Director/app/build/reports/**
             Director/app/build/test-results/**
