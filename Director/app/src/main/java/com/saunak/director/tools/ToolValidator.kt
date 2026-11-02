@@ -7,8 +7,10 @@ import com.saunak.director.director.ToolCall
 import kotlin.math.roundToInt
 
 /**
- * Physical/API feasibility validator. It normalizes only to real device bounds; it does not make
- * creative choices or reject direct Sierra controls merely because an OEM extension is active.
+ * Physical/API feasibility validator. Sierra v11 MVP deliberately rejects OEM extension execution:
+ * CameraX extension sessions do not expose the analysis stream required by the deterministic Live
+ * Director. Extensions stay discoverable as device capability, but they cannot own the active v11
+ * capture session until a device-qualified dual-session/analysis-safe path exists.
  */
 class ToolValidator {
     data class Rejection(val call: ToolCall, val reason: String)
@@ -22,17 +24,13 @@ class ToolValidator {
 
         val duplicateCameraIds = calls.filter { it.id in ToolIds.CAMERA_IDS }.groupBy { it.id }.filterValues { it.size > 1 }.keys
         val looks = calls.filter { it.id in ToolIds.LOOK_IDS }
-        val extensionCall = calls.firstOrNull { it.id == ToolIds.EXTENSION }
-        val nonNoneExtension = DirectorExtension.fromWire(extensionCall?.stringValue)?.takeIf { it != DirectorExtension.NONE }
-        val directControls = calls.filter { it.id in ToolIds.CAMERA_IDS && it.id != ToolIds.EXTENSION }
         val flashOn = calls.any { it.id == ToolIds.FLASH && it.stringValue != StillFlashMode.OFF.wireName }
         val torchOn = calls.any { it.id == ToolIds.TORCH && (it.value ?: 0.0) >= .5 }
 
-        if (duplicateCameraIds.isNotEmpty() || looks.size > 1 || (nonNoneExtension != null && directControls.isNotEmpty()) || (flashOn && torchOn)) {
+        if (duplicateCameraIds.isNotEmpty() || looks.size > 1 || (flashOn && torchOn)) {
             calls.forEach { call ->
                 val ambiguous = call.id in duplicateCameraIds ||
                     (looks.size > 1 && call.id in ToolIds.LOOK_IDS) ||
-                    (nonNoneExtension != null && call.id in ToolIds.CAMERA_IDS) ||
                     ((flashOn && torchOn) && call.id in setOf(ToolIds.FLASH, ToolIds.TORCH))
                 if (ambiguous) rejected += Rejection(call, "ambiguous_plan")
             }
@@ -40,6 +38,10 @@ class ToolValidator {
 
         for (call in calls) {
             if (rejected.any { it.call === call || it.call == call }) continue
+            if (call.id == ToolIds.EXTENSION) {
+                rejected += Rejection(call, "oem_extension_disabled_for_v11_live_director")
+                continue
+            }
             if (call.id !in caps.allowedToolIds && call.id !in ToolIds.LOOK_IDS) {
                 rejected += Rejection(call, "unsupported_tool")
                 continue
@@ -63,11 +65,7 @@ class ToolValidator {
                     else call.copy(value = if (call.value!! >= 0.5) 1.0 else 0.0)
                 ToolIds.FLASH -> if (!caps.hasFlash) null
                     else StillFlashMode.fromWire(call.stringValue)?.let { call.copy(stringValue = it.wireName) }
-                ToolIds.EXTENSION -> {
-                    val extension = DirectorExtension.fromWire(call.stringValue)
-                    val supported = extension != null && (extension == DirectorExtension.NONE || extension in caps.extensions)
-                    if (!supported) null else call.copy(stringValue = extension!!.wireName)
-                }
+                ToolIds.EXTENSION -> null
                 in ToolIds.LOOK_IDS -> if (call.value == null || finite(call.value)) call.copy(value = call.value?.coerceIn(0.0, 1.0)) else null
                 else -> null
             }
