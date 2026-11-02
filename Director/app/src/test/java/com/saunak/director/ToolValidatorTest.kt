@@ -37,7 +37,7 @@ class ToolValidatorTest {
         assertEquals(-.5, result.accepted.single().value!!, .0001)
     }
 
-    @Test fun extensionAndDirectControlsFailClosedAsAmbiguous() {
+    @Test fun extensionRequestIsRejectedWhileSafeDirectControlsRemainExecutable() {
         val result = ToolValidator().validate(
             listOf(
                 ToolCall(ToolIds.ZOOM, value = 2.0),
@@ -46,8 +46,9 @@ class ToolValidatorTest {
                 ToolCall(ToolIds.FLASH, stringValue = "off"),
                 ToolCall(ToolIds.EXTENSION, stringValue = "hdr")
             ), caps)
-        assertTrue(result.accepted.none { it.id in ToolIds.CAMERA_IDS })
-        assertTrue(result.rejected.count { it.reason == "ambiguous_plan" } == 5)
+        assertEquals(4, result.accepted.count { it.id in ToolIds.CAMERA_IDS })
+        assertTrue(result.accepted.none { it.id == ToolIds.EXTENSION })
+        assertEquals(1, result.rejected.count { it.call.id == ToolIds.EXTENSION && it.reason == "oem_extension_disabled_for_v11_live_director" })
     }
 
     @Test fun flashAndTorchConflictFailsClosedRatherThanChoosingCreatively() {
@@ -56,12 +57,18 @@ class ToolValidatorTest {
         assertEquals(2, result.rejected.count { it.reason == "ambiguous_plan" })
     }
 
-    @Test fun explicitExtensionReleaseAllowsDirectControlPlanToBeValidated() {
+    @Test fun explicitExtensionReleaseIsRejectedButDirectControlStillValidates() {
         val active = caps.copy(activeExtension = DirectorExtension.HDR)
         val result = ToolValidator().validate(listOf(ToolCall(ToolIds.ZOOM, value = 2.0), ToolCall(ToolIds.EXTENSION, stringValue = "none")), active)
-        assertTrue(result.rejected.isEmpty())
         assertTrue(result.accepted.any { it.id == ToolIds.ZOOM && it.value == 2.0 })
-        assertTrue(result.accepted.any { it.id == ToolIds.EXTENSION && it.stringValue == "none" })
+        assertTrue(result.accepted.none { it.id == ToolIds.EXTENSION })
+        assertEquals(1, result.rejected.count { it.call.id == ToolIds.EXTENSION && it.reason == "oem_extension_disabled_for_v11_live_director" })
+    }
+
+    @Test fun standaloneOemExtensionIsRejectedInV11() {
+        val result = ToolValidator().validate(listOf(ToolCall(ToolIds.EXTENSION, stringValue = "hdr")), caps)
+        assertTrue(result.accepted.isEmpty())
+        assertEquals(1, result.rejected.count { it.reason == "oem_extension_disabled_for_v11_live_director" })
     }
 
     @Test fun rejectsUnknownToolAndMultipleLegacyLooksAsAmbiguous() {
